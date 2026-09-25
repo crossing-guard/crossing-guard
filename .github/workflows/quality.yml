@@ -1,0 +1,69 @@
+name: Source checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: |
+            go.sum
+            analyzers/php/go.sum
+            analyzers/javascript/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install search prerequisite
+        run: command -v rg >/dev/null || brew install ripgrep
+      - name: Run complete gate
+        run: bash scripts/check.sh
+      - name: Build framework and external analyzers
+        run: |
+          mkdir -p bin
+          go build -mod=readonly -o bin/crossing-guard ./cmd/crossing-guard
+          (cd analyzers/php && go build -mod=readonly -o ../../bin/crossing-guard-analyzer-php .)
+          (cd analyzers/javascript && go build -mod=readonly -o ../../bin/crossing-guard-analyzer-javascript .)
+  dco:
+    name: Contribution sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check each proposed commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          commits = git('rev-list', os.environ['BASE_SHA'] + '..' + os.environ['HEAD_SHA']).splitlines()
+          failed = []
+          for commit in commits:
+              author = git('show', '-s', '--format=%ae', commit).lower()
+              message = git('show', '-s', '--format=%B', commit)
+              emails = re.findall(r'^Signed-off-by: [^<>\n]+ <([^<>\s]+@[^<>\s]+)>\s*$', message, re.M | re.I)
+              if author not in [email.lower() for email in emails]:
+                  failed.append(commit[:12])
+          if failed:
+              raise SystemExit('Missing author sign-off: ' + ', '.join(failed) + '. See CONTRIBUTING.md.')
+          print('Author sign-off present on', len(commits), 'proposed commits.')
+          PYTHON

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1-draft",
+  "id": "rqp_01JABCDEFGH",
+  "runtime": "codex",
+  "integration_surface": "app-server-stdio",
+  "execution_host": "user-device",
+  "model_provider": "openai",
+  "authentication_owner": "native-runtime",
+  "authentication_mode": "chatgpt-managed",
+  "billing_mode": "user-subscription",
+  "prompt_sender": "native-runtime",
+  "credential_visibility": "opaque-to-product",
+  "data_destinations": ["openai"],
+  "fallback_allowed": false,
+  "allowed_fallback_path_ids": ["rqp_01JZZZZZZZZ"],
+  "policy_revision": "local-default-1"
+}

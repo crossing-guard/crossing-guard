@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:model-data-handling:0.1-draft",
+  "title": "Model data-handling record",
+  "description": "One sourced, dated claim about how a specific model, on a specific host/access path, handles inference data. Powers the trade-off explainer. A record is a per-(model, host, condition) posture, not a per-host verdict.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "provider",
+    "model",
+    "host",
+    "is_default",
+    "condition",
+    "data_handling",
+    "confidence",
+    "sources",
+    "verified_date"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1-draft" },
+    "id": { "$ref": "common.schema.json#/$defs/typedId" },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Model provider, e.g. anthropic, openai, meta, mistral."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Model id or family. '*' means all models from this provider on this host under this condition."
+    },
+    "host": {
+      "type": "string",
+      "enum": [
+        "provider-subscription",
+        "provider-api",
+        "aws-bedrock",
+        "gcp-vertex",
+        "azure",
+        "third-party-router",
+        "managed-no-log",
+        "self-hosted"
+      ],
+      "description": "Where inference runs / how it is accessed."
+    },
+    "is_default": {
+      "type": "boolean",
+      "description": "True if this posture applies with no special setting. False if 'condition' must be met to reach it."
+    },
+    "condition": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "The setting, flag, plan, or opt-in that this posture depends on, e.g. 'provider_data_share enabled'. Null if unconditional."
+    },
+    "data_handling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_access",
+        "stays_in_host_boundary",
+        "retained",
+        "retention_days",
+        "used_for_training",
+        "human_review"
+      ],
+      "properties": {
+        "provider_access": {
+          "type": "string",
+          "enum": ["none", "conditional", "full"],
+          "description": "Does the MODEL PROVIDER (not the host) receive the inference data."
+        },
+        "stays_in_host_boundary": {
+          "type": "boolean",
+          "description": "True if data stays within the accessing party's trust boundary (e.g. the customer's cloud account) and is not routed to the provider."
+        },
+        "retained": {
+          "type": "boolean",
+          "description": "Whether inference data is retained beyond the request by the host or provider."
+        },
+        "retention_days": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Retention window in days. 0 = ephemeral / not retained. Null = unknown or not disclosed."
+        },
+        "used_for_training": {
+          "type": "string",
+          "enum": ["no", "opt-out", "opt-in", "yes", "unknown"],
+          "description": "Whether inference data trains models by default. 'opt-out' = used unless the user disables; 'opt-in' = not used unless the user enables."
+        },
+        "human_review": {
+          "type": "string",
+          "enum": ["no", "possible", "yes", "unknown"]
+        }
+      }
+    },
+    "capability_note": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "Honest note on capability trade-off of choosing this path (e.g. 'local model ~70% of frontier on coding tasks'). The explainer must state the downside, not only the privacy benefit."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["vendor-doc", "reported", "inferred"],
+      "description": "Evidence tier. vendor-doc = primary vendor documentation; reported = credible third party; inferred = our reasoning. Mirrors the project's observed/reported/inferred discipline."
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "kind"],
+        "properties": {
+          "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "publisher": { "type": ["string", "null"], "maxLength": 256 },
+          "kind": {
+            "type": "string",
+            "enum": ["vendor-doc", "news", "community", "primary-legal"]
+          }
+        }
+      }
+    },
+    "verified_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date this record was last checked against its sources. Records older than a review interval are shown as stale."
+    },
+    "notes": { "type": ["string", "null"], "maxLength": 1024 }
+  }
+}

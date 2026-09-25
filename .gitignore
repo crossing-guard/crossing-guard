@@ -1,0 +1,5 @@
+# Documented local build output and disposable application state.
+/bin/
+/.crossing-guard/
+/release-artifacts/
+.DS_Store

@@ -1,0 +1,722 @@
+{
+  "date": "2026-09-17",
+  "scope": "Pinned source/build-input provenance; current-host import graph, not a final release SBOM or reproducible-build attestation.",
+  "graphs": [
+    {
+      "entrypoint": "main",
+      "goos": "darwin",
+      "goarch": "arm64",
+      "modules": [
+        "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+        "github.com/ncruces/go-sqlite3@v0.35.2",
+        "github.com/ncruces/julianday@v1.0.0",
+        "golang.org/x/image@v0.45.0",
+        "golang.org/x/sys@v0.47.0",
+        "gopkg.in/yaml.v3@v3.0.1"
+      ],
+      "cgo_packages": [],
+      "packages": [
+        "golang.org/x/sys/unix",
+        "github.com/ncruces/go-sqlite3-wasm/v3",
+        "github.com/ncruces/go-sqlite3/internal/errutil",
+        "github.com/ncruces/go-sqlite3/internal/sqlite3_wrap",
+        "github.com/ncruces/go-sqlite3/internal/testenv",
+        "github.com/ncruces/go-sqlite3/internal/util",
+        "github.com/ncruces/go-sqlite3/vfs",
+        "github.com/ncruces/julianday",
+        "github.com/ncruces/go-sqlite3",
+        "github.com/ncruces/go-sqlite3/driver",
+        "github.com/ncruces/go-sqlite3-wasm/v3/fts5",
+        "github.com/ncruces/go-sqlite3/ext/fts5",
+        "gopkg.in/yaml.v3",
+        "golang.org/x/image/riff",
+        "golang.org/x/image/vp8",
+        "golang.org/x/image/vp8l",
+        "golang.org/x/image/webp"
+      ]
+    },
+    {
+      "entrypoint": "php",
+      "goos": "darwin",
+      "goarch": "arm64",
+      "modules": [
+        "github.com/mattn/go-pointer@v0.0.1",
+        "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+        "github.com/tree-sitter/tree-sitter-php@v0.24.2"
+      ],
+      "cgo_packages": [
+        "runtime/cgo",
+        "github.com/mattn/go-pointer",
+        "github.com/tree-sitter/go-tree-sitter",
+        "github.com/tree-sitter/tree-sitter-php/bindings/go"
+      ],
+      "packages": [
+        "github.com/mattn/go-pointer",
+        "github.com/tree-sitter/go-tree-sitter",
+        "github.com/tree-sitter/tree-sitter-php/bindings/go"
+      ]
+    },
+    {
+      "entrypoint": "javascript",
+      "goos": "darwin",
+      "goarch": "arm64",
+      "modules": [
+        "github.com/mattn/go-pointer@v0.0.1",
+        "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+        "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+        "github.com/tree-sitter/tree-sitter-typescript@v0.23.2"
+      ],
+      "cgo_packages": [
+        "runtime/cgo",
+        "github.com/mattn/go-pointer",
+        "github.com/tree-sitter/go-tree-sitter",
+        "github.com/tree-sitter/tree-sitter-javascript/bindings/go",
+        "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
+      ],
+      "packages": [
+        "github.com/mattn/go-pointer",
+        "github.com/tree-sitter/go-tree-sitter",
+        "github.com/tree-sitter/tree-sitter-javascript/bindings/go",
+        "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
+      ]
+    }
+  ],
+  "embedded_notices": [
+    {
+      "source_path": "libc-gen/c/stb_sprintf.h",
+      "source_lines": [
+        1868,
+        1904
+      ],
+      "source_sha256": "e0b8c56e1084602290b9a17ef59f429b5293deb8cb9d8b0f20a14abc39b56520",
+      "path": "third_party/licenses/github.com/ncruces/wasm2go@v0.4.11/libc-gen/STB-SPRINTF-NOTICE.txt",
+      "sha256": "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+    },
+    {
+      "source_path": "libc-gen/c/malloc.c",
+      "source_lines": [
+        2,
+        21
+      ],
+      "source_sha256": "be7be56b40b4b31417e74e77687f9b96127ea6cae534cf236aee40a4c739508d",
+      "path": "third_party/licenses/github.com/ncruces/wasm2go@v0.4.11/libc-gen/DOUG-LEA-MALLOC-NOTICE.txt",
+      "sha256": "edb18b4197c8119814088f713fe38492e1fb22cb96d433522326e5890c24be0d"
+    },
+    {
+      "source_path": "src/portable/endian.h",
+      "source_lines": [
+        1,
+        5
+      ],
+      "source_sha256": "adf9c91b7776b25156dbc981d6cff31dd2a77a602b97f661e9e635cd34f502ae",
+      "path": "third_party/licenses/github.com/tree-sitter/go-tree-sitter@v0.25.0/src/portable/ENDIAN-NOTICE.txt",
+      "sha256": "fa48b416b4cb275f7110d7ea4a8ff1779077ee6da0b2c075a6038c0adb6b0481"
+    }
+  ],
+  "source_witnesses": [
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "README.md",
+      "sha256": "fb8084fccb5733ccc4af421ff026812da7852e91516bdf7c70d007eb46744383"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "go.mod",
+      "sha256": "a0193b38923f9f76eb81e0553e3809b26e21f360b0f1a973f07aaca101640247"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "build/download.sh",
+      "sha256": "9328f0a951038e1b6e98297f0448eb3a0be8fd3f1120a979b2c49cc07770b302"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "build/build.sh",
+      "sha256": "296656e45fea58a760eeafe4cce1f0c4ebca42dc0f1c62f264367c4f397a02fd"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "build/main.c",
+      "sha256": "f67f2e1324f3231785537ff4f41066b3b6ebb09ddb35c4684a8d4e6cccb64f7c"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "sqlite3.go",
+      "sha256": "619c63662a88b6afad01a45b86112245b1919d438f4262269f616e61cb4d69d4"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "sqlite3.dat",
+      "sha256": "064ea8f310513083fe411b3259cb92abe476442ac5d124a7236f1ca749e571a0"
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303",
+      "path": "libc.go",
+      "sha256": "704ce795069026b8fc1856200878ba55528027359fb8be52963047d5c29f6280"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/README.md",
+      "sha256": "2389307ff4152c1a8e81bbd266c1ff9fc6af2abe4774dc19d58bc104208df43c"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/c/libc.c",
+      "sha256": "c684f0ed0e66ab89d08cd600947b9109d17bd04fbc0dab0d5d9573d955716249"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/c/stdio.c",
+      "sha256": "7a5f7534ed45acf3c59dd73deb52a15d5c3778143a1e924c68026fdb1e8e1bd0"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/c/malloc_sbrk.c",
+      "sha256": "1f6b927c66d207c54696a67adcfcd8f0421717cce89ae01522e854120d202a2c"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/c/malloc.c",
+      "sha256": "be7be56b40b4b31417e74e77687f9b96127ea6cae534cf236aee40a4c739508d"
+    },
+    {
+      "module": "github.com/ncruces/wasm2go@v0.4.11",
+      "path": "libc-gen/c/stb_sprintf.h",
+      "sha256": "e0b8c56e1084602290b9a17ef59f429b5293deb8cb9d8b0f20a14abc39b56520"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "allocator.c",
+      "sha256": "d9a9904666a174e16ffde94964574f9b9755d8c81a2815b2396d8a59a520462f"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "allocator.h",
+      "sha256": "60704e7f200a76ba8c5e4f57715a5f48ce563ce731c615b1794d615545030d90"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "include/tree_sitter/api.h",
+      "sha256": "a363e2f2120178702374d8e34f8af9d3b7b2124a2c9e0cc33e57ded13db59b48"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/alloc.c",
+      "sha256": "c7d15b9015568f439af4adf28ead9e2bd14901221819276727c11227a29576da"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/alloc.h",
+      "sha256": "2ad7cc5391be8043ffdcc111b9b21b7767f592790fc8389acb6fcee7fd1acb61"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/array.h",
+      "sha256": "2ee1350009660a2dd5d116f9e9644d280f1703ef1c7b460d9d46a7f3dee1c816"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/atomic.h",
+      "sha256": "bbc630cb913ac64274ce4412bc9d504174220323993f306ded74abe502867e74"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/clock.h",
+      "sha256": "abd8fa83a805900f8e03b8b2b1abd47f9c7b8252f4401485c060348c407f5448"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/error_costs.h",
+      "sha256": "0e8d1a21e0d60981e762989108231df6610d95591892f631c6c78a9ef831a2ab"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/get_changed_ranges.c",
+      "sha256": "488d558e00412ebd244d6b69459e6d39e8c9d326afeff75ea7cc85ef02f7f4f9"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/get_changed_ranges.h",
+      "sha256": "f394bd0b6fce006be460fd16cbea3cc96e248c810a4d97e8830463c29c85e4a5"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/host.h",
+      "sha256": "e1982b9795b9c52b5ab564d8b9876189d65a97ca02f78351e1740b0985992fd2"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/language.c",
+      "sha256": "52bc642d7a5e944c30daa9e4e5a78150105ebde5bde90167adb64b8928bbe37d"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/language.h",
+      "sha256": "56e32fb53672609be6e8bfa7e6d0f92ef463fd53d2be910d169a07ee5f03df1b"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/length.h",
+      "sha256": "7fc186fb4bf50233059e8be9ca68efe95e66d34ced4b8a8f38f14497352faeb1"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/lexer.c",
+      "sha256": "56a418eb47351b85d8f73729fa756765e2d9b3c6873d6be8f240a2e7fad22431"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/lexer.h",
+      "sha256": "7d76308f7a2d3246a3e28fb27698be928f848130d1bfacc39f9f623127671b74"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/lib.c",
+      "sha256": "6bca070a6a70740c8e8af244af8a7311dbea09fbb60372376f5260facaf785f0"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/node.c",
+      "sha256": "bfe9c7867881142600ad48570ef345dbb2b25319e61e1e08c7a15cc519dcb6a6"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/parser.c",
+      "sha256": "5e8ae76a9ff12d09d22b1a489124061e82c686a4721470e42f0648c02401080c"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/parser.h",
+      "sha256": "11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/point.h",
+      "sha256": "0929027be2ff54627be560f3bafc1af59e81ac6d5a8d5864455601a0dbee50ff"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/portable/endian.h",
+      "sha256": "adf9c91b7776b25156dbc981d6cff31dd2a77a602b97f661e9e635cd34f502ae"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/query.c",
+      "sha256": "8c46dc807c99c10985dfba7fab314811ab78a32ddcf2efc62d1237fa1e7cf470"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/reduce_action.h",
+      "sha256": "8f40396e431d7ff558694ca248eed1332b6cf6f7e6255f06cddfde78020bd308"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/reusable_node.h",
+      "sha256": "10be747ea4c733ca181dc43d55d155ac8e5b8caa247079621cca0ce633347bfb"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/stack.c",
+      "sha256": "9cb3cefa0d345ad853db7db8a3aa06af22cf7356d3b12727b16b981f70e7fd79"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/stack.h",
+      "sha256": "2bbd54ad43def052af2eb449b789f6bbf87fc19c93dcd28633702ae1595ae7bb"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/subtree.c",
+      "sha256": "ff23ad91856c1e7d00e4eaff31233d22cb7a0e29fb722e07b7dff0c0d7d160d8"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/subtree.h",
+      "sha256": "9380a9984a3a071d6a32ed05f7fad8b8853afa991f0a36cc29ccb90f1e3a1a0f"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/tree.c",
+      "sha256": "ef55fd2d34daad7e43605ba0469f6c67a9afb31963077e9c73f2fb0478e254bb"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/tree.h",
+      "sha256": "60591fb35ca078a8bb323004ece0377ac4f4c6cdbd3c4473af6e2b97186e024b"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/tree_cursor.c",
+      "sha256": "b6f4a16944a5bde973da360d09401c778932e20b378e582b4af1ee1b0c103481"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/tree_cursor.h",
+      "sha256": "3e8d9671ab1397bcaeb3e0cbf153a61a99e214782b43c09e5cde5a01e8283a1a"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/ts_assert.h",
+      "sha256": "ac1ec4b7ba388a9d8708feeb6c5c766b2927cecfd6db644b939772e1dc086526"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/ptypes.h",
+      "sha256": "a87e9710c9cad7b08a945f4fb8b9d4629189897cc535f8ac927640c210a94b69"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/umachine.h",
+      "sha256": "2d79c0903d9e73e247b948bc0a12b6a785257ca0273bddab56fb59561f8d7391"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/urename.h",
+      "sha256": "a87e9710c9cad7b08a945f4fb8b9d4629189897cc535f8ac927640c210a94b69"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/utf.h",
+      "sha256": "a87e9710c9cad7b08a945f4fb8b9d4629189897cc535f8ac927640c210a94b69"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/utf16.h",
+      "sha256": "c370d9069f37fad2b53981c06dc648bbc21923db1655517a31bb237df4fba041"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode/utf8.h",
+      "sha256": "39651224b2ca2452359c7f3339f3cc0a841fe7db64f8a00c9c5ec19c0389645c"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/unicode.h",
+      "sha256": "6cf0ec5a54e72644e506cca20b854dc7c49249cb1cff0d806635a10c8efba340"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/wasm/stdlib.c",
+      "sha256": "043063df41a41f6598df26d9dc18581e622a58dfc92a796073459f2b6daf4ba6"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/wasm/wasm-stdlib.h",
+      "sha256": "805520eb9fb1e590a1470d740f5afa29cd48aa4f681b887d171cef13ad600aca"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/wasm_store.c",
+      "sha256": "8a75ab5bf0269cf2c885bc2fe537afa94ab811e32baef48110a11d917cff8215"
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter@v0.25.0",
+      "path": "src/wasm_store.h",
+      "sha256": "4f70d0500b0775e5d862a8e7d191b3853d73378c65e020e01767838a18debe0e"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "bindings/c/tree_sitter/tree-sitter-php.h",
+      "sha256": "98b86d8de485131052576e95b9a791f01ec36c5e4fabbfc2f463266a93aa0633"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "bindings/c/tree_sitter/tree-sitter-php_only.h",
+      "sha256": "42e403963bb5c204370437b38fab2a04bebc60e120265231fb429f5d7706a3d3"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "bindings/python/tree_sitter_php/binding.c",
+      "sha256": "b603cd8a2a468eb1be65d9f51237e5dbfecd2ae0cab4f76d95dc952d9f0f153a"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "bindings/swift/TreeSitterPHP/php.h",
+      "sha256": "93792117437e9497e650c56f7c5bdbcd85dcc8c476e3105b44b359acfe46d4a0"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "common/scanner.h",
+      "sha256": "de8eb36bc8f517ab9f3eaf82e3825d7b3e11b62e9471545f4c906100cfce0e07"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php/src/parser.c",
+      "sha256": "59ad8e5e4fde3fe60687a488ab8420612840cc966b83739af1b3a4317ed27ec6"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php/src/scanner.c",
+      "sha256": "58c92cafe4ebda509c3ad3864fa6fc0e9877bbac26e17a03d23ea2101c291ad5"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php/src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php/src/tree_sitter/parser.h",
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php_only/src/parser.c",
+      "sha256": "bc796948b625f74e390cfd1254392136c86fafbd2dc0c9d93360ec20bc6b0dfb"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php_only/src/scanner.c",
+      "sha256": "7a91ec341bef67f006e508f720edcd70b0d0eb73773584afa87ab7d12be25b14"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php_only/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php_only/src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php@v0.24.2",
+      "path": "php_only/src/tree_sitter/parser.h",
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "bindings/c/tree_sitter/tree-sitter-javascript.h",
+      "sha256": "4b1c5b04bf06cc5d19e743cee75ae271fbc604493ea36cab3b80af944af77ac2"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "bindings/python/tree_sitter_javascript/binding.c",
+      "sha256": "871d8022a047f015458fcea5b3f7ab0a22b9a9a0461ac00150322d7e6bffed25"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "bindings/swift/TreeSitterJavaScript/javascript.h",
+      "sha256": "4b1c5b04bf06cc5d19e743cee75ae271fbc604493ea36cab3b80af944af77ac2"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "src/parser.c",
+      "sha256": "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "src/scanner.c",
+      "sha256": "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript@v0.25.0",
+      "path": "src/tree_sitter/parser.h",
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "bindings/c/tree-sitter-tsx.h",
+      "sha256": "3e04f8aa2ec39e0d2f0df383fb2bb81a1b5543bc268e3e16d9fc653cf5f28fa0"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "bindings/c/tree-sitter-typescript.h",
+      "sha256": "4cb9b1b9fd0ddf646e945d53b5746beda59ca3e773b645b5748c4e5cd77b564c"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "bindings/python/tree_sitter_typescript/binding.c",
+      "sha256": "73501a1953754d44facedb230c1c8f5c3504aa37f834087747158e0d36b1ef21"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "bindings/swift/tsx/TreeSitterTSX/tsx.h",
+      "sha256": "11cd67fe06ca592585bc41db07973dfba3f12b2eea9f00b505a7acfcfb65615e"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "bindings/swift/typescript/TreeSitterTypeScript/typescript.h",
+      "sha256": "cec44d7f3030a71cc0ee169de547179acce36841c7c3db9d3f10e911b89028be"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "common/scanner.h",
+      "sha256": "da66ef2bd14a3f7ea743e25ba068c6c9aae2c3509db200ff80c4a0e6116e564c"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "tsx/src/parser.c",
+      "sha256": "1902cb53fa7ff5179df89b2eea863165e84c8cc866226419dc26921d8c055885"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "tsx/src/scanner.c",
+      "sha256": "d563cd30b2f39718c9ae4292795c5ce03a2ad01954ba3a86ef84c2781a736673"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "tsx/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "tsx/src/tree_sitter/array.h",
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "tsx/src/tree_sitter/parser.h",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "typescript/src/parser.c",
+      "sha256": "74fe453edd70f4eae9af0a1050cbd7943d8971d59165b6aaebbaa0a0b716d1aa"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "typescript/src/scanner.c",
+      "sha256": "9125013b42cb888379d9be909f1d73dfb75a37626c2cdbf4122718a2b431a6d3"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "typescript/src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "typescript/src/tree_sitter/array.h",
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1"
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript@v0.23.2",
+      "path": "typescript/src/tree_sitter/parser.h",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    }
+  ],
+  "sqlite": {
+    "version": "3.53.3",
+    "archive_sha3_256": "98f2b3f3c11be6a03ea32346937b032c2472ebbd7a716bed36ca2f5693e7ce8b",
+    "archive_matches_upstream_build_pin": true,
+    "sources": [
+      {
+        "path": "sqlite3.c",
+        "url": "https://sqlite.org/2026/sqlite-autoconf-3530300.tar.gz",
+        "sha256": "87497ab605bedd0dbee27a209c1eeff8c89b229b13f921a7efdbb81a13f779fd",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/sqlite3.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            35,
+            41
+          ]
+        }
+      },
+      {
+        "path": "ext/misc/decimal.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/ext/misc/decimal.c",
+        "sha256": "d4d75ad3f33212dd74bdc1550044c3524a1e7c75b1cb71ae500bda1f1421b5d0",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/ext_misc_decimal.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "ext/misc/ieee754.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/ext/misc/ieee754.c",
+        "sha256": "3590427a41bdf476b119c77ae85a179785b0e9c548fd543ae084422b3ff043b5",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/ext_misc_ieee754.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "ext/misc/regexp.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/ext/misc/regexp.c",
+        "sha256": "3e3b176b31047ea01e5ec0653e5806a09f912ba0e9648f93ab33e34a5ec3e18e",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/ext_misc_regexp.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "ext/misc/series.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/ext/misc/series.c",
+        "sha256": "299d996e1c37653734d740cad0670316e84f6f7a9bcfffe6b2ee15e7fda4ca3c",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/ext_misc_series.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "ext/misc/uint.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/ext/misc/uint.c",
+        "sha256": "f30401ca32ed58efad924d31d92bf9e163d3c3214756d60cbc09bcf6b8220c37",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/ext_misc_uint.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "mptest/mptest.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/mptest/mptest.c",
+        "sha256": "e8d5b5bf2a84d428b0115283383a9a42c865d3b65ca7aae35241a8f124448913",
+        "notice": {
+          "path": "third_party/upstream/sqlite-3.53.3/mptest_mptest.c.NOTICE.txt",
+          "sha256": "7ba39c32af28155248da75313e83f17a429d9a4cf2ef691b092527d6b2d37b77",
+          "source_lines": [
+            4,
+            10
+          ]
+        }
+      },
+      {
+        "path": "test/speedtest1.c",
+        "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.53.3/test/speedtest1.c",
+        "sha256": "b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675"
+      }
+    ]
+  },
+  "limits": [
+    "No exact regeneration and byte comparison of upstream generated Go outputs.",
+    "Final binaries, Go toolchain and platform libraries must be inventoried for each released target.",
+    "STB is generator-bundled; reviewed SQLite stdio branch uses SQLite formatting; STB linkage not claimed.",
+    "Project logo/source authorship review and installed runtime journey remain separate."
+  ]
+}

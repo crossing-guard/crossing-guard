@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:memory:1.0",
+  "title": "Shared memory dossier (ADR 0013 record on the wire)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "slug",
+    "revision",
+    "scope",
+    "title",
+    "category",
+    "body",
+    "source",
+    "created_at",
+    "updated_at",
+    "author",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,99}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "repository",
+            "organization"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "repository_identity": {
+      "type": "string",
+      "enum": [
+        "weak",
+        "remote-sha256"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "convention",
+        "gotcha",
+        "bug-fix",
+        "architecture",
+        "how-to",
+        "incident",
+        "preference",
+        "business-rule",
+        "tech-stack",
+        "note"
+      ]
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200000
+    },
+    "tags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "human",
+        "agent",
+        "import",
+        "harvest"
+      ]
+    },
+    "origin": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "superseded_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 100
+    },
+    "verified_at": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verified_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 255
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "author": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "content_hash": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    }
+  }
+}

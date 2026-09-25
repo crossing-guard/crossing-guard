@@ -1,0 +1,5 @@
+{
+  "format_version": 1,
+  "import_min_interval_seconds": 300,
+  "import_on_session_end": true
+}

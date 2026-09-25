@@ -1,0 +1,10 @@
+{
+  "_comment": "Opt-in public alpha safety starter. Five command/canary rules; no workflow or conversational policy. Command matching is best-effort and does not replace backups, review, or branch protection.",
+  "rules": [
+    {"id":"destructive-rm","intent":"recursive force-delete can destroy work irrecoverably","action":"deny","message":"recursive force-delete can destroy work irrecoverably","backstop":"none","if":{"tag":"command","matches":"\\brm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\\s+-f|-f\\s+-r)\\b"}},
+    {"id":"curl-pipe-shell","intent":"piping a download straight into a shell executes unreviewed remote code","action":"deny","message":"piping a download straight into a shell executes unreviewed remote code","backstop":"none","if":{"tag":"command","matches":"\\b(curl|wget)\\b[^|]*\\|\\s*(sudo\\s+)?(ba)?sh\\b"}},
+    {"id":"git-force-push","intent":"force push can discard published history for everyone","action":"ask","message":"force push can discard published history for everyone","backstop":"remote-branch-protection","if":{"tag":"command","matches":"\\bgit\\s+push\\b.*(--force\\b|--force-with-lease\\b|\\s-f\\b)"}},
+    {"id":"git-hard-reset","intent":"hard reset / clean -fd discards uncommitted work with no undo","action":"ask","message":"hard reset / clean -fd discards uncommitted work with no undo","backstop":"none","if":{"tag":"command","matches":"\\bgit\\s+(reset\\s+--hard|clean\\s+-[a-zA-Z]*f)"}},
+    {"id":"canary-deny","intent":"the proof mechanism: demo and hook verification send this marker through the real hook; deleting it disables the demo only","action":"deny","message":"canary blocked — enforcement is live (this is the verification marker, not a real command)","backstop":"none","if":{"tag":"command","matches":"\\bcrossing-guard-canary\\b"}}
+  ]
+}

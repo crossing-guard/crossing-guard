@@ -1,0 +1,43 @@
+{
+  "_comment": "P5 policy — the severity LADDER per rule (design §7): hard-block (non-overridable, Restricted classes) / confirm-and-record (override attributed+logged, does NOT un-taint) / warn-and-proceed / silent-log. Rules run at a STOP-reach channel (PreToolUse), so a block here is HONEST — no reach downgrade. The resolution menu offered is keyed to the condition's flippable terms AND the channel's live capabilities (redact only where output-redaction exists; route only where we own a gateway).",
+  "capabilities": {
+    "_comment": "what the current channel can actually do — drives which resolutions are LIVE vs greyed, honestly",
+    "stop": true,
+    "redact_available": false,
+    "gateway_available": false
+  },
+  "rules": [
+    {
+      "id": "credentials-hard-block",
+      "mode": "hard-block",
+      "if": { "all": [ { "tag": "data-class", "value": "credential-material" } ] },
+      "then": "block",
+      "message": "credential material must never leave — Restricted class, non-overridable"
+    },
+    {
+      "id": "pii-to-noncompliant-endpoint",
+      "mode": "confirm-and-record",
+      "if": { "all": [ { "tag": "data-class", "value": "personal-data" },
+                       { "tag": "endpoint-class", "value": "non-compliant" } ] },
+      "then": "block",
+      "flippable": { "endpoint-class": "route", "data-class": "redact" },
+      "message": "personal data heading to a non-PII-compliant endpoint"
+    },
+    {
+      "id": "external-egress-of-internal",
+      "mode": "confirm-and-record",
+      "if": { "all": [ { "tag": "data-class", "value": "internal" },
+                       { "tag": "destination-class", "value": "external" } ] },
+      "then": "block",
+      "flippable": { "destination-class": "route" },
+      "message": "internal business data heading to an external destination"
+    },
+    {
+      "id": "regulated-touch-warn",
+      "mode": "warn-and-proceed",
+      "if": { "all": [ { "tag": "data-class", "value": "regulated" } ] },
+      "then": "warn",
+      "message": "regulated (finance) data in play — proceeding, logged"
+    }
+  ]
+}

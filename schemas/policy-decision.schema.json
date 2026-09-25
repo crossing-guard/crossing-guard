@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:policy-decision:0.1-draft",
+  "title": "Policy evaluation decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "evaluated_at",
+    "session_id",
+    "actor",
+    "capability",
+    "resource",
+    "decision",
+    "rule_id",
+    "policy_revision",
+    "enforcement",
+    "reason",
+    "failure_mode"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1-draft" },
+    "id": { "$ref": "common.schema.json#/$defs/typedId" },
+    "evaluated_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "session_id": { "$ref": "common.schema.json#/$defs/typedId" },
+    "actor": { "$ref": "common.schema.json#/$defs/actor" },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+    },
+    "resource": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "arguments_hash": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/sha256" },
+        { "type": "null" }
+      ]
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["allow", "deny", "require-approval", "allow-with-constraints", "quarantine", "stop-session"]
+    },
+    "rule_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "policy_revision": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "enforcement": {
+      "type": "string",
+      "enum": ["enforced", "partially-enforced", "advisory", "unsupported"]
+    },
+    "enforcement_point": { "type": ["string", "null"], "maxLength": 255 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "constraints": { "type": "object" },
+    "incident_action": {
+      "type": "string",
+      "enum": ["none", "notify", "suspend-session", "stop-session", "quarantine-session"]
+    },
+    "failure_mode": { "type": "string", "enum": ["open", "closed"] },
+    "approval_id": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/typedId" },
+        { "type": "null" }
+      ]
+    }
+  }
+}

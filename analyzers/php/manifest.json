@@ -1,0 +1,12 @@
+{
+  "format_version": "crossing-guard-analyzer-manifest-v1",
+  "module_id": "org.crossing-guard.php",
+  "module_version": "0.1.1",
+  "protocol_version": "crossing-guard-analyzer-stream-v1",
+  "entrypoint": "bin/crossing-guard-analyzer-php",
+  "analyzer_identity": "php-tree-sitter-v2",
+  "languages": ["php"],
+  "extensions": [".php"],
+  "capabilities": ["package_dependency", "symbol_declaration", "responsibility_fingerprint", "symbol_call"],
+  "body_shape_algorithms": ["php-tree-shape-v1"]
+}

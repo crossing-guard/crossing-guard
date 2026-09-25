@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1-draft",
+  "id": "mdh_01JBEDR0CKA8",
+  "provider": "anthropic",
+  "model": "claude-opus-4-8",
+  "host": "aws-bedrock",
+  "is_default": true,
+  "condition": null,
+  "data_handling": {
+    "provider_access": "none",
+    "stays_in_host_boundary": true,
+    "retained": false,
+    "retention_days": 0,
+    "used_for_training": "no",
+    "human_review": "no"
+  },
+  "capability_note": "Frontier-tier coding capability; no capability sacrifice relative to the same model via the provider API.",
+  "confidence": "vendor-doc",
+  "sources": [
+    {
+      "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/data-protection.html",
+      "publisher": "AWS",
+      "kind": "vendor-doc"
+    },
+    {
+      "url": "https://aws.amazon.com/bedrock/security-privacy-responsible-ai/",
+      "publisher": "AWS",
+      "kind": "vendor-doc"
+    }
+  ],
+  "verified_date": "2026-07-13",
+  "notes": "Model runs in an AWS-operated Model Deployment Account; the provider has no access to prompts, completions, or Bedrock logs. Holds for prior-generation Bedrock models; see the Fable 5 / Mythos 5 carve-out record for the exception."
+}

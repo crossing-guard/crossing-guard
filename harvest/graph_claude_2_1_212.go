@@ -1,0 +1,137 @@
+package harvest
+
+// Claude observed lineage and edges. Child transcripts live at
+// <slug>/<parentSessionId>/subagents/agent-<agentId>.jsonl beside an optional
+// agent-<agentId>.meta.json ({agentType, description, toolUseId, spawnDepth}).
+// The main collect scan deliberately keeps skipping these directories: child
+// transcripts stay out of the top-level catalog; lineage only ENUMERATES them.
+// (Folding them in would let the search-index projection silently attribute
+// child output to the parent — graph design review §2.5.)
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const claudeSubagentsDirName = "subagents"
+
+type claudeSubagentMeta struct {
+	AgentType  string `json:"agentType"`
+	SpawnDepth int    `json:"spawnDepth"`
+}
+
+// claudeSubagentChildren enumerates a session's native children from one
+// bounded directory listing — no child transcript is parsed.
+func claudeSubagentChildren(s SessionSummary) []LineageChild {
+	dir := filepath.Join(filepath.Dir(s.Path), s.ID, claudeSubagentsDirName)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var children []LineageChild
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		child := LineageChild{
+			ID:   strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl"),
+			Kind: "native-subagent",
+		}
+		// The sidecar carries vendor-published labels; absent one, the child
+		// stays unlabeled — nothing is inferred from the prompt or transcript.
+		if raw, err := os.ReadFile(filepath.Join(dir, "agent-"+child.ID+".meta.json")); err == nil {
+			var meta claudeSubagentMeta
+			if json.Unmarshal(raw, &meta) == nil {
+				child.Role = meta.AgentType
+				child.Depth = meta.SpawnDepth
+			}
+		}
+		children = append(children, child)
+	}
+	return children
+}
+
+func (claudeRuntime) Lineage(s SessionSummary) (LineageFacts, bool) {
+	facts := LineageFacts{Provenance: EdgeProvenanceObserved}
+	// Child side: the path layout itself is the vendor's lineage statement.
+	// (Child records carry the PARENT's sessionId, so the inner id must never
+	// be trusted for identity — the same hazard the codex split fixes.)
+	if dir := filepath.Dir(s.Path); filepath.Base(dir) == claudeSubagentsDirName {
+		facts.Parent = EdgeEndpoint{Runtime: s.Runtime, ID: filepath.Base(filepath.Dir(dir))}
+		facts.Kind = "native-subagent"
+	}
+	facts.Children = claudeSubagentChildren(s)
+	if facts.Parent.ID == "" && len(facts.Children) == 0 {
+		return LineageFacts{}, false
+	}
+	return facts, true
+}
+
+func (claudeRuntime) TurnAnchor(_ SessionSummary, e CanonicalEvent) (string, bool) {
+	return e.TurnAnchor, e.TurnAnchor != ""
+}
+
+// Edges derives observed edges from one parent transcript: spawned from
+// toolUseResult{status:"async_launched", agentId} records, messaged from
+// SendMessage tool_use records. Lazy, per-session.
+func (runtime claudeRuntime) Edges(s SessionSummary) ([]Edge, error) {
+	f, err := os.Open(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	self := EdgeEndpoint{Runtime: s.Runtime, ID: runtime.CanonicalID(s)}
+	// Known child ids resolve SendMessage recipients; built once, one listing.
+	childIDs := map[string]bool{}
+	for _, child := range claudeSubagentChildren(s) {
+		childIDs[child.ID] = true
+	}
+	collector := newEdgeCollector()
+	sc := newLineScanner(f)
+	for sc.Scan() {
+		var obj map[string]any
+		if json.Unmarshal(sc.Bytes(), &obj) != nil {
+			continue
+		}
+		obs := EdgeObservation{Ts: anyString(obj["timestamp"])}
+		if anchor, ok := obj["uuid"].(string); ok {
+			obs.Anchor = anchor
+		}
+		if result, ok := obj["toolUseResult"].(map[string]any); ok {
+			if anyString(result["status"]) == "async_launched" {
+				if agentID := anyString(result["agentId"]); agentID != "" {
+					collector.observe(self, EdgeEndpoint{Runtime: s.Runtime, ID: agentID}, EdgeKindSpawned, obs)
+				}
+			}
+		}
+		msg, _ := obj["message"].(map[string]any)
+		content, _ := msg["content"].([]any)
+		for _, item := range content {
+			m, ok := item.(map[string]any)
+			if !ok || m["type"] != "tool_use" || anyString(m["name"]) != "SendMessage" {
+				continue
+			}
+			input, _ := m["input"].(map[string]any)
+			to := anyString(input["to"])
+			if to == "" {
+				continue
+			}
+			sendObs := obs
+			sendObs.Note = anyString(input["summary"])
+			target := EdgeEndpoint{Runtime: s.Runtime}
+			if childIDs[to] {
+				target.ID = to
+			} else {
+				// `to` may name a peer session rather than an agent id; an
+				// unresolvable recipient keeps the edge, marked unresolved,
+				// rather than dropping an observed message.
+				target.Raw, target.Unresolved = to, true
+			}
+			collector.observe(self, target, EdgeKindMessaged, sendObs)
+		}
+	}
+	return collector.edges, sc.Err()
+}

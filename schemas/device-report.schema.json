@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:device-report:1.0",
+  "title": "Device self-report (bounded projection of doctor --json)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "device_id",
+    "reported_at",
+    "daemon",
+    "store",
+    "runtimes",
+    "rulebook"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "reported_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "running"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "running": {
+          "type": "boolean"
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "runtimes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "attached",
+          "firing"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "attached": {
+            "type": "boolean"
+          },
+          "firing": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "observed_at"
+            ],
+            "properties": {
+              "observed_at": {
+                "oneOf": [
+                  {
+                    "$ref": "common.schema.json#/$defs/timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "maxLength": 500
+              }
+            }
+          }
+        }
+      }
+    },
+    "rulebook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "layers"
+      ],
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "origin",
+              "digest",
+              "adopted"
+            ],
+            "properties": {
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "repository",
+                  "organization"
+                ]
+              },
+              "digest": {
+                "$ref": "common.schema.json#/$defs/sha256"
+              },
+              "adopted": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

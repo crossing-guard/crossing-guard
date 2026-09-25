@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "device_id": "dev_01M2N4T1GQXPDHEZANWXNG3N10",
+  "reported_at": "2026-09-17T16:05:00Z",
+  "daemon": {
+    "version": "(devel)",
+    "running": true
+  },
+  "store": {
+    "schema_version": 31
+  },
+  "runtimes": [
+    {
+      "name": "claude",
+      "attached": true,
+      "firing": {
+        "observed_at": "2026-09-17T15:58:00Z",
+        "evidence": "canary beacon in session file"
+      }
+    },
+    {
+      "name": "codex",
+      "attached": true,
+      "firing": {
+        "observed_at": null
+      }
+    }
+  ],
+  "rulebook": {
+    "layers": [
+      {
+        "origin": "user",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "adopted": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Crossing Guard — "Checkpoint" mark (draft v2, 2026-07-16).
+       Open ring = the user's perimeter (deliberately not sealed: observe & govern,
+       never a vault). Accent dot = the checkpoint at the boundary opening.
+       Empty center = the native agent runs untouched; control lives at the edge.
+       v2 replaces the v1 center spark. Accent is --fyg #ddf03a (hi-vis
+       yellow-green, the crossing-guard vest) from the marketing palette; dark
+       companion #5f6b0a where it must read on white. Orange is reserved for the
+       Claude VENDOR chip, so it cannot also mean "us" (ADR 0024). -->
+  <style>
+    :root { color: #26262e; --dot: #5f6b0a; }
+    @media (prefers-color-scheme: dark) { :root { color: #e8e8ec; --dot: #ddf03a; } }
+  </style>
+  <path d="M21.07 5.12 A12 12 0 1 0 26.88 10.93" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="24.49" cy="7.51" r="2.8" fill="var(--dot)"/>
+</svg>

@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "id": "mem_01J8ZQ4M7T2V9K3NXW5R6YHBCG",
+  "slug": "staging-db-needs-vpn",
+  "revision": 2,
+  "scope": {
+    "type": "user",
+    "id": "patrick"
+  },
+  "title": "Staging DB needs the VPN",
+  "category": "gotcha",
+  "body": "Connect to the VPN before any staging migration; the bastion drops plain connections.",
+  "tags": [
+    "database",
+    "staging"
+  ],
+  "aliases": [
+    "staging database vpn",
+    "bastion"
+  ],
+  "source": "human",
+  "superseded_by": null,
+  "verified_at": null,
+  "verified_by": null,
+  "created_at": "2026-09-10T09:00:00Z",
+  "updated_at": "2026-09-17T14:00:00Z",
+  "author": {
+    "type": "user",
+    "id": "patrick"
+  },
+  "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

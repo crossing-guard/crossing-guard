@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:bundle:1.0",
+  "title": "Signed governance and agent-configuration bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "organization_id",
+    "scope",
+    "revision",
+    "created_at",
+    "expires_at",
+    "failure_mode",
+    "documents",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "organization_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "repository",
+            "organization"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "failure_mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stateful_tier"
+      ],
+      "properties": {
+        "stateful_tier": {
+          "type": "string",
+          "enum": [
+            "fail-open",
+            "fail-closed"
+          ]
+        }
+      }
+    },
+    "documents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name",
+          "digest",
+          "media_type",
+          "body"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "rulebook",
+              "detectors",
+              "profile"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "digest": {
+            "$ref": "common.schema.json#/$defs/sha256"
+          },
+          "media_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000000
+          }
+        }
+      }
+    },
+    "content_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sync_content"
+      ],
+      "properties": {
+        "sync_content": {
+          "type": "string",
+          "enum": [
+            "off",
+            "consent",
+            "mandated"
+          ]
+        },
+        "repositories": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    }
+  }
+}

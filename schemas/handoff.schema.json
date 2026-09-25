@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:handoff:1.0",
+  "title": "Cross-agent handoff (human-edited markdown on the wire)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "session",
+    "repository_id",
+    "created_at",
+    "created_by",
+    "body_markdown",
+    "governance_state",
+    "anchors_scope",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "session": {
+      "$ref": "common.schema.json#/$defs/session"
+    },
+    "repository_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 255
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "created_by": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "recipient": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 255
+    },
+    "body_markdown": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200000
+    },
+    "governance_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "water_mark",
+        "tags"
+      ],
+      "properties": {
+        "water_mark": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "value"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            }
+          }
+        }
+      }
+    },
+    "anchors_scope": {
+      "const": "sender-local"
+    },
+    "content_hash": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    }
+  }
+}

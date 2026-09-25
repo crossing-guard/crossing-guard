@@ -1,0 +1,641 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:hook-compile-map:0.1-draft",
+  "title": "Hook compile map",
+  "description": "The hook-capability-matrix and capability-taxonomy turned into DATA a rule compiler reads. Four tables joined on `runtime`: (1) runtime_hook_facts = the per-runtime hook surface (events, decision fields, fail modes, trust); (2) capability_expansions = how each canonical capability expands to EVERY known tool that reaches the effect, per runtime, with a normalization confidence; (3) action_bindings = which native field an authored action rides, per runtime, and whether it is functional/reserved/absent; (4) backstop_seams = which effect capabilities a non-bypassable seam guarantees. Given an authored rule (see rule.schema.json) the compiler produces, per (capability, action, runtime): {can_block, can_redact, tool_expansion, fail_mode} from the tables, then computes an honest coverage_label = MAX(hook_label, backstop_label) where hook_label = MIN across the coverage/normalization/enforcement gates. Labels are EMITTED by the compiler, never authored. Every record is sourced and dated; facts are marked vendor-doc / binary-extracted / prototype-proven vs inferred, per the project's honesty discipline. Companion spec: docs/reference/rule-compiler.md. Runtime output vocabulary it aligns to: policy-decision.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runtime_hook_facts",
+    "capability_expansions",
+    "action_bindings",
+    "backstop_seams"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1-draft"
+    },
+    "runtime_hook_facts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/runtimeHookFacts"
+      },
+      "description": "One record per runtime: the raw hook surface. Records VENDOR facts (as documented / binary-extracted / probed), not our mitigations. The compiler's mitigations (self-deadline-to-deny, sole-rewriter) live in the label function, not here."
+    },
+    "capability_expansions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/capabilityExpansion"
+      },
+      "description": "One record per (runtime, capability): the fix for the per-tool-matcher leak. A canonical capability expands to every KNOWN tool that reaches the effect on that runtime, each tagged with a normalization confidence. `coverage: full` means every known tool is matched; `residual_routes` names the classify-on-sight / hook-blind remainder that is honestly NOT covered."
+    },
+    "action_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/actionBinding"
+      },
+      "description": "One record per (runtime, action): which native event+field the authored action rides, and whether that field is functional / reserved-fail-closed / absent / unverified. `emit_when` carries the reserved-field honesty rule: emit only functional fields; compile the rest to `unsupported`, never a silent downgrade."
+    },
+    "backstop_seams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/backstopSeam"
+      },
+      "description": "One record per backstop seam (matches rule.schema backstop.seam): which effect capabilities it guarantees and whether a NO there is bypassable. A non-bypassable backstop is the ONLY path to enforced-failclosed — the hook alone tops out at enforced-best-effort because no runtime fails closed on timeout."
+    }
+  },
+  "$defs": {
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "opencode",
+        "gemini-cli",
+        "copilot-cli"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "vendor-doc",
+        "binary-extracted",
+        "prototype-proven",
+        "reported",
+        "inferred"
+      ],
+      "description": "Evidence tier for this record. vendor-doc = primary vendor documentation; binary-extracted = field/behavior read from the runtime binary; prototype-proven = observed in an experiments/ probe; reported = credible third party; inferred = our reasoning. Mirrors the project's [P]/[D]/[B]/[H] legend."
+    },
+    "fieldStatus": {
+      "type": "string",
+      "enum": [
+        "functional",
+        "reserved-fail-closed",
+        "absent",
+        "unverified"
+      ],
+      "description": "functional = documented or observed working; reserved-fail-closed = present in schema but the vendor says using it DENIES the action today (Codex updatedInput/updatedPermissions/interrupt); absent = no equivalent field; unverified = present but we have not fired it (must be canary-confirmed before relied on)."
+    },
+    "normalization": {
+      "type": "string",
+      "enum": [
+        "reliable",
+        "best-effort",
+        "unknown"
+      ],
+      "description": "How cleanly a call can be classified as matching the predicate. reliable = a typed tool / runtime-tagged action (YES/NO by construction); best-effort = polymorphic shell string or hostname!=resolved-IP (defeatable by obfuscation); unknown = unregistered MCP tool with no declared side-effects."
+    },
+    "coverage": {
+      "type": "string",
+      "enum": [
+        "full",
+        "partial",
+        "none",
+        "unverified"
+      ],
+      "description": "Of the KNOWN tools reaching this effect, how many fire a hook and are matched. full = all known tools; partial = some routes best-effort/unmatched; none = no hook fires (structural blindness); unverified = hooking is claimed but not canary-confirmed (e.g. Codex non-shell events)."
+    },
+    "coverageLabel": {
+      "type": "string",
+      "enum": [
+        "enforced-failclosed",
+        "enforced-best-effort",
+        "advisory",
+        "unsupported"
+      ],
+      "description": "The emitted honesty label. Ordinal: unsupported(0) < advisory(1) < enforced-best-effort(2) < enforced-failclosed(3). Maps to policy-decision.enforcement: failclosed->enforced, best-effort->partially-enforced, advisory->advisory, unsupported->unsupported."
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "ask",
+        "redact",
+        "deny",
+        "allow"
+      ],
+      "description": "The authored rule action (rule.schema action enum)."
+    },
+    "failOpenClosed": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
+    "policyDecision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny",
+        "require-approval",
+        "allow-with-constraints",
+        "quarantine",
+        "stop-session"
+      ],
+      "description": "The policy-decision.schema decision this action produces at runtime."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "vendor-doc",
+            "binary-extraction",
+            "prototype-probe",
+            "community",
+            "inference"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "URL, repo path (e.g. experiments/ccprobe/gitguard.py), or extracted binary path (e.g. /Applications/ChatGPT.app/Contents/Resources/codex)."
+        },
+        "publisher": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512
+        }
+      }
+    },
+    "fieldRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "native_name",
+        "status"
+      ],
+      "properties": {
+        "native_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "status": {
+          "$ref": "#/$defs/fieldStatus"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 300
+        }
+      }
+    },
+    "runtimeHookFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "integration_style",
+        "events",
+        "decision_fields",
+        "fail_modes",
+        "registration",
+        "confidence",
+        "sources",
+        "verified_date"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "integration_style": {
+          "type": "string",
+          "enum": [
+            "subprocess-hook",
+            "in-process-plugin"
+          ]
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pre_tool",
+            "post_tool",
+            "session_start",
+            "user_prompt"
+          ],
+          "description": "The four lifecycle events the compiler targets, with the native event name and whether it fires.",
+          "properties": {
+            "pre_tool": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "post_tool": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "session_start": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "user_prompt": {
+              "$ref": "#/$defs/fieldRef"
+            }
+          }
+        },
+        "decision_fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "permission_decision",
+            "updated_tool_output",
+            "updated_input",
+            "updated_permissions",
+            "additional_context"
+          ],
+          "description": "The output fields that carry control, with per-runtime status. This is THE control surface (matrix section 2).",
+          "properties": {
+            "permission_decision": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "updated_tool_output": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "updated_input": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "updated_permissions": {
+              "$ref": "#/$defs/fieldRef"
+            },
+            "additional_context": {
+              "$ref": "#/$defs/fieldRef"
+            }
+          }
+        },
+        "fail_modes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "on_crash",
+            "on_timeout",
+            "block_holds_call_open"
+          ],
+          "properties": {
+            "on_crash": {
+              "$ref": "#/$defs/failOpenClosed"
+            },
+            "on_timeout": {
+              "$ref": "#/$defs/failOpenClosed"
+            },
+            "block_holds_call_open": {
+              "type": "boolean",
+              "description": "True if a blocking hook (e.g. an 'ask' that awaits a human) holds the tool call suspended rather than returning fast. Enables the gitguard blocking-approval pattern; does NOT by itself defeat the runtime's own fail-open timeout."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 400
+            }
+          }
+        },
+        "registration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mechanism",
+            "trust_model",
+            "silent_absence_risk",
+            "requires_canary"
+          ],
+          "properties": {
+            "mechanism": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "trust_model": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "silent_absence_risk": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "requires_canary": {
+              "type": "boolean",
+              "description": "True if coverage must be PROBED at session start (a beacon grepped from the session file), because an unregistered/untrusted/flag-off hook is silently skipped with no error."
+            }
+          }
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "verified_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1400
+        }
+      }
+    },
+    "capabilityExpansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "capability",
+        "capability_kind",
+        "tool_matchers",
+        "coverage",
+        "normalization",
+        "coverage_probed",
+        "confidence",
+        "sources",
+        "verified_date"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "capability": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$",
+          "description": "Canonical capability, e.g. filesystem.read (effect) or git.push_protected (domain)."
+        },
+        "capability_kind": {
+          "type": "string",
+          "enum": [
+            "effect",
+            "domain"
+          ],
+          "description": "effect = the taxonomy's classify-at-the-hook capability (filesystem.read, command.execute, network.egress). domain = a semantically-meaningful authored capability (git.push_protected, deploy.execute) reached THROUGH one or more effect capabilities — so it inherits their normalization/coverage."
+        },
+        "effect_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+          },
+          "description": "For a domain capability, the effect capabilities it is reached through (e.g. git.push_protected -> [command.execute, network.egress]). Empty for effect capabilities."
+        },
+        "tool_matchers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "matcher",
+              "matcher_kind",
+              "normalization"
+            ],
+            "properties": {
+              "matcher": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "A runtime tool name (Read), a runtime-typed action (codex:read), a shell-parse rule (bash:^\\s*git\\s+push), an MCP glob (mcp__*), or a raw pattern."
+              },
+              "matcher_kind": {
+                "type": "string",
+                "enum": [
+                  "typed-tool",
+                  "shell-parse",
+                  "mcp",
+                  "pattern"
+                ]
+              },
+              "normalization": {
+                "$ref": "#/$defs/normalization"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "normalization": {
+          "$ref": "#/$defs/normalization",
+          "description": "Rolled-up (weakest) normalization across the tool_matchers plus any resource-selector caveat (e.g. host:* is best-effort because hostname != resolved IP at the hook)."
+        },
+        "residual_routes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "Known routes to the same effect that are NOT covered: hook-blind channels (auto-context, provider side-channel), unregistered MCP tools, obfuscated shell. The honest 'what leaks' list; it is what keeps `coverage: full` from over-claiming."
+        },
+        "coverage_probed": {
+          "type": "boolean",
+          "description": "True if this coverage was verified by a canary/probe (not merely asserted from config). Per the red-team: coverage must be probed, not assumed."
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "verified_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1400
+        }
+      }
+    },
+    "actionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "action",
+        "field_status",
+        "can_block",
+        "can_redact",
+        "policy_decision",
+        "emit_when",
+        "confidence",
+        "sources",
+        "verified_date"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
+        "native_event": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "native_field": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "field_status": {
+          "$ref": "#/$defs/fieldStatus"
+        },
+        "can_block": {
+          "type": "boolean",
+          "description": "Can this action stop the effect before it happens on this runtime (deny/ask)."
+        },
+        "can_redact": {
+          "type": "boolean",
+          "description": "Can this action rewrite tool output before the model sees it (redact ingress)."
+        },
+        "policy_decision": {
+          "$ref": "#/$defs/policyDecision"
+        },
+        "emit_when": {
+          "type": "string",
+          "maxLength": 700,
+          "description": "The reserved-field honesty rule: when the compiler may emit this binding, and what to do (emit `unsupported` + surface) when the field is not functional. Never a silent downgrade to a weaker action with different semantics."
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "verified_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1400
+        }
+      }
+    },
+    "backstopSeam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seam",
+        "covered_effect_capabilities",
+        "bypassable",
+        "layer",
+        "confidence",
+        "sources",
+        "verified_date"
+      ],
+      "properties": {
+        "seam": {
+          "type": "string",
+          "enum": [
+            "none",
+            "remote-branch-protection",
+            "readonly-db-identity",
+            "filesystem-sandbox",
+            "network-chokepoint",
+            "resource-authorization"
+          ]
+        },
+        "covered_effect_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "description": "The effect capabilities this seam guarantees a NO for (independent of the hook). '*' means the resource's own authorization governs all effects against it."
+        },
+        "bypassable": {
+          "type": "boolean",
+          "description": "false = a NO at this seam is outcome-guaranteed under the v0.1 threat model (cooperative-but-forgetful agent, not a local-root adversary). true = no guarantee (seam 'none')."
+        },
+        "layer": {
+          "type": "string",
+          "enum": [
+            "none",
+            "remote-service",
+            "os-kernel",
+            "network-namespace",
+            "resource-identity"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "verified_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1400
+        }
+      }
+    }
+  }
+}

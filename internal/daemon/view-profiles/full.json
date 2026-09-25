@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "id": "full",
+  "name": "Full transcript",
+  "description": "Every row as it was written. Context a hook added is folded to one line.",
+  "rules": [
+    {"match": {"kind": "context"}, "display": "collapse"}
+  ]
+}

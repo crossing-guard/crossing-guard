@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:common:1.0",
+  "title": "Common definitions",
+  "$defs": {
+    "typedId": {
+      "type": "string",
+      "pattern": "^[a-z]{3}_[0-9A-HJKMNP-TV-Z]{10,32}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "visibility": {
+      "type": "string",
+      "enum": [
+        "private",
+        "repository",
+        "organization",
+        "public"
+      ]
+    },
+    "sensitivity": {
+      "type": "string",
+      "enum": [
+        "public",
+        "internal",
+        "source-code",
+        "customer-data",
+        "personal-data",
+        "credential-material",
+        "regulated",
+        "unknown"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "user",
+            "repository",
+            "organization",
+            "public"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent",
+            "service",
+            "system"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "content_hash"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "native-runtime-event",
+            "user-assertion",
+            "tool-result",
+            "file-observation",
+            "external-source",
+            "derived-record",
+            "imported"
+          ]
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "native_reference": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
+        },
+        "redaction_stage": {
+          "type": "string",
+          "enum": [
+            "before-hash",
+            "after-hash",
+            "none"
+          ]
+        }
+      }
+    },
+    "sourceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "event",
+            "evidence",
+            "finding",
+            "decision",
+            "memory",
+            "user"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "content_hash": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "runtime",
+        "native_id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/typedId"
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "native_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "catalog_id": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "resume_id": {
+          "type": "string",
+          "maxLength": 255
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "url",
+            "mcp",
+            "db",
+            "session",
+            "memory",
+            "other"
+          ]
+        },
+        "repository_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^/~\\\\]([^:]|$)"
+        },
+        "outside_repository": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "prev_hash",
+        "hash"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prev_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

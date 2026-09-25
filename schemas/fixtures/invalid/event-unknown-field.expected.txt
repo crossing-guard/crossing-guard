@@ -1,0 +1,2 @@
+error-contains: additional property "debug"
+Unknown fields are rejected so accidental format drift is loud.

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:adapter-manifest:0.1-draft",
+  "title": "Native runtime adapter manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "runtime",
+    "supported_runtime_versions",
+    "supported_operating_systems",
+    "integration_surfaces",
+    "request_paths",
+    "observed_event_types",
+    "enforcement_coverage",
+    "configuration_changes",
+    "credential_ownership",
+    "known_limitations"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1-draft" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,99}$" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "runtime": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "supported_runtime_versions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+    },
+    "supported_operating_systems": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "enum": ["macos", "windows", "linux"] }
+    },
+    "integration_surfaces": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+    },
+    "request_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode", "deployment", "support_status", "billing_mode"],
+        "properties": {
+          "mode": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "deployment": { "type": "string", "enum": ["local", "customer-hosted", "managed"] },
+          "support_status": { "type": "string", "enum": ["supported", "conditional", "prohibited", "experimental"] },
+          "billing_mode": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      }
+    },
+    "observed_event_types": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$" }
+    },
+    "enforcement_coverage": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["enforced", "partially-enforced", "advisory", "unsupported"]
+      }
+    },
+    "configuration_changes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "credential_ownership": {
+      "type": "string",
+      "enum": ["native-runtime", "user", "organization", "product", "none"]
+    },
+    "known_limitations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
+    "compatibility_test_reference": { "type": ["string", "null"], "maxLength": 2048 }
+  }
+}

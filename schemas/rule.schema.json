@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:rule:0.1-draft",
+  "title": "Governance rule (authored)",
+  "description": "A portable, authored deterministic rule. Layer A is a mechanical predicate (capability + resource + optional pattern) that blocks/redacts an action; Layer B is context-as-steering, GENERATED from Layer A so it never bluffs. Rules are authored once and compiled per-runtime to hooks. Determinism/coverage labels are emitted by the compiler per runtime (see hook-capability-matrix), not authored here. The runtime result of evaluating a rule is a policy-decision record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "intent", "match", "action", "scope"],
+  "properties": {
+    "schema_version": { "const": "0.1-draft" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$",
+      "description": "Stable human-readable rule id, e.g. protect-shared-branch."
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "Plain-language statement of what the rule protects. The human-maintainable summary the GUI shows."
+    },
+    "enabled": { "type": "boolean", "default": true },
+
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability"],
+      "description": "Layer A predicate. Prefer capability + resource (normalization-clean YES/NO); use pattern only when unavoidable.",
+      "properties": {
+        "capability": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$" },
+          "description": "Canonical capabilities the rule governs, e.g. git.branch_change, filesystem.read, network.egress. The compiler expands each to EVERY known tool that reaches the effect (no per-tool matcher)."
+        },
+        "resource": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "description": "Resource selector, e.g. branch:main, path:/etc/*, host:*.internal, db:production. Null = any."
+        },
+        "pattern": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "description": "Optional regex predicate over tool_input (the raw grep). Best-effort on polymorphic shell; prefer capability+resource. Present here honestly as the escape hatch, not the default."
+        },
+        "condition": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "description": "Optional session condition, e.g. active_backend:cloud (the 'PII stays local' case), classification:personal-data."
+        }
+      }
+    },
+
+    "action": {
+      "type": "string",
+      "enum": ["observe", "ask", "redact", "deny", "allow"],
+      "description": "observe = log only (track); ask = block until a human confirms (blocking approval); redact = rewrite ingress before the model sees it; deny = block the action (enforce); allow = explicit allow/exception for precedence. Maps to policy-decision.decision at runtime."
+    },
+
+    "reason": {
+      "type": ["string", "null"],
+      "maxLength": 1000,
+      "description": "Reactive Layer B: the denial reason the agent sees. Generated from the rule if null; may be overridden. MUST be true (no bluffing) — it is only shown because Layer A actually enforces."
+    },
+
+    "backstop": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Outcome-guarantee hardening. The non-bypassable seam that makes the NO hold for structural gaps the hook alone cannot cover. 'none' = evaluation-deterministic but not outcome-guaranteed (declare it).",
+      "properties": {
+        "seam": {
+          "type": "string",
+          "enum": [
+            "none",
+            "remote-branch-protection",
+            "readonly-db-identity",
+            "filesystem-sandbox",
+            "network-chokepoint",
+            "resource-authorization"
+          ]
+        },
+        "note": { "type": ["string", "null"], "maxLength": 300 }
+      }
+    },
+
+    "fail_mode": {
+      "type": "string",
+      "enum": ["closed", "open"],
+      "default": "closed",
+      "description": "What the shim does on its own error/timeout. Deterministic gates want 'closed' (block); purely observational rules may be 'open'. The compiler must not silently emit 'open' for a deny rule without labeling it."
+    },
+
+    "steer": {
+      "type": "boolean",
+      "default": true,
+      "description": "Proactive Layer B: inject this rule into agent context (SessionStart rail) as an enforced, immutable rule, so a cooperating agent stops hunting for gaps. Only legitimate because Layer A really enforces it."
+    },
+    "steer_text": {
+      "type": ["string", "null"],
+      "maxLength": 500,
+      "description": "Override for the injected steering line; generated from the rule if null. NO BLUFFING: only assert controls that are mechanically enforced. Generated text is derived from the compiled rule set so it is automatically true."
+    },
+
+    "scope": {
+      "type": "string",
+      "enum": ["repository", "user", "organization"],
+      "description": "Where the rule applies and travels. repository = committed .control-plane rules (per-repo, per-team); user = personal; organization = signed policy bundle. This is the 'across environments' distribution axis."
+    },
+    "runtimes": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "enum": ["claude-code", "codex", "opencode"] },
+      "description": "Limit to specific runtimes, or null = all. The compiler emits per-runtime coverage (enforced / partial / unsupported) regardless."
+    },
+
+    "notes": { "type": ["string", "null"], "maxLength": 1000 }
+  }
+}

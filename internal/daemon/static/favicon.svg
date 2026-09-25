@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Checkpoint mark (draft v2), favicon cut: heavier strokes so it reads at 16px. -->
+  <style>
+    :root { color: #26262e; --dot: #5f6b0a; }
+    @media (prefers-color-scheme: dark) { :root { color: #e8e8ec; --dot: #ddf03a; } }
+  </style>
+  <path d="M20.86 5.58 A11.5 11.5 0 1 0 26.42 11.14" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"/>
+  <circle cx="23.64" cy="8.36" r="3.6" fill="var(--dot)"/>
+</svg>

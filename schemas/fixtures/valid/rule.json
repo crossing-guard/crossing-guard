@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1-draft",
+  "id": "protect-shared-branch",
+  "intent": "Don't let agents change branch, push to main, force-push, or deploy without my OK — multiple agents share this branch.",
+  "enabled": true,
+  "match": {
+    "capability": ["git.branch_change", "git.push_protected", "git.force_push", "deploy.execute"],
+    "resource": "branch:main",
+    "pattern": null,
+    "condition": null
+  },
+  "action": "ask",
+  "reason": "Enforced by rule protect-shared-branch: branch changes, pushes to main, force-pushes, and deploys require your confirmation. Equivalent routes (checkout/switch/push via any tool) are also blocked, so there is no way around it — to proceed, confirm the prompt or run the command yourself.",
+  "backstop": {
+    "seam": "remote-branch-protection",
+    "note": "The agent hook is the friendly early gate + confirmation; the remote's branch protection is the outcome guarantee."
+  },
+  "fail_mode": "closed",
+  "steer": true,
+  "steer_text": null,
+  "scope": "repository",
+  "runtimes": null,
+  "notes": "Grounded in a project's CLAUDE.md ('NEVER push directly to main', 'work on the current shared branch, do NOT checkout main'). Proven as the gitguard PoC; this is the authored form."
+}

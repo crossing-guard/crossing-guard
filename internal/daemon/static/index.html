@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crossing-guard console</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <div id="brand">
+      <!-- "Checkpoint" mark (v2), inlined so the ring rides currentColor; canonical asset: logo.svg -->
+      <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M21.07 5.12 A12 12 0 1 0 26.88 10.93" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        <circle cx="24.49" cy="7.51" r="2.8" fill="var(--accent-fg)"/>
+      </svg>
+      <div>crossing-guard<small>console · experiment, not product</small></div>
+    </div>
+    <!-- Nav: the four surfaces (console-design §4), vertical, icon + always-on label.
+         Usage folds into Sessions (rail pin); Policy/Audit/Approvals fold into
+         Governance tabs; Settings/Skills live in the account menu below. -->
+    <nav>
+      <button data-view="sessions" class="active"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg><span>Sessions</span></button>
+      <button data-view="memory"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v8c0 1.1 2.24 2 5 2s5-.9 5-2V4"/></svg><span>Memory</span></button>
+      <button data-view="skills"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2l1.7 3.6 3.9.5-2.9 2.7.8 3.9L8 10.9 4.5 12.7l.8-3.9L2.4 6.1l3.9-.5z"/></svg><span>Skills</span></button>
+      <button data-view="governance"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2l5 2v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4l5-2z"/></svg><span>Governance</span><span id="apbadge" class="chip hidden">0</span></button>
+    </nav>
+    <input id="search" placeholder="Filter or search all sessions…" class="hidden" autocomplete="off" spellcheck="false">
+    <div id="searchstatus"></div>
+    <div id="sidebody"></div>
+    <!-- Account / settings menu, pinned to the bottom — the Claude Code / Codex reflex.
+         Honest contents only (local OSS tool: no tier / plans / gift / logout). -->
+    <div id="account">
+      <button id="acctbtn" aria-haspopup="true" aria-expanded="false">
+        <span class="avatar">◑</span><span class="acctname">crossing-guard · local</span><span class="chev">⌄</span>
+      </button>
+      <div id="acctmenu" class="hidden" role="menu">
+        <button data-view="settings"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 2v2.2M8 11.8V14M2 8h2.2M11.8 8H14M3.8 3.8l1.6 1.6M10.6 10.6l1.6 1.6M12.2 3.8l-1.6 1.6M5.4 10.6l-1.6 1.6"/></svg><span>Settings</span></button>
+        <button id="themebtn"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2"/></svg><span>Theme</span></button>
+        <div class="acctnote">local · loopback + token · <a href="https://github.com" target="_blank" rel="noopener">about</a></div>
+      </div>
+    </div>
+  </div>
+  <div id="divider" title="Drag to resize · double-click to reset"></div>
+  <div id="main"></div>
+  <!-- The pane strip is the one way back to any pane: it moves here while the workspace is hidden. -->
+  <div id="pane-strip" class="pane-strip-host hidden" aria-controls="refpanel"></div>
+  <div id="refdivider" class="hidden" title="Drag to resize · double-click to reset"></div>
+  <div id="refpanel" class="hidden"></div>
+</div>
+<!-- global pending-approval interrupt (console-design §4) — floats over any surface -->
+<div id="interrupt" class="hidden" role="alert"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

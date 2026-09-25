@@ -1,0 +1,1 @@
+Validation must fail because a source/evidence object carries a "url" property. The evidence $def is additionalProperties:false and uses {kind, ref, publisher, note} — the model-data-handling source shape ("url") is intentionally NOT valid here, so accidental format drift is exposed.

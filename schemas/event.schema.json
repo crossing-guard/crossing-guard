@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:event:1.0",
+  "title": "Portable immutable event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "id",
+    "occurred_at",
+    "recorded_at",
+    "sequence",
+    "session",
+    "actor",
+    "workspace",
+    "type",
+    "visibility",
+    "sensitivity",
+    "provenance",
+    "chain",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crossing-guard.event"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "occurred_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "session": {
+      "$ref": "common.schema.json#/$defs/session"
+    },
+    "actor": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ],
+      "properties": {
+        "repository_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        }
+      }
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+    },
+    "visibility": {
+      "$ref": "common.schema.json#/$defs/visibility"
+    },
+    "sensitivity": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/sensitivity"
+      }
+    },
+    "provenance": {
+      "$ref": "common.schema.json#/$defs/provenance"
+    },
+    "chain": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/chain"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verb",
+        "tool",
+        "target",
+        "tags",
+        "tags_digest",
+        "decision",
+        "reason",
+        "origin"
+      ],
+      "properties": {
+        "verb": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "tool": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "target": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/target"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "value",
+              "detector",
+              "provenance"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "detector": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "provenance": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "evidence": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            }
+          }
+        },
+        "tags_digest": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "decision": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "live",
+            "transcript",
+            "imported"
+          ]
+        },
+        "rule": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        },
+        "layer": {
+          "enum": [
+            "user",
+            "repository",
+            "organization",
+            null
+          ]
+        }
+      }
+    },
+    "task_id": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/typedId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "parent_event_id": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/typedId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "correlation_id": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/typedId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "request_path_id": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/typedId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

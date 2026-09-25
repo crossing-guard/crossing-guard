@@ -1,0 +1,54 @@
+{
+  "schema": "crossing-guard.event",
+  "schema_version": "1.0",
+  "id": "evt_3MMDRARK5T2V9K3NXW5R6YHBCF",
+  "occurred_at": "2026-09-17T14:03:11Z",
+  "recorded_at": "2026-09-17T14:03:11Z",
+  "sequence": 0,
+  "session": {
+    "id": "ses_01J8ZQ4M7T2V9K3NXW5R6YHBCD",
+    "runtime": "claude",
+    "native_id": "3f6c1a2e-9d4b-4c8a-b1f0-7e5d2c9a8b17"
+  },
+  "actor": {
+    "type": "agent",
+    "id": "runtime:claude"
+  },
+  "workspace": {
+    "repository_id": "remote-sha256-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "type": "action.exec",
+  "visibility": "organization",
+  "sensitivity": [
+    "internal"
+  ],
+  "provenance": {
+    "kind": "imported",
+    "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "redaction_stage": "after-hash"
+  },
+  "chain": null,
+  "payload": {
+    "verb": "exec",
+    "tool": "Bash",
+    "target": {
+      "kind": "file",
+      "outside_repository": true
+    },
+    "tags": [
+      {
+        "key": "data-class",
+        "value": "internal",
+        "detector": "area.internal",
+        "provenance": "observed",
+        "evidence": "path-prefix"
+      }
+    ],
+    "tags_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "decision": "",
+    "reason": "no rule matched",
+    "origin": "imported",
+    "rule": null,
+    "layer": null
+  }
+}

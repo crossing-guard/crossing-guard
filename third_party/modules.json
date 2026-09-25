@@ -1,0 +1,968 @@
+{
+  "scope": "Resolved root, PHP and JavaScript module graphs, including tests/tools; not a binary SBOM.",
+  "status": "Module notices plus native/generated source provenance reviewed; see provenance.md for artifact and reproduction limits.",
+  "modules": [
+    {
+      "module": "github.com/BurntSushi/toml",
+      "version": "v1.4.1-0.20240526193622-a339e1f7089c",
+      "sum": "h1:pxW6RcqyfI9/kWtOwnv/G+AzdKuy2ZrqINhenH4HyNs=",
+      "go_mod_sum": "h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "COPYING",
+          "path": "third_party/licenses/github.com/BurntSushi/toml@v1.4.1-0.20240526193622-a339e1f7089c/COPYING",
+          "sha256": "d21cb1c60785d6d3a84a7059323ccafc45c645b1bbda281c76a62d66ad2d7dc3"
+        },
+        {
+          "source_path": "cmd/toml-test-decoder/COPYING",
+          "path": "third_party/licenses/github.com/BurntSushi/toml@v1.4.1-0.20240526193622-a339e1f7089c/cmd/toml-test-decoder/COPYING",
+          "sha256": "d21cb1c60785d6d3a84a7059323ccafc45c645b1bbda281c76a62d66ad2d7dc3"
+        },
+        {
+          "source_path": "cmd/toml-test-encoder/COPYING",
+          "path": "third_party/licenses/github.com/BurntSushi/toml@v1.4.1-0.20240526193622-a339e1f7089c/cmd/toml-test-encoder/COPYING",
+          "sha256": "d21cb1c60785d6d3a84a7059323ccafc45c645b1bbda281c76a62d66ad2d7dc3"
+        },
+        {
+          "source_path": "cmd/tomlv/COPYING",
+          "path": "third_party/licenses/github.com/BurntSushi/toml@v1.4.1-0.20240526193622-a339e1f7089c/cmd/tomlv/COPYING",
+          "sha256": "d21cb1c60785d6d3a84a7059323ccafc45c645b1bbda281c76a62d66ad2d7dc3"
+        }
+      ]
+    },
+    {
+      "module": "github.com/davecgh/go-spew",
+      "version": "v1.1.1",
+      "sum": "h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=",
+      "go_mod_sum": "h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/davecgh/go-spew@v1.1.1/LICENSE",
+          "sha256": "1b93a317849ee09d3d7e4f1d20c2b78ddb230b4becb12d7c224c927b9d470251"
+        }
+      ]
+    },
+    {
+      "module": "github.com/dchest/siphash",
+      "version": "v1.2.3",
+      "sum": "h1:QXwFc8cFOR2dSa/gE6o/HokBMWtLUaNDVd+22aKHeEA=",
+      "go_mod_sum": "h1:0NvQU092bT0ipiFN++/rXm69QG9tVxLAlQHIXMPAkHc=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/dchest/siphash@v1.2.3/LICENSE",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+        }
+      ]
+    },
+    {
+      "module": "github.com/google/go-cmp",
+      "version": "v0.6.0",
+      "sum": "h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=",
+      "go_mod_sum": "h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/google/go-cmp@v0.6.0/LICENSE",
+          "sha256": "17b5d209ba8f9684257ecfcff87df6ceda6194143a8fbd074f29727cff6f0c40"
+        }
+      ]
+    },
+    {
+      "module": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "sum": "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+      "go_mod_sum": "h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/google/uuid@v1.6.0/LICENSE",
+          "sha256": "0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d"
+        }
+      ]
+    },
+    {
+      "module": "github.com/kisielk/errcheck",
+      "version": "v1.9.0",
+      "sum": "h1:9xt1zI9EBfcYBvdU1nVrzMzzUPUtPKs9bVSIM3TAb3M=",
+      "go_mod_sum": "h1:kQxWMMVZgIkDq7U8xtG/n2juOjbLgZtedi0D+/VL/i8=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/kisielk/errcheck@v1.9.0/LICENSE",
+          "sha256": "0ce4c88de32a297069615b5f314fbd4c7ffa806e760856a7c79bf908e6236c0a"
+        }
+      ]
+    },
+    {
+      "module": "github.com/mattn/go-pointer",
+      "version": "v0.0.1",
+      "sum": "h1:n+XhsuGeVO6MEAp7xyEukFINEa+Quek5psIR/ylA6o0=",
+      "go_mod_sum": "h1:2zXcozF6qYGgmsG+SeTZz3oAbFLdD3OWqnUbNvJZAlc=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/mattn/go-pointer@v0.0.1/LICENSE",
+          "sha256": "7228b277bcb9df4bdc7eb60852f4163fcf391add8ae5f60cfcc7232200176520"
+        }
+      ]
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3-wasm/v3",
+      "version": "v3.2.35303",
+      "sum": "h1:td8kMW1bWwzc7NnlzPjQV4GbDNLkje8htGBfbZRaSh8=",
+      "go_mod_sum": "h1:o8gr9w/50fXA5TDskg6bNUjvqmFfw4KaXth4q+yDSjg=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303/LICENSE",
+          "sha256": "13219037ddf63dbbcf174bf59525d602df7a2e30083f63be566715c858fcb19e"
+        },
+        {
+          "source_path": "parser/LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303/parser/LICENSE",
+          "sha256": "3b30898c44600cdd6d7859354a77c316bef0e4131f97feb22ac83aa6e3be1178"
+        }
+      ],
+      "provenance_warning": {
+        "path": "third_party/licenses/github.com/ncruces/go-sqlite3-wasm/v3@v3.2.35303/UPSTREAM-README.md",
+        "sha256": "fb8084fccb5733ccc4af421ff026812da7852e91516bdf7c70d007eb46744383",
+        "status": "Underlying translated code retains original licenses; generated/native review open."
+      }
+    },
+    {
+      "module": "github.com/ncruces/go-sqlite3",
+      "version": "v0.35.2",
+      "sum": "h1:YOoumI7tkxMIm1MBrkucRb1qtvAPEh8RrZtv6U+2aLs=",
+      "go_mod_sum": "h1:lVlozMCF6VGdI1FOgl0pBfMviw6DIh/QIMKQyjmg2ac=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/go-sqlite3@v0.35.2/LICENSE",
+          "sha256": "8929c89a593807bf0c042272adc7301376a661050876bd702ebdd36cd7c55d2b"
+        }
+      ]
+    },
+    {
+      "module": "github.com/ncruces/julianday",
+      "version": "v1.0.0",
+      "sum": "h1:fH0OKwa7NWvniGQtxdJRxAgkBMolni2BjDHaWTxqt7M=",
+      "go_mod_sum": "h1:Dusn2KvZrrovOMJuOt0TNXL6tB7U2E8kvza5fFc9G7g=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/julianday@v1.0.0/LICENSE",
+          "sha256": "38ae43959daf953a393a585b2988672cb65a5a541aca0d0be5e72595a0a16883"
+        }
+      ]
+    },
+    {
+      "module": "github.com/ncruces/sort",
+      "version": "v1.0.0",
+      "sum": "h1:tXeitUzE3B8I2z+rsqbKUBThBlJJ34glqCDP0XReJmk=",
+      "go_mod_sum": "h1:obJToO4rYr6VWP0Uw5FYymgYGt3Br4RXcs/JdKaXAPk=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/sort@v1.0.0/LICENSE",
+          "sha256": "cd2e191b57cdf26df21915606716e9ddf45af6ff1af825d27168b9a99bd644bf"
+        }
+      ]
+    },
+    {
+      "module": "github.com/ncruces/wasm2go",
+      "version": "v0.4.11",
+      "sum": "h1:3izUKG2z0dnC01Z7o9t4W0bVJcLJqT1b6nIYwIChQu0=",
+      "go_mod_sum": "h1:hOvF2MY5XO3KfEUD8TIu34m80NKtyOkqe6KJB+EHYzI=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/wasm2go@v0.4.11/LICENSE",
+          "sha256": "13b7919ffbff20b54d133748a783ade8b3ecb1810144194aad70928070f2c0df"
+        },
+        {
+          "source_path": "libc-gen/c/stb_sprintf.h",
+          "source_lines": [
+            1868,
+            1904
+          ],
+          "source_sha256": "e0b8c56e1084602290b9a17ef59f429b5293deb8cb9d8b0f20a14abc39b56520",
+          "path": "third_party/licenses/github.com/ncruces/wasm2go@v0.4.11/libc-gen/STB-SPRINTF-NOTICE.txt",
+          "sha256": "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+        },
+        {
+          "source_path": "libc-gen/c/malloc.c",
+          "source_lines": [
+            2,
+            21
+          ],
+          "source_sha256": "be7be56b40b4b31417e74e77687f9b96127ea6cae534cf236aee40a4c739508d",
+          "path": "third_party/licenses/github.com/ncruces/wasm2go@v0.4.11/libc-gen/DOUG-LEA-MALLOC-NOTICE.txt",
+          "sha256": "edb18b4197c8119814088f713fe38492e1fb22cb96d433522326e5890c24be0d"
+        }
+      ]
+    },
+    {
+      "module": "github.com/ncruces/wbt",
+      "version": "v1.0.0",
+      "sum": "h1:8iBE7UPjTLUpzu3/FCRjAmuQjWzgxo10RGBgt3ooLSc=",
+      "go_mod_sum": "h1:DtF92amvMxH69EmBFUSFWRDAlo6hOEfoNQnClxj9C/c=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/ncruces/wbt@v1.0.0/LICENSE",
+          "sha256": "8929c89a593807bf0c042272adc7301376a661050876bd702ebdd36cd7c55d2b"
+        }
+      ]
+    },
+    {
+      "module": "github.com/pmezard/go-difflib",
+      "version": "v1.0.0",
+      "sum": "h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=",
+      "go_mod_sum": "h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/pmezard/go-difflib@v1.0.0/LICENSE",
+          "sha256": "2eb550be6801c1ea434feba53bf6d12e7c71c90253e0a9de4a4f46cf88b56477"
+        }
+      ]
+    },
+    {
+      "module": "github.com/psanford/httpreadat",
+      "version": "v0.1.0",
+      "sum": "h1:VleW1HS2zO7/4c7c7zNl33fO6oYACSagjJIyMIwZLUE=",
+      "go_mod_sum": "h1:Zg7P+TlBm3bYbyHTKv/EdtSJZn3qwbPwpfZ/I9GKCRE=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/psanford/httpreadat@v0.1.0/LICENSE",
+          "sha256": "a43216151ed5ad827d0d23cb69d95949a1b95293a561fbe08d3cf3a4643a2934"
+        }
+      ]
+    },
+    {
+      "module": "github.com/stretchr/testify",
+      "version": "v1.10.0",
+      "sum": "h1:Xv5erBjTwe/5IxqUQTdXv5kgmIvbHo3QQyRwhJsOfJA=",
+      "go_mod_sum": "h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/stretchr/testify@v1.10.0/LICENSE",
+          "sha256": "f8e536c1c7b695810427095dc85f5f80d44ff7c10535e8a9486cf393e2599189"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/go-tree-sitter",
+      "version": "v0.25.0",
+      "sum": "h1:sx6kcg8raRFCvc9BnXglke6axya12krCJF5xJ2sftRU=",
+      "go_mod_sum": "h1:r77ig7BikoZhHrrsjAnv8RqGti5rtSyvDHPzgTPsUuU=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/go-tree-sitter@v0.25.0/LICENSE",
+          "sha256": "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727"
+        },
+        {
+          "source_path": "src/unicode/LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/go-tree-sitter@v0.25.0/src/unicode/LICENSE",
+          "sha256": "6a18c5fac70d7860b57f5b72b4e2c9a1ba6b3d2741eef7ff9767c5379364f10d"
+        },
+        {
+          "source_path": "src/portable/endian.h",
+          "source_lines": [
+            1,
+            5
+          ],
+          "source_sha256": "adf9c91b7776b25156dbc981d6cff31dd2a77a602b97f661e9e635cd34f502ae",
+          "path": "third_party/licenses/github.com/tree-sitter/go-tree-sitter@v0.25.0/src/portable/ENDIAN-NOTICE.txt",
+          "sha256": "fa48b416b4cb275f7110d7ea4a8ff1779077ee6da0b2c075a6038c0adb6b0481"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-c",
+      "version": "v0.23.4",
+      "sum": "h1:nBPH3FV07DzAD7p0GfNvXM+Y7pNIoPenQWBpvM++t4c=",
+      "go_mod_sum": "h1:MkI5dOiIpeN94LNjeCp8ljXN/953JCwAby4bClMr6bw=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-c@v0.23.4/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-cpp",
+      "version": "v0.23.4",
+      "sum": "h1:LaWZsiqQKvR65yHgKmnaqA+uz6tlDJTJFCyFIeZU/8w=",
+      "go_mod_sum": "h1:doqNW64BriC7WBCQ1klf0KmJpdEvfxyXtoEybnBo6v8=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-cpp@v0.23.4/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-embedded-template",
+      "version": "v0.23.2",
+      "sum": "h1:nFkkH6Sbe56EXLmZBqHHcamTpmz3TId97I16EnGy4rg=",
+      "go_mod_sum": "h1:HNPOhN0qF3hWluYLdxWs5WbzP/iE4aaRVPMsdxuzIaQ=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-embedded-template@v0.23.2/LICENSE",
+          "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-go",
+      "version": "v0.23.4",
+      "sum": "h1:yt5KMGnTHS+86pJmLIAZMWxukr8W7Ae1STPvQUuNROA=",
+      "go_mod_sum": "h1:Jrx8QqYN0v7npv1fJRH1AznddllYiCMUChtVjxPK040=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-go@v0.23.4/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-html",
+      "version": "v0.23.2",
+      "sum": "h1:1UYDV+Yd05GGRhVnTcbP58GkKLSHHZwVaN+lBZV11Lc=",
+      "go_mod_sum": "h1:gpUv/dG3Xl/eebqgeYeFMt+JLOY9cgFinb/Nw08a9og=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-html@v0.23.2/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-java",
+      "version": "v0.23.5",
+      "sum": "h1:J9YeMGMwXYlKSP3K4Us8CitC6hjtMjqpeOf2GGo6tig=",
+      "go_mod_sum": "h1:NRKlI8+EznxA7t1Yt3xtraPk1Wzqh3GAIC46wxvc320=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-java@v0.23.5/LICENSE",
+          "sha256": "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript",
+      "version": "v0.23.1",
+      "sum": "h1:1fWupaRC0ArlHJ/QJzsfQ3Ibyopw7ZfQK4xXc40Zveo=",
+      "go_mod_sum": "h1:lmGD1EJdCA+v0S1u2fFgepMg/opzSg/4pgFym2FPGAs=",
+      "graphs": [
+        "php"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-javascript@v0.23.1/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-javascript",
+      "version": "v0.25.0",
+      "sum": "h1:ZkWETb66/w8cc13yhfnNuHOLDQWl3BnKlH6f9AdR88c=",
+      "go_mod_sum": "h1:lmGD1EJdCA+v0S1u2fFgepMg/opzSg/4pgFym2FPGAs=",
+      "graphs": [
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-javascript@v0.25.0/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-json",
+      "version": "v0.24.8",
+      "sum": "h1:tV5rMkihgtiOe14a9LHfDY5kzTl5GNUYe6carZBn0fQ=",
+      "go_mod_sum": "h1:F351KK0KGvCaYbZ5zxwx/gWWvZhIDl0eMtn+1r+gQbo=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-json@v0.24.8/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php",
+      "version": "v0.23.11",
+      "sum": "h1:iHewsLNDmznh8kgGyfWfujsZxIz1YGbSd2ZTEM0ZiP8=",
+      "go_mod_sum": "h1:T/kbfi+UcCywQfUNAJnGTN/fMSUjnwPXA8k4yoIks74=",
+      "graphs": [
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-php@v0.23.11/LICENSE",
+          "sha256": "664764fabf40c0b318e06324a5a12379092a2df25b8cbf2415f71bc0bb352346"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-php",
+      "version": "v0.24.2",
+      "sum": "h1:yy+COnaaHUNDTKODfNbHhVRD4mQpFELTnBK9+EhpO+w=",
+      "go_mod_sum": "h1:cEzabPRy4doSxaP9CF9u4FXc3L9Q3Mek3XPVCfqJQRw=",
+      "graphs": [
+        "php"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-php@v0.24.2/LICENSE",
+          "sha256": "664764fabf40c0b318e06324a5a12379092a2df25b8cbf2415f71bc0bb352346"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-python",
+      "version": "v0.23.6",
+      "sum": "h1:qHnWFR5WhtMQpxBZRwiaU5Hk/29vGju6CVtmvu5Haas=",
+      "go_mod_sum": "h1:cpdthSy/Yoa28aJFBscFHlGiU+cnSiSh1kuDVtI8YeM=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-python@v0.23.6/LICENSE",
+          "sha256": "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-ruby",
+      "version": "v0.23.1",
+      "sum": "h1:T/NKHUA+iVbHM440hFx+lzVOzS4dV6z8Qw8ai+72bYo=",
+      "go_mod_sum": "h1:kUS4kCCQloFcdX6sdpr8p6r2rogbM6ZjTox5ZOQy8cA=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-ruby@v0.23.1/LICENSE",
+          "sha256": "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-rust",
+      "version": "v0.23.2",
+      "sum": "h1:6AtoooCW5GqNrRpfnvl0iUhxTAZEovEmLKDbyHlfw90=",
+      "go_mod_sum": "h1:hfeGWic9BAfgTrc7Xf6FaOAguCFJRo3RBbs7QJ6D7MI=",
+      "graphs": [
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-rust@v0.23.2/LICENSE",
+          "sha256": "31d5b6f4243d5c7c6e1c4ebbbb9f6407bd1457a08bcc4f706521710341acba36"
+        }
+      ]
+    },
+    {
+      "module": "github.com/tree-sitter/tree-sitter-typescript",
+      "version": "v0.23.2",
+      "sum": "h1:/Odvphn18PniVixb9e97X0DbNVsU6Qocv9mfkyzdXwU=",
+      "go_mod_sum": "h1:zjzMXT/Ulffel2xfOcAkQQkiAkmgnbtPGlFQw/5X4xA=",
+      "graphs": [
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/tree-sitter/tree-sitter-typescript@v0.23.2/LICENSE",
+          "sha256": "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+        }
+      ]
+    },
+    {
+      "module": "github.com/yuin/goldmark",
+      "version": "v1.4.13",
+      "sum": "h1:fVcFKWvrslecOb/tg+Cc05dkeYx540o0FuFt3nUVDoE=",
+      "go_mod_sum": "h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/github.com/yuin/goldmark@v1.4.13/LICENSE",
+          "sha256": "c1d6f653c38c80294dc7994647ba0dcc508ce64a86996303c804efa2f7982bff"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "version": "v0.53.0",
+      "sum": "h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=",
+      "go_mod_sum": "h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/crypto@v0.53.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/crypto@v0.53.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/exp/typeparams",
+      "version": "v0.0.0-20231108232855-2478ac86f678",
+      "sum": "h1:1P7xPZEwZMoBoz0Yze5Nx2/4pxj6nw9ZqHWXqP0iRgQ=",
+      "go_mod_sum": "h1:AbB0pIl9nAr9wVwH+Z2ZpaocVmF5I4GyWCDIsVjR0bk=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/exp/typeparams@v0.0.0-20231108232855-2478ac86f678/LICENSE",
+          "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/exp",
+      "version": "v0.0.0-20231110203233-9a3e6036ecaa",
+      "sum": "h1:FRnLl4eNAQl8hwxVVC17teOw8kdjVDVAiFMtgUdTSRQ=",
+      "go_mod_sum": "h1:zk2irFbV9DP96SEBUUAy67IdHUaZuSnrz1n472HUCLE=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/exp@v0.0.0-20231110203233-9a3e6036ecaa/LICENSE",
+          "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/exp@v0.0.0-20231110203233-9a3e6036ecaa/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/image",
+      "version": "v0.45.0",
+      "sum": "h1:FMb1nTbH5H9vF55SriQHgFw5GnNL9Jg6L25BwXKzhB0=",
+      "go_mod_sum": "h1:n62x/7RqlwXDvGsSU4u6IUTUf6KghUZ9Bt7cG/T9Fx4=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/image@v0.45.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/image@v0.45.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/mod",
+      "version": "v0.36.0",
+      "sum": "h1:JJjpVx6myfUsUdAzZuOSTTmRE0PfZeNWzzvKrP7amb4=",
+      "go_mod_sum": "h1:moc6ELqsWcOw5Ef3xVprK5ul/MvtVvkIXLziUOICjUQ=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/mod@v0.36.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/mod@v0.36.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/net",
+      "version": "v0.54.0",
+      "sum": "h1:2zJIZAxAHV/OHCDTCOHAYehQzLfSXuf/5SoL/Dv6w/w=",
+      "go_mod_sum": "h1:Sj4oj8jK6XmHpBZU/zWHw3BV3abl4Kvi+Ut7cQcY+cQ=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/net@v0.54.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/net@v0.54.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/sync",
+      "version": "v0.21.0",
+      "sum": "h1:HLII4xRRTtCRkxYp4HNFF0Js/Og6q2i++KXbg0gHCwM=",
+      "go_mod_sum": "h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/sync@v0.21.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/sync@v0.21.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/sys",
+      "version": "v0.47.0",
+      "sum": "h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+      "go_mod_sum": "h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/sys@v0.47.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/sys@v0.47.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/telemetry",
+      "version": "v0.0.0-20260508192327-42602be52be6",
+      "sum": "h1:HjU6IWBiAgRIdAJ9/y1rwCn+UELEmwV+VsTLzj/W4sE=",
+      "go_mod_sum": "h1:Eqhaxk/wZsWEH8CRxLwj6xzEJbz7k1EFGqx7nyCoabE=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/telemetry@v0.0.0-20260508192327-42602be52be6/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/telemetry@v0.0.0-20260508192327-42602be52be6/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/text",
+      "version": "v0.41.0",
+      "sum": "h1:vz/seA0lnX87Othu2f/0L24RcgrXD9/YFTSuGjj3rH8=",
+      "go_mod_sum": "h1:jvf1O8ajNzZqhSrQBPbutR/EB83Cc0CFrezNQIwbb5M=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/text@v0.41.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/text@v0.41.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/tools/go/expect",
+      "version": "v0.1.1-deprecated",
+      "sum": "h1:jpBZDwmgPhXsKZC6WhL20P4b/wmnpsEAGHaNy0n/rJM=",
+      "go_mod_sum": "h1:eihoPOH+FgIqa3FpoTwguz/bVUSGBlGQU67vpBeOrBY=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/tools/go/expect@v0.1.1-deprecated/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        }
+      ]
+    },
+    {
+      "module": "golang.org/x/tools",
+      "version": "v0.45.0",
+      "sum": "h1:18qN3FAooORvApf5XjCXgsuayZOEtXf6JK18I3+ONa8=",
+      "go_mod_sum": "h1:LuUGqqaXcXMEFEruIVJVm5mgDD8vww/z/SR1gQ4uE/0=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/golang.org/x/tools@v0.45.0/LICENSE",
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "source_path": "PATENTS",
+          "path": "third_party/licenses/golang.org/x/tools@v0.45.0/PATENTS",
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        }
+      ]
+    },
+    {
+      "module": "gopkg.in/check.v1",
+      "version": "v0.0.0-20161208181325-20d25e280405",
+      "sum": "h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=",
+      "go_mod_sum": "h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/gopkg.in/check.v1@v0.0.0-20161208181325-20d25e280405/LICENSE",
+          "sha256": "69ce77f2b1c9c608d27f2d749b0e7d0c13960ed3b0dc07b973ac940e362e5d9c"
+        }
+      ]
+    },
+    {
+      "module": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "sum": "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+      "go_mod_sum": "h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/gopkg.in/yaml.v3@v3.0.1/LICENSE",
+          "sha256": "d18f6323b71b0b768bb5e9616e36da390fbd39369a81807cca352de4e4e6aa0b"
+        },
+        {
+          "source_path": "NOTICE",
+          "path": "third_party/licenses/gopkg.in/yaml.v3@v3.0.1/NOTICE",
+          "sha256": "f6c2dd3a67b576eafb89b80200b8b1627230bf3821a0c14cb99a22ac19107d00"
+        }
+      ]
+    },
+    {
+      "module": "honnef.co/go/tools",
+      "version": "v0.6.1",
+      "sum": "h1:R094WgE8K4JirYjBaOpz/AvTyUu/3wbmAoskKN/pxTI=",
+      "go_mod_sum": "h1:3puzxxljPCe8RGJX7BIy1plGbxEOZni5mR2aXe3/uk4=",
+      "graphs": [
+        "root",
+        "php",
+        "javascript"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/honnef.co/go/tools@v0.6.1/LICENSE",
+          "sha256": "f221780eca6d16dc9dce29ce46cd089ce1ca1178998b31ebbcc89ff822c6072b"
+        },
+        {
+          "source_path": "LICENSE-THIRD-PARTY",
+          "path": "third_party/licenses/honnef.co/go/tools@v0.6.1/LICENSE-THIRD-PARTY",
+          "sha256": "3e7ed5dc00f1b3518b99284123bfc3e3c65b82c62988c0dcda5c86c13d913f7c"
+        },
+        {
+          "source_path": "go/gcsizes/LICENSE",
+          "path": "third_party/licenses/honnef.co/go/tools@v0.6.1/go/gcsizes/LICENSE",
+          "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+        },
+        {
+          "source_path": "go/ir/LICENSE",
+          "path": "third_party/licenses/honnef.co/go/tools@v0.6.1/go/ir/LICENSE",
+          "sha256": "7d38c43dad3b1e280ebcf8b69f39ac34689c2ae3ce12d6ac5eb0b1e5c1f2db58"
+        }
+      ]
+    },
+    {
+      "module": "lukechampine.com/adiantum",
+      "version": "v1.1.1",
+      "sum": "h1:4fp6gTxWCqpEbLy40ExiYDDED3oUNWx5cTqBCtPdZqA=",
+      "go_mod_sum": "h1:LrAYVnTYLnUtE/yMp5bQr0HstAf060YUF8nM0B6+rUw=",
+      "graphs": [
+        "root"
+      ],
+      "license_files": [
+        {
+          "source_path": "LICENSE",
+          "path": "third_party/licenses/lukechampine.com/adiantum@v1.1.1/LICENSE",
+          "sha256": "1bab848afdf73b64a7d332c4a38316f87e7ac8463d40fdb1152db7172c842990"
+        },
+        {
+          "source_path": "internal/xchacha/LICENSE",
+          "path": "third_party/licenses/lukechampine.com/adiantum@v1.1.1/internal/xchacha/LICENSE",
+          "sha256": "16233c113ba089c9e96b35a8428a4f7e12c3330ebd02adde806da70e885d0d63"
+        }
+      ]
+    }
+  ]
+}

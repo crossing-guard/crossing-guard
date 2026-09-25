@@ -1,0 +1,1494 @@
+{
+  "_comment": "crossing-guard standard detection library (shipped default, embedded via go:embed). This is the OBSERVABILITY layer: detectors emit deterministic tags; policy is configured on top. Override or extend via a user overlay (cg detectors init) \u2014 same id replaces, new id adds, \"disabled\":true removes. 'roles' scopes a detector to event channels: tool_call detectors are inert on chat text and vice-versa. See docs/design/detection-library.md.",
+  "detectors": [
+    {
+      "id": "memory.search",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "searchMemory",
+          "listMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "search"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.read",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "getMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.write",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "upsertMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "write"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.delete",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "deleteMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "delete"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.read",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Read"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.edit",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Edit",
+          "NotebookEdit",
+          "apply_patch"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "edit"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.write",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Write"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "write"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "exec.run",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Bash",
+          "shell",
+          "local_shell",
+          "exec_command"
+        ]
+      },
+      "tag": {
+        "key": "exec",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "search.code",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Grep",
+          "Glob"
+        ]
+      },
+      "tag": {
+        "key": "search",
+        "value": "code"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "shell grep/rg/find is tagged via the command channel, not here"
+        ]
+      }
+    },
+    {
+      "id": "search.web",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "WebSearch"
+        ]
+      },
+      "tag": {
+        "key": "search",
+        "value": "web"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "net.fetch",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "WebFetch"
+        ]
+      },
+      "tag": {
+        "key": "net",
+        "value": "fetch"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "browser.drive",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "navigate",
+          "read_page",
+          "javascript_tool",
+          "browser_batch",
+          "computer",
+          "find",
+          "read_console_messages",
+          "get_page_text",
+          "form_input"
+        ]
+      },
+      "tag": {
+        "key": "browser",
+        "value": "drive"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "listed browser/computer tools only"
+        ]
+      }
+    },
+    {
+      "id": "subagent.spawn",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Task",
+          "Agent"
+        ]
+      },
+      "tag": {
+        "key": "subagent",
+        "value": "spawn"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "skill.use",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Skill"
+        ]
+      },
+      "tag": {
+        "key": "skill",
+        "value": "use"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "workflow.run",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Workflow"
+        ]
+      },
+      "tag": {
+        "key": "workflow",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "plan.todo",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "TodoWrite",
+          "TaskCreate",
+          "TaskUpdate"
+        ]
+      },
+      "tag": {
+        "key": "plan",
+        "value": "todo"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "area.docs",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "/docs/",
+          "docs/",
+          ".md"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "docs"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.scripts",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "/scripts/",
+          "scripts/",
+          "/bin/"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "scripts"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.src",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "/src/",
+          "/internal/",
+          "/app/",
+          "/lib/",
+          "/pkg/"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "src"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.test",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "_test.",
+          ".test.",
+          "/test/",
+          "/tests/",
+          "/spec/",
+          ".spec."
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "test"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.config",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          ".json",
+          ".yaml",
+          ".yml",
+          ".toml",
+          ".ini",
+          ".conf"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "config"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.ci",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "/.github/",
+          ".gitlab-ci",
+          "Jenkinsfile"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "ci"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "area.secrets",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          ".env",
+          ".pem",
+          "id_rsa",
+          "credentials",
+          ".key"
+        ]
+      },
+      "tag": {
+        "key": "area",
+        "value": "secrets"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "_comment": "Ships with NO in-house hosts on purpose: the standard library cannot know your network, and guessing would mislabel someone else's traffic as in-house. Out of the box only loopback and RFC1918 resolve in-house; everything else resolves external (fail-safe). To declare your own network, override this detector by id in your overlay \u2014 add in_house_hosts / in_house_suffixes and keep the id 'net.dest'. See: how-to/recipes.md.",
+      "id": "net.dest",
+      "kind": "destination",
+      "roles": [
+        "tool_call"
+      ],
+      "in_house_hosts": [],
+      "in_house_suffixes": [],
+      "in_house_cidrs": [
+        "10.0.0.0/8",
+        "192.168.0.0/16",
+        "127.0.0.0/8"
+      ],
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "everything not listed resolves external (fail-safe)",
+          "no in-house hosts are declared by default \u2014 until you override this detector, every non-private destination resolves external"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "vcs.commit",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+commit\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "commit"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "command channel; commit-message prose can still collide"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.push",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+push\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "push"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.push.force",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+push\\b.*(--force|-f)\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "push-force"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.diff",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+diff\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "diff"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.branch",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+(checkout|switch|branch)\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "branch"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.reset.hard",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+reset\\s+--hard\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "reset-hard"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "exec.sudo",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bsudo\\s",
+      "tag": {
+        "key": "exec",
+        "value": "sudo"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "net.egress",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(curl|wget)\\s",
+      "tag": {
+        "key": "net",
+        "value": "egress"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "remote.ssh",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(ssh|scp|sftp)\\s",
+      "tag": {
+        "key": "remote",
+        "value": "ssh"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "search.grep",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(grep|rg|ag|ack|find)\\s",
+      "tag": {
+        "key": "search",
+        "value": "code"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "shell code-search; complements the Grep/Glob tool detector"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "db.read",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(psql|mysql|sqlite3|mongosh)\\b|SELECT\\s.+\\sFROM\\s",
+      "tag": {
+        "key": "db",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "SELECT\u2026FROM shape or a db client binary"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "test.run",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(go\\s+test|pytest|npm\\s+test|jest|phpunit|vitest)\\b",
+      "tag": {
+        "key": "test",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "build.run",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(go\\s+build|make\\s|npm\\s+run\\s+build|cargo\\s+build|mvn\\s)\\b",
+      "tag": {
+        "key": "build",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "'make ' with trailing space to avoid the English word"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "pkg.install",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(npm\\s+i(nstall)?|pip\\s+install|go\\s+get|brew\\s+install|apt(-get)?\\s+install|cargo\\s+add)\\b",
+      "tag": {
+        "key": "pkg",
+        "value": "install"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "risk.rm-rf",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\brm\\s+-[a-zA-Z]*r[a-zA-Z]*f",
+      "tag": {
+        "key": "risk",
+        "value": "rm-rf"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "secret.aws-key",
+      "kind": "pattern",
+      "regex": "AKIA[0-9A-Z]{16}",
+      "tag": {
+        "key": "secret",
+        "value": "aws-key"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "novel key formats",
+          "obfuscation"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "secret.private-key",
+      "kind": "pattern",
+      "regex": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "tag": {
+        "key": "secret",
+        "value": "private-key"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "only the PEM armor header; DER/base64-blob keys with no header"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "secret.gh-token",
+      "kind": "pattern",
+      "regex": "\\bgh[pousr]_[A-Za-z0-9]{36}\\b",
+      "tag": {
+        "key": "secret",
+        "value": "gh-token"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "current GitHub token prefixes/length only; format changes",
+          "split across events"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "secret.bearer",
+      "kind": "pattern",
+      "regex": "(?i)authorization:\\s*bearer\\s+[A-Za-z0-9._-]{10,}",
+      "tag": {
+        "key": "secret",
+        "value": "bearer"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "only the literal 'Authorization: Bearer' header shape"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "data.email",
+      "kind": "pattern",
+      "regex": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+      "tag": {
+        "key": "data-class",
+        "value": "personal"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "obfuscated emails"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "agent.pushback",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i'd push back",
+        "i disagree",
+        "i don't think that's",
+        "i'd caution",
+        "i'd advise against",
+        "that would be a mistake",
+        "i'd recommend against",
+        "i'd argue"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "pushback"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "natural-language floor: misses paraphrase, over-fires on idiom"
+        ]
+      }
+    },
+    {
+      "id": "agent.refusal",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i can't help with that",
+        "i won't",
+        "i'm not able to",
+        "i'm not going to",
+        "i shouldn't",
+        "i cannot do",
+        "that's not something i can"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "refusal"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.safety-refusal",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "against my guidelines",
+        "not comfortable",
+        "could be harmful",
+        "i can't assist with",
+        "not able to help with that"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "safety-refusal"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.apology",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i apologize",
+        "my apologies",
+        "my mistake",
+        "sorry"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "apology"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.self-correction",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i was wrong",
+        "let me correct",
+        "i made an error",
+        "i misread",
+        "correction:",
+        "i got that wrong",
+        "that was incorrect on my part"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "self-correction"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.uncertainty",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i'm not sure",
+        "i'm not certain",
+        "not entirely sure",
+        "it might be",
+        "i'm unsure",
+        "hard to say",
+        "i can't be certain"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "uncertainty"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.hedge",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "should work",
+        "i believe this",
+        "this ought to",
+        "in theory",
+        "probably works",
+        "i think this"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "hedge"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.confidence",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "definitely",
+        "certainly",
+        "guaranteed",
+        "without a doubt",
+        "absolutely will"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "confidence"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.claim-done",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "\u2705",
+        "all set",
+        "that's done",
+        "this is done",
+        "now works",
+        "is working now",
+        "done \u2014",
+        "is complete",
+        "task complete"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "claim-done"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.claim-verified",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i verified",
+        "confirmed",
+        "i tested",
+        "tests pass",
+        "all tests pass",
+        "proven",
+        "verified that",
+        "i've confirmed"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "claim-verified"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.ask-permission",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "should i",
+        "do you want me to",
+        "would you like me to",
+        "shall i",
+        "want me to",
+        "should i proceed"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "ask-permission"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.ask-clarify",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "can you clarify",
+        "could you clarify",
+        "what do you mean",
+        "to confirm,",
+        "just to confirm",
+        "which one"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "ask-clarify"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.risk-warning",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "this is destructive",
+        "be careful",
+        "can't be undone",
+        "cannot be undone",
+        "heads up",
+        "irreversible",
+        "this will delete",
+        "this will overwrite"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "risk-warning"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.scope-expand",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "while i'm at it",
+        "i also",
+        "additionally, i",
+        "i could also",
+        "as a bonus",
+        "i went ahead and"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "scope-expand"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.flattery",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "great question",
+        "excellent point",
+        "you're absolutely right",
+        "good catch",
+        "great catch",
+        "you're right"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "flattery"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.blocked",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "i'm stuck",
+        "i can't figure out",
+        "not sure how to proceed",
+        "i'm blocked",
+        "i've been unable to"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "blocked"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "agent.promise-future",
+      "kind": "content",
+      "roles": [
+        "assistant"
+      ],
+      "keywords": [
+        "next i'll",
+        "i'll follow up",
+        "as a next step",
+        "todo:",
+        "next step",
+        "in a follow-up"
+      ],
+      "tag": {
+        "key": "agent",
+        "value": "promise-future"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "user.correction",
+      "kind": "content",
+      "roles": [
+        "user"
+      ],
+      "keywords": [
+        "that's wrong",
+        "not what i asked",
+        "that's not right",
+        "you're wrong",
+        "that's incorrect",
+        "wrong,",
+        "no, "
+      ],
+      "tag": {
+        "key": "user",
+        "value": "correction"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "user.frustration",
+      "kind": "content",
+      "roles": [
+        "user"
+      ],
+      "keywords": [
+        "still broken",
+        "why did you",
+        "stop.",
+        "ugh",
+        "seriously",
+        "this is frustrating",
+        "come on",
+        "again?",
+        "!!"
+      ],
+      "tag": {
+        "key": "user",
+        "value": "frustration"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "user.approval",
+      "kind": "content",
+      "roles": [
+        "user"
+      ],
+      "keywords": [
+        "perfect",
+        "lgtm",
+        "ship it",
+        "looks good",
+        "nice work",
+        "great work",
+        "\ud83d\udc4d",
+        "that works"
+      ],
+      "tag": {
+        "key": "user",
+        "value": "approval"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "user.rejection",
+      "kind": "content",
+      "roles": [
+        "user"
+      ],
+      "keywords": [
+        "revert",
+        "undo that",
+        "roll back",
+        "no need",
+        "don't do that",
+        "back it out"
+      ],
+      "tag": {
+        "key": "user",
+        "value": "rejection"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "user.challenge",
+      "kind": "content",
+      "roles": [
+        "user"
+      ],
+      "keywords": [
+        "are you sure",
+        "did you actually",
+        "prove it",
+        "how do you know",
+        "really?",
+        "is that true",
+        "did you test"
+      ],
+      "tag": {
+        "key": "user",
+        "value": "challenge"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "floor"
+        ]
+      }
+    },
+    {
+      "id": "phase.plan",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "/docs/",
+          "docs/",
+          "/plans/",
+          "-plan-",
+          "plan.md",
+          "-plan."
+        ]
+      },
+      "tag": {
+        "key": "phase",
+        "value": "plan"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "phase.red-team",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "path_prefix": [
+          "red-team/",
+          "red_team/",
+          "redteam/",
+          "-red-team",
+          "-red_team",
+          "red-team-",
+          "adversarial-"
+        ]
+      },
+      "tag": {
+        "key": "phase",
+        "value": "red-team"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "phase.red-team.kw",
+      "kind": "content",
+      "roles": [
+        "assistant",
+        "user"
+      ],
+      "keywords": [
+        "red-team",
+        "red team",
+        "adversarial review",
+        "red-teaming"
+      ],
+      "tag": {
+        "key": "phase",
+        "value": "red-team"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "keyword match only \u2014 a red-team that never writes the phrase, or uses another word for it, is missed; prefer the phase.red-team path signal where a red-team artifact exists"
+        ]
+      }
+    }
+  ]
+}

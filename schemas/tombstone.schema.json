@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:tombstone:1.0",
+  "title": "Deletion tombstone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "record_id",
+    "record_type",
+    "deleted_at",
+    "deleted_by",
+    "reason_class",
+    "prior_content_hash",
+    "required_projection_cleanup"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "record_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "deleted_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "deleted_by": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "reason_class": {
+      "type": "string",
+      "enum": [
+        "user-request",
+        "retention-expired",
+        "scope-revoked",
+        "security",
+        "correction",
+        "legal",
+        "other"
+      ]
+    },
+    "prior_content_hash": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    },
+    "required_projection_cleanup": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "local-search",
+          "local-vector",
+          "server-search",
+          "server-vector",
+          "cache",
+          "object-storage"
+        ]
+      }
+    },
+    "backup_retention_exception": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 4000
+    }
+  }
+}

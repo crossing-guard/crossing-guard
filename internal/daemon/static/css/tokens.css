@@ -1,0 +1,53 @@
+  :root {
+    color-scheme: dark;
+    --bg: #16161a; --panel: #1e1e24; --panel2: #26262e; --border: #34343e;
+    --text: #e8e8ec; --dim: #9a9aa6; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #ddf03a; --accent2: #6b9fff;
+    --ok: #4caf7d; --warn: #e0b34d; --bad: #e06c5c; --purple: #a98fe0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --user-bubble-bg: #262e3a; --user-bubble-border: #34405a;
+    --chip-claude-bg: #3d2c24; --chip-claude-fg: #e8a184;
+    --chip-codex-bg: #24303d; --chip-codex-fg: #84b3e8;
+    --chip-neutral-bg: #33333d; --chip-neutral-fg: #b6b6c2;
+    --chip-good-bg: #1f3a2c; --chip-good-fg: #7fd6a4;
+    --chip-warn-bg: #3a331f; --chip-warn-fg: #e0c77f;
+    --chip-bad-bg: #3a2424; --chip-bad-fg: #e09a8c;
+    --chip-info-bg: #22343f; --chip-info-fg: #8cc7e8;
+    --chip-purple-bg: #332a3f; --chip-purple-fg: #c1a8ec;
+    --chip-amber-bg: #3f3322; --chip-amber-fg: #e8c78c;
+  }
+  /* light theme: OS preference (unless pinned dark) or explicit pin.
+     Same token names; components never branch on theme directly. */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6;
+      --text: #22222a; --dim: #6b6b76; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #5f6b0a; --accent2: #3b6fc9;
+      --ok: #1e7a4a; --warn: #8a6516; --bad: #bf4534; --purple: #7150b8;
+      --user-bubble-bg: #e9eef6; --user-bubble-border: #ccd6e6;
+      --chip-claude-bg: #f3ddd2; --chip-claude-fg: #9c4a26;
+      --chip-codex-bg: #d8e4f3; --chip-codex-fg: #2d5e94;
+      --chip-neutral-bg: #e6e6ea; --chip-neutral-fg: #55555f;
+      --chip-good-bg: #d3ecdc; --chip-good-fg: #1e6b41;
+      --chip-warn-bg: #f0e6c8; --chip-warn-fg: #7a5d12;
+      --chip-bad-bg: #f3d9d4; --chip-bad-fg: #a03f2c;
+      --chip-info-bg: #d7e9f3; --chip-info-fg: #23617f;
+      --chip-purple-bg: #e6dcf5; --chip-purple-fg: #5d3fa0;
+      --chip-amber-bg: #f3e7cd; --chip-amber-fg: #7a5a17;
+    }
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6;
+    --text: #22222a; --dim: #6b6b76; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #5f6b0a; --accent2: #3b6fc9;
+    --ok: #1e7a4a; --warn: #8a6516; --bad: #bf4534; --purple: #7150b8;
+    --user-bubble-bg: #e9eef6; --user-bubble-border: #ccd6e6;
+    --chip-claude-bg: #f3ddd2; --chip-claude-fg: #9c4a26;
+    --chip-codex-bg: #d8e4f3; --chip-codex-fg: #2d5e94;
+    --chip-neutral-bg: #e6e6ea; --chip-neutral-fg: #55555f;
+    --chip-good-bg: #d3ecdc; --chip-good-fg: #1e6b41;
+    --chip-warn-bg: #f0e6c8; --chip-warn-fg: #7a5d12;
+    --chip-bad-bg: #f3d9d4; --chip-bad-fg: #a03f2c;
+    --chip-info-bg: #d7e9f3; --chip-info-fg: #23617f;
+    --chip-purple-bg: #e6dcf5; --chip-purple-fg: #5d3fa0;
+    --chip-amber-bg: #f3e7cd; --chip-amber-fg: #7a5a17;
+  }

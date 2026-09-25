@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "id": "tmb_01J8ZQ4M7T2V9K3NXW5R6YHBCH",
+  "record_id": "mem_01J8ZQ4M7T2V9K3NXW5R6YHBCG",
+  "record_type": "memory",
+  "deleted_at": "2026-09-17T15:00:00Z",
+  "deleted_by": {
+    "type": "user",
+    "id": "patrick"
+  },
+  "reason_class": "correction",
+  "prior_content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "required_projection_cleanup": [
+    "local-search",
+    "server-search"
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:private-ai-control-plane:schema:request-path:0.1-draft",
+  "title": "Model request path descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "runtime",
+    "integration_surface",
+    "execution_host",
+    "model_provider",
+    "authentication_owner",
+    "authentication_mode",
+    "billing_mode",
+    "prompt_sender",
+    "credential_visibility",
+    "data_destinations",
+    "fallback_allowed",
+    "policy_revision"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1-draft" },
+    "id": { "$ref": "common.schema.json#/$defs/typedId" },
+    "runtime": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "integration_surface": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "execution_host": {
+      "type": "string",
+      "enum": ["user-device", "customer-hosted", "managed-service", "vendor-hosted"]
+    },
+    "model_provider": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "authentication_owner": {
+      "type": "string",
+      "enum": ["native-runtime", "user", "organization", "managed-service", "none"]
+    },
+    "authentication_mode": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "billing_mode": {
+      "type": "string",
+      "enum": [
+        "user-subscription",
+        "organization-subscription",
+        "user-api",
+        "organization-api",
+        "managed-api",
+        "customer-infrastructure",
+        "local-compute",
+        "unknown"
+      ]
+    },
+    "prompt_sender": {
+      "type": "string",
+      "enum": ["native-runtime", "local-daemon", "control-plane", "user-client"]
+    },
+    "credential_visibility": {
+      "type": "string",
+      "enum": ["opaque-to-product", "local-only", "server-visible", "not-applicable"]
+    },
+    "data_destinations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+    },
+    "fallback_allowed": { "type": "boolean" },
+    "allowed_fallback_path_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "common.schema.json#/$defs/typedId" }
+    },
+    "policy_revision": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "fallback_allowed": { "const": false } } },
+      "then": { "properties": { "allowed_fallback_path_ids": { "maxItems": 0 } } }
+    }
+  ]
+}

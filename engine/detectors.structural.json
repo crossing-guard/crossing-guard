@@ -1,0 +1,570 @@
+{
+  "_comment": "Crossing Guard portable structural detector floor. Framework asset: deterministic action/tool facts only; no business, sensitivity, behavior, workflow-phase, architecture, destination-trust, risk, threshold, or consequence policy.",
+  "detectors": [
+    {
+      "id": "memory.search",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "searchMemory",
+          "listMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "search"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.read",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "getMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.write",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "upsertMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "write"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "memory.delete",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "deleteMemory"
+        ]
+      },
+      "tag": {
+        "key": "memory",
+        "value": "delete"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.read",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Read"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.edit",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Edit",
+          "NotebookEdit",
+          "apply_patch"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "edit"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "fs.write",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Write"
+        ]
+      },
+      "tag": {
+        "key": "fs",
+        "value": "write"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "exec.run",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Bash",
+          "shell",
+          "local_shell",
+          "exec_command"
+        ]
+      },
+      "tag": {
+        "key": "exec",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "search.code",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Grep",
+          "Glob"
+        ]
+      },
+      "tag": {
+        "key": "search",
+        "value": "code"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "shell grep/rg/find is tagged via the command channel, not here"
+        ]
+      }
+    },
+    {
+      "id": "search.web",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "WebSearch"
+        ]
+      },
+      "tag": {
+        "key": "search",
+        "value": "web"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "net.fetch",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "WebFetch"
+        ]
+      },
+      "tag": {
+        "key": "net",
+        "value": "fetch"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "browser.drive",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "navigate",
+          "read_page",
+          "javascript_tool",
+          "browser_batch",
+          "computer",
+          "find",
+          "read_console_messages",
+          "get_page_text",
+          "form_input"
+        ]
+      },
+      "tag": {
+        "key": "browser",
+        "value": "drive"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "listed browser/computer tools only"
+        ]
+      }
+    },
+    {
+      "id": "subagent.spawn",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Task",
+          "Agent"
+        ]
+      },
+      "tag": {
+        "key": "subagent",
+        "value": "spawn"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "skill.use",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Skill"
+        ]
+      },
+      "tag": {
+        "key": "skill",
+        "value": "use"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "scope": "resource"
+    },
+    {
+      "id": "workflow.run",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "Workflow"
+        ]
+      },
+      "tag": {
+        "key": "workflow",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "plan.todo",
+      "kind": "source",
+      "roles": [
+        "tool_call"
+      ],
+      "match": {
+        "tool": [
+          "TodoWrite",
+          "TaskCreate",
+          "TaskUpdate"
+        ]
+      },
+      "tag": {
+        "key": "plan",
+        "value": "todo"
+      },
+      "coverage": {
+        "enumerable": true
+      }
+    },
+    {
+      "id": "vcs.commit",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+commit\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "commit"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "command channel; commit-message prose can still collide"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.push",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+push\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "push"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.push.force",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+push\\b.*(--force|-f)\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "push-force"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.diff",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+diff\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "diff"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.branch",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+(checkout|switch|branch)\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "branch"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "vcs.reset.hard",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bgit\\s+reset\\s+--hard\\b",
+      "tag": {
+        "key": "vcs",
+        "value": "reset-hard"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "exec.sudo",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\bsudo\\s",
+      "tag": {
+        "key": "exec",
+        "value": "sudo"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "net.egress",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(curl|wget)\\s",
+      "tag": {
+        "key": "net",
+        "value": "egress"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "remote.ssh",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(ssh|scp|sftp)\\s",
+      "tag": {
+        "key": "remote",
+        "value": "ssh"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "search.grep",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(grep|rg|ag|ack|find)\\s",
+      "tag": {
+        "key": "search",
+        "value": "code"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "shell code-search; complements the Grep/Glob tool detector"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "db.read",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(psql|mysql|sqlite3|mongosh)\\b|SELECT\\s.+\\sFROM\\s",
+      "tag": {
+        "key": "db",
+        "value": "read"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "SELECT…FROM shape or a db client binary"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "test.run",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(go\\s+test|pytest|npm\\s+test|jest|phpunit|vitest)\\b",
+      "tag": {
+        "key": "test",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "build.run",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(go\\s+build|make\\s|npm\\s+run\\s+build|cargo\\s+build|mvn\\s)\\b",
+      "tag": {
+        "key": "build",
+        "value": "run"
+      },
+      "coverage": {
+        "enumerable": true,
+        "gaps": [
+          "'make ' with trailing space to avoid the English word"
+        ]
+      },
+      "evidence": "raw"
+    },
+    {
+      "id": "pkg.install",
+      "kind": "pattern",
+      "roles": [
+        "tool_call"
+      ],
+      "regex": "\\b(npm\\s+i(nstall)?|pip\\s+install|go\\s+get|brew\\s+install|apt(-get)?\\s+install|cargo\\s+add)\\b",
+      "tag": {
+        "key": "pkg",
+        "value": "install"
+      },
+      "coverage": {
+        "enumerable": true
+      },
+      "evidence": "raw"
+    }
+  ]
+}

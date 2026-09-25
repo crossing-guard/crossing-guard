@@ -1,0 +1,2 @@
+error-contains: missing required property "signature"
+A bundle changes what tools may do; an unsigned one is never valid.

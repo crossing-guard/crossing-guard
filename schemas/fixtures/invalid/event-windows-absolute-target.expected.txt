@@ -1,0 +1,2 @@
+error-contains: does not match pattern
+A drive-letter path is absolute too; the pattern refuses it (postwork W1).

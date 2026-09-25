@@ -1,0 +1,10 @@
+(*os.File).Close
+(*database/sql.Rows).Close
+(*database/sql.DB).Close
+(*crossing-guard/store.GovTx).Rollback
+(*crossing-guard/store.Index).Close
+(*flag.FlagSet).Parse
+fmt.Fprint
+fmt.Fprintf
+fmt.Fprintln
+fmt.Sscanf

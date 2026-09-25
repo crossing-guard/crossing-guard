@@ -1,0 +1,2 @@
+error-contains: not in enum
+A user-scoped memory is private to its author and is invalid on the wire by schema.

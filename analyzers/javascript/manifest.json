@@ -1,0 +1,12 @@
+{
+  "format_version": "crossing-guard-analyzer-manifest-v1",
+  "module_id": "org.crossing-guard.javascript",
+  "module_version": "0.1.1",
+  "protocol_version": "crossing-guard-analyzer-stream-v1",
+  "entrypoint": "bin/crossing-guard-analyzer-javascript",
+  "analyzer_identity": "javascript-tree-sitter-v2",
+  "languages": ["javascript", "typescript", "tsx"],
+  "extensions": [".cjs", ".js", ".jsx", ".mjs", ".ts", ".tsx"],
+  "capabilities": ["package_dependency", "symbol_declaration", "responsibility_fingerprint", "symbol_call"],
+  "body_shape_algorithms": ["javascript-tree-shape-v1"]
+}

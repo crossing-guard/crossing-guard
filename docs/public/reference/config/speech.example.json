@@ -1,0 +1,75 @@
+{
+  "format_version": 1,
+  "transcription": {
+    "backend": "whispercpp",
+    "backends": {
+      "whispercpp": {
+        "executable": "/opt/homebrew/bin/whisper-cli",
+        "model_path": "/REPLACE/WITH/YOUR/PATH/ggml-base.en-q5_1.bin",
+        "model_sha256": "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
+        "language": "en",
+        "cpu_only": true,
+        "sandbox": "strict",
+        "hints": {
+          "project_name": true,
+          "branch_name": true,
+          "keywords": []
+        }
+      },
+      "openai-batch": {
+        "api_key_env": "CROSSING_GUARD_OPENAI_SPEECH_KEY",
+        "model": "gpt-transcribe",
+        "origin": "https://api.openai.com",
+        "disclosure": {
+          "text": "Your recording goes to OpenAI when you let go. Nothing else from this session is sent. Uses your own OpenAI key. OpenAI's API terms apply; audio is not used for training unless your account opted in.",
+          "version": 1
+        },
+        "hints": {
+          "project_name": false,
+          "branch_name": false,
+          "keywords": []
+        }
+      }
+    },
+    "disclosure": {
+      "token_seconds": 120
+    },
+    "audio": {
+      "channels": 1,
+      "bits": 16
+    },
+    "limits": {
+      "min_ms": 250,
+      "max_seconds": 120,
+      "silence_stop_seconds": 15,
+      "min_peak": 0.01,
+      "min_rms": 0.003,
+      "min_confidence": 0.2,
+      "final_deadline_seconds": 30,
+      "max_concurrent": 1,
+      "abandon_seconds": 20,
+      "sweep_seconds": 5,
+      "failure_pause_count": 3,
+      "failure_pause_seconds": 10,
+      "max_capture_bytes": 1048576
+    },
+    "streaming": {
+      "frame_interval_ms": 250,
+      "max_frame_bytes": 65536,
+      "partial_min_interval_ms": 700,
+      "window_seconds": 8,
+      "overlap_seconds": 2,
+      "keepalive_seconds": 15,
+      "max_streams": 16
+    },
+    "ui": {
+      "push_to_talk": "Alt+Space",
+      "hold_threshold_ms": 300,
+      "auto_send": false,
+      "auto_send_min_words": 3,
+      "dim_tail_words": 2,
+      "tint_seconds": 4,
+      "first_run_hint_sessions": 3
+    }
+  }
+}

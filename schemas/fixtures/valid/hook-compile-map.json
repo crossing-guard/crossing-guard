@@ -1,0 +1,95 @@
+{
+  "schema_version": "0.1-draft",
+  "runtime_hook_facts": [
+    {
+      "runtime": "claude-code",
+      "integration_style": "subprocess-hook",
+      "events": {
+        "pre_tool": { "native_name": "PreToolUse", "status": "functional", "note": null },
+        "post_tool": { "native_name": "PostToolUse", "status": "functional", "note": null },
+        "session_start": { "native_name": "SessionStart", "status": "functional", "note": null },
+        "user_prompt": { "native_name": "UserPromptSubmit", "status": "functional", "note": null }
+      },
+      "decision_fields": {
+        "permission_decision": { "native_name": "permissionDecision", "status": "functional", "note": null },
+        "updated_tool_output": { "native_name": "updatedToolOutput", "status": "functional", "note": null },
+        "updated_input": { "native_name": "updatedInput", "status": "functional", "note": null },
+        "updated_permissions": { "native_name": null, "status": "absent", "note": "No grant-with-constraints field on Claude." },
+        "additional_context": { "native_name": "additionalContext", "status": "functional", "note": null }
+      },
+      "fail_modes": {
+        "on_crash": "open",
+        "on_timeout": "open",
+        "block_holds_call_open": true,
+        "note": "Vendor default fail-open; shim mitigations live in the label function."
+      },
+      "registration": {
+        "mechanism": "hooks block in settings.json via --settings, or a plugin",
+        "trust_model": "none (config = trust)",
+        "silent_absence_risk": "medium",
+        "requires_canary": true
+      },
+      "confidence": "vendor-doc",
+      "sources": [
+        { "kind": "vendor-doc", "ref": "https://code.claude.com/docs/en/hooks", "publisher": "Anthropic", "note": null }
+      ],
+      "verified_date": "2026-07-14",
+      "notes": null
+    }
+  ],
+  "capability_expansions": [
+    {
+      "runtime": "claude-code",
+      "capability": "git.push_protected",
+      "capability_kind": "domain",
+      "effect_capabilities": ["command.execute", "network.egress"],
+      "tool_matchers": [
+        { "matcher": "bash:^\\s*git\\s+push\\b", "matcher_kind": "shell-parse", "normalization": "best-effort", "note": null },
+        { "matcher": "mcp__git__push", "matcher_kind": "mcp", "normalization": "unknown", "note": null }
+      ],
+      "coverage": "partial",
+      "normalization": "best-effort",
+      "residual_routes": ["push via an alternate configured remote"],
+      "coverage_probed": true,
+      "confidence": "prototype-proven",
+      "sources": [
+        { "kind": "prototype-probe", "ref": "experiments/ccprobe/gitguard.py", "publisher": "this project", "note": null }
+      ],
+      "verified_date": "2026-07-14",
+      "notes": "Backstopped by remote-branch-protection -> enforced-failclosed outcome."
+    }
+  ],
+  "action_bindings": [
+    {
+      "runtime": "claude-code",
+      "action": "ask",
+      "native_event": "PreToolUse",
+      "native_field": "permissionDecision: ask",
+      "field_status": "functional",
+      "can_block": true,
+      "can_redact": false,
+      "policy_decision": "require-approval",
+      "emit_when": "Functional; the shim holds the subprocess open pending daemon approval and self-deadlines to deny before the runtime timeout.",
+      "confidence": "prototype-proven",
+      "sources": [
+        { "kind": "prototype-probe", "ref": "experiments/ccprobe/gitguard.py", "publisher": "this project", "note": null }
+      ],
+      "verified_date": "2026-07-14",
+      "notes": null
+    }
+  ],
+  "backstop_seams": [
+    {
+      "seam": "remote-branch-protection",
+      "covered_effect_capabilities": ["git.push_protected", "git.force_push"],
+      "bypassable": false,
+      "layer": "remote-service",
+      "confidence": "vendor-doc",
+      "sources": [
+        { "kind": "inference", "ref": "docs/brainstorm/2026-07-14-poc-git-guard.md", "publisher": "this project", "note": null }
+      ],
+      "verified_date": "2026-07-14",
+      "notes": "Server-side guarantee; does not cover a purely-local branch change."
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schema": "crossing-guard.event",
+  "schema_version": "1.0",
+  "id": "evt_01J8ZQ4M7T2V9K3NXW5R6YHBCE",
+  "occurred_at": "2026-09-17T14:03:11Z",
+  "recorded_at": "2026-09-17T14:03:11Z",
+  "sequence": 3,
+  "session": {
+    "id": "ses_01J8ZQ4M7T2V9K3NXW5R6YHBCD",
+    "runtime": "claude",
+    "native_id": "3f6c1a2e-9d4b-4c8a-b1f0-7e5d2c9a8b17"
+  },
+  "actor": {
+    "type": "agent",
+    "id": "runtime:claude"
+  },
+  "workspace": {
+    "repository_id": "remote-sha256-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "type": "action.write",
+  "visibility": "organization",
+  "sensitivity": [
+    "internal"
+  ],
+  "provenance": {
+    "kind": "native-runtime-event",
+    "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "redaction_stage": "after-hash"
+  },
+  "chain": {
+    "seq": 3,
+    "prev_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "payload": {
+    "verb": "write",
+    "tool": "Edit",
+    "target": {
+      "kind": "file",
+      "repository_id": "remote-sha256-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "path": "internal/daemon/govern.go"
+    },
+    "tags": [
+      {
+        "key": "data-class",
+        "value": "internal",
+        "detector": "area.internal",
+        "provenance": "observed",
+        "evidence": "path-prefix"
+      }
+    ],
+    "tags_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "decision": "allow",
+    "reason": "no rule matched",
+    "origin": "live",
+    "rule": null,
+    "layer": null
+  }
+}

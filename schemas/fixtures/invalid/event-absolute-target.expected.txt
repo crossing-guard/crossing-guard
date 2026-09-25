@@ -1,0 +1,2 @@
+error-contains: does not match pattern
+An absolute path must never ship: targets are repo-relative or outside_repository (team plan §5.13, S4).

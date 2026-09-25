@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "id": "agent-review",
+  "name": "Agent review",
+  "description": "Long inputs and added context fold to one line, so the agent's own work reads first.",
+  "rules": [
+    {"match": {"kind": "user", "min_chars": 2000}, "display": "collapse"},
+    {"match": {"kind": "context"}, "display": "collapse"}
+  ]
+}
