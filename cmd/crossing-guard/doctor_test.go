@@ -25,6 +25,12 @@ func ladderFor(t *testing.T, settings func(home string) string, consent bool, ev
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// These cases require an installed client independently of any host tools.
+	// Detection checks executable presence without running this inert fixture.
+	if err := os.WriteFile(filepath.Join(home, "claude"), []byte("#!/bin/sh\nexit 97\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", home)
 	// A present binary with our name, for fixtures that want BinaryPresent=true.
 	if err := os.WriteFile(filepath.Join(home, "crossing-guard"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)

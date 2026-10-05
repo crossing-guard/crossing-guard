@@ -8,6 +8,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -194,10 +196,12 @@ func TestNaturalSignalsFlowThroughSelectorMap(t *testing.T) {
 // TestNaturalEndFactIsHookExactOnly pins B3: only "end" entry kinds fire
 // session.ended — presence-style rows never do.
 func TestNaturalEndFactIsHookExactOnly(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "finish-turn")
 	driver := managedDynamicFixtureDriver{commandFor: func(ChatRequest) string {
-		return jsonTextCommand(`{"action":"no_action","message":"Ended.","citations":[]}`)
+		return helperTurnCommand("", `{"action":"no_action","message":"Ended.","citations":[]}`, gate)
 	}}
 	fixture := naturalFixture(t, driver)
+	t.Cleanup(func() { _ = os.WriteFile(gate, nil, 0o600) })
 	bindNaturalFollower(t, fixture, "agent-end", true)
 	appendNaturalActivity(t, fixture, "first-action", 200)
 	fixture.host.emitNaturalSignalsOnce()
@@ -210,8 +214,19 @@ func TestNaturalEndFactIsHookExactOnly(t *testing.T) {
 	// The hook-exact end row does fire.
 	appendNaturalActivity(t, fixture, "end", 210)
 	fixture.host.emitNaturalSignalsOnce()
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Completion of the first child drains the queued hook-exact end signal.
+	runs = waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+		for _, run := range runs {
+			if run.BindingID == "agent-end" && run.Detail["signal"] == "session.ended" && run.State == "completed" {
+				return true
+			}
+		}
+		return false
+	})
 	ended := false
-	runs, _ = fixture.host.ix.ManagedRuns(50)
 	for _, run := range runs {
 		if run.BindingID == "agent-end" && run.Detail["signal"] == "session.ended" {
 			ended = true

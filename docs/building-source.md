@@ -38,3 +38,16 @@ components and attribution, but does not establish installed provider support.
 September 25: the safety-fixed candidate passed the full quality gate. Eight HTTP cases
 verified Codex launch arguments using a synthetic runtime; a disposable schema28 → 32
 upgrade/export/recovery trial also passed. Neither establishes installed-client support.
+
+September 27 CI repair: doctor fixtures now supply their own inert client executable,
+and natural-session tests await asynchronous completion and capability outcomes. Exact
+signal identity, counts, anchors and suppression reasons remain asserted; no production
+code, timeouts or quality checks changed. Focused regressions pass ten race-instrumented
+repetitions. The complete local quality gate passes, including root and analyzer race
+tests, static checks and frontend checks. Hosted verification of the repair is pending.
+
+The published source plus these test-only changes builds the application and both external
+analyzers. A fresh, isolated local daemon passed compiled doctor/init-dry-run checks,
+authenticated HTTP, browser navigation, invalid-token refusal and browser recovery.
+The console contained no sessions and no provider credentials or hooks were attached.
+This is local source inspection evidence; the installed-client release gates remain open.

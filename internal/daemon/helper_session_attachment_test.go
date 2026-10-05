@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -109,10 +110,12 @@ func signalsOf(runs []store.ManagedRun) map[string]int {
 // directly in TestManagedRunIDIsQualifiedByProducer.)
 func TestNaturalTurnAndResultRowsFireSessionKindsWithHookIdentity(t *testing.T) {
 	defer swapOrchestrationConfig(settledConfig())()
+	gate := filepath.Join(t.TempDir(), "finish-turn")
 	driver := managedDynamicFixtureDriver{commandFor: func(ChatRequest) string {
-		return jsonTextCommand(`{"action":"no_action","message":"Noted.","citations":[]}`)
+		return helperTurnCommand("", `{"action":"no_action","message":"Noted.","citations":[]}`, gate)
 	}}
 	fixture := naturalFixture(t, driver)
+	t.Cleanup(func() { _ = os.WriteFile(gate, nil, 0o600) })
 	bindSessionKindsFollower(t, fixture, "agent-session-kinds", true)
 	past := time.Now().Add(-10 * time.Second)
 	appendNaturalTurn(t, fixture, "turn.started", past.UnixMilli())
@@ -120,7 +123,22 @@ func TestNaturalTurnAndResultRowsFireSessionKindsWithHookIdentity(t *testing.T) 
 	appendNaturalResult(t, fixture, "vendor-transcript", "t1", past.Unix())
 	appendNaturalResult(t, fixture, "live-post-tool", "l1", past.Unix())
 	fixture.host.emitNaturalSignalsOnce()
-	runs := runsFor(t, fixture, "agent-session-kinds")
+	// The second signal queues behind the held child. Release it, then observe
+	// the ordinary asynchronous completion/drain before inspecting both runs.
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runs := waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+		if len(runs) < 2 {
+			return false
+		}
+		for _, run := range runs {
+			if run.State != "completed" {
+				return false
+			}
+		}
+		return true
+	})
 	signals := signalsOf(runs)
 	if len(runs) != 2 || signals["session.turn-started"] != 1 || signals["session.tool-completed"] != 1 {
 		t.Fatalf("runs=%d signals=%v problem=%q", len(runs), signals, fixture.host.problem)
@@ -143,7 +161,15 @@ func TestNaturalTurnAndResultRowsFireSessionKindsWithHookIdentity(t *testing.T) 
 	}
 	appendNaturalTurn(t, fixture, "turn.ended", past.UnixMilli()+2)
 	fixture.host.emitNaturalSignalsOnce()
-	if signals := signalsOf(runsFor(t, fixture, "agent-session-kinds")); signals["session.turn-ended"] != 1 {
+	runs = waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+		for _, run := range runs {
+			if run.Detail["signal"] == "session.turn-ended" && run.State == "completed" {
+				return true
+			}
+		}
+		return false
+	})
+	if signals := signalsOf(runs); len(runs) != 3 || signals["session.turn-ended"] != 1 {
 		t.Fatalf("turn.ended did not fire once: %v", signals)
 	}
 }
@@ -442,7 +468,9 @@ func TestReplyOffNaturalSessionIsAnAttendedSessionOutcome(t *testing.T) {
 	fixture.host.emitNaturalSignalsOnce()
 	runs := waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
 		for _, r := range runs {
-			if r.BindingID == "agent-reply-natural" && r.State == "completed" {
+			// Completion precedes the capability-outcome merge; await both
+			// writes, then assert the exact suppression reason below.
+			if r.BindingID == "agent-reply-natural" && r.State == "completed" && r.Detail["auto_reply_suppressed"] != nil {
 				return true
 			}
 		}
