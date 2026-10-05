@@ -42,3 +42,22 @@ earlier local inspection archive predates this port and is not the current candi
 The public GitHub repository holds this experimental source snapshot. Web commit sign-off
 and private vulnerability reporting are enabled. See [release policy](release-policy.md)
 and [data/recovery scope](data-and-recovery.md).
+
+## September 27 public CI repair
+
+The first hosted source check for published revision `c26a2cc8` failed four doctor tests
+and two natural-session tests. The doctor fixture depended on a developer-installed
+client; the session tests assumed immediate completion of asynchronous work. This repair
+supplies an inert fixture executable and waits through the existing bounded helpers,
+with held-child fixtures making the pending-signal path deterministic. The first full
+local gate then caught another early assertion, which now waits for the recorded
+attended-session capability outcome. Production source, timeout bounds and gate checks
+are unchanged. All seven affected tests pass ten focused race repetitions; the complete
+local gate passes, including root and analyzer race tests, static checks and frontend
+checks. Hosted verification of the correction remains pending.
+
+All three executables build. Compiled CLI, real loopback HTTP and browser success,
+refusal and recovery were exercised with fresh data and no provider credentials or
+installed hooks. The browser correctly shows empty integration state. No supported
+binary release, natural installed-client proof or migration claim follows from this run;
+the release gates above remain open.
