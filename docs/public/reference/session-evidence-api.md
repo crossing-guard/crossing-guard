@@ -55,6 +55,13 @@ older analyzed checkpoint. `state` is `exact`, `baseline_unavailable`, `pending`
 `failed`, or `unavailable`; `pending` means analysis was already admitted by collection,
 not that the HTTP read started work.
 
+A boundary whose analysis facts retention removed (see `understanding_retention` in the
+configuration reference) is never rendered as an empty comparison: a pruned baseline returns
+state `baseline_unavailable`, a pruned current boundary (including one named by
+`checkpoint_id`) and a pruned impact generation return `unavailable`, each with the reason
+`analysis facts were removed by retention`. Boundary and generation objects carry
+`facts_state` (`present` or `pruned`).
+
 `code-change-file` additionally requires a normalized repository-relative `path` and
 accepts `structural_offset` and `structural_limit` (maximum 100). It returns mechanical
 facts only: declaration added/removed/modified/moved state, before/after source-span

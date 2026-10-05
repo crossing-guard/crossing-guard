@@ -107,3 +107,32 @@ func TestCodexDeliveryOptionsOwnTheirVocabulary(t *testing.T) {
 		t.Fatal(err, codexDeliveryTransport)
 	}
 }
+
+// The Stage B send settings (session-message-cross-vendor-plan §5): the
+// send_scope vocabulary is closed, the byte bound must be positive, and the
+// per-caller window may not be negative.
+func TestOrchestrationSendSettingsOwnTheirVocabulary(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "orchestration.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"format_version":1,"delivery":{"deliver_attended":true,"send_scope":"all","send_message_max_bytes":1024,"max_sends_per_caller_window":5}}`)
+	config, _, err := loadOrchestrationConfig(dir)
+	if err != nil || !config.Delivery.DeliverAttended || !config.SendScopeAll() ||
+		config.Delivery.SendMessageMaxBytes != 1024 || config.Delivery.MaxSendsPerCallerWindow != 5 {
+		t.Fatalf("send settings: %+v %v", config, err)
+	}
+	for _, bad := range []string{
+		`{"format_version":1,"delivery":{"send_scope":"everything"}}`,
+		`{"format_version":1,"delivery":{"send_message_max_bytes":0}}`,
+		`{"format_version":1,"delivery":{"max_sends_per_caller_window":-1}}`,
+	} {
+		write(bad)
+		if _, _, err := loadOrchestrationConfig(dir); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}

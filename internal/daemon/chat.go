@@ -10,17 +10,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
+	"crossing-guard/internal/observation"
 	"crossing-guard/internal/taskinput"
+	"crossing-guard/store"
 )
 
 type ChatRequest struct {
+	ThinkingEffort       *store.ThinkingEffort `json:"thinking_effort,omitempty"`
+	SessionEffortToken   string                `json:"session_effort_token,omitempty"`
+	effortDisplayLabel   string
+	effortSource         string
+	effortSessionID      string
+	effortMapping        string
+	effortLegacy         bool
+	effortCatalogDigest  string
 	Runtime              string `json:"runtime"`
 	Prompt               string `json:"prompt"`
 	SessionID            string `json:"session_id,omitempty"`         // vendor resume handle, if set
@@ -43,6 +55,55 @@ type ChatRequest struct {
 	InputScopeID       string   `json:"input_scope_id,omitempty"`
 	InputIDs           []string `json:"input_ids,omitempty"`
 	IdempotencyKey     string   `json:"idempotency_key,omitempty"`
+	// HandoffTicket marks the first turn of a console Open of a handoff (team
+	// rest-of-release plan §6.3): the ticket the open route returned. The task
+	// service admits it through the handoff owner, and only this launch's
+	// process carries it in its environment (chatLaunchEnv).
+	HandoffTicket string `json:"handoff_ticket,omitempty"`
+}
+
+// chatLaunchEnv is the ONE place a runtime process's environment is built (team
+// rest-of-release plan §6.4): every chat_*.go site that gives a process an
+// environment goes through it — session launches, model listings and the
+// OpenCode sites alike. It starts from the daemon's own environment with any
+// inherited handoff ticket removed, so a daemon started from inside an opened
+// session stamps no launch, and adds the ticket only for the first turn of an
+// Open, which is the one request that carries one. Launches that assign no
+// environment inherit the daemon's, which start-up cleared of the same
+// variable (dropInheritedHandoffTicket).
+func chatLaunchEnv(req ChatRequest) []string {
+	ticketPrefix := observation.HandoffTicketEnv + "="
+	inherited := os.Environ()
+	env := make([]string, 0, len(inherited)+1)
+	for _, entry := range inherited {
+		if !strings.HasPrefix(entry, ticketPrefix) {
+			env = append(env, entry)
+		}
+	}
+	if req.HandoffTicket != "" {
+		env = append(env, ticketPrefix+req.HandoffTicket)
+	}
+	return env
+}
+
+// withoutEnv returns env without the entries of the named variables.
+func withoutEnv(env []string, names ...string) []string {
+	kept := env[:0:0]
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if !slices.Contains(names, name) {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+// dropInheritedHandoffTicket removes a handoff ticket from the daemon's own
+// environment, once, at start-up (plan §17.1 F-6): several runtime launches
+// assign no environment and inherit the daemon's, so a daemon started from
+// inside an opened session would otherwise hand its ticket to every one of them.
+func dropInheritedHandoffTicket() error {
+	return os.Unsetenv(observation.HandoffTicketEnv)
 }
 
 type sseWriter struct {
@@ -71,6 +132,22 @@ type ChatDriver interface {
 	ProjectEvent(obj map[string]any) []ChatEvent
 }
 
+// A server-backed runtime can supply its own wire protocol while the existing
+// task process runner retains ownership of start, stop, stderr and process wait.
+type chatProcessProtocolFactory interface {
+	ProcessProtocol(ChatRequest, ChatLaunchContext, *exec.Cmd) chatProcessProtocol
+}
+
+type chatProcessProtocol interface {
+	Run(io.ReadCloser, func(ChatEvent)) error
+}
+
+// A one-shot protocol consumes stdout through EOF so its process can be waited
+// naturally. Server-backed protocols keep the existing terminate-and-reap path.
+type chatProtocolNaturalExit interface {
+	WaitForNaturalExit() bool
+}
+
 // SessionIdentity is the canonical address of one session: the runtime that
 // owns it, its catalog id, and its native id. Delivery is addressed by this,
 // never by a task (helper-session-attachment plan D5).
@@ -90,18 +167,54 @@ type sessionMessageDeliverer interface {
 	DeliverSessionMessage(context.Context, SessionIdentity, string) SessionMessageReceipt
 }
 
+// sessionInbox is one target session's inbox resolved from the runtime's own
+// registry: a live socket path plus the registry facts that prove the path
+// belongs to the session the caller named. The generic layer never reads a
+// vendor registry; the runtime's resolver owns the shape.
+type sessionInbox struct {
+	SocketPath  string
+	RegistryPID int
+	SessionID   string // the registry row's own session id, cross-checked by the resolver
+	Cwd         string
+	ProcStart   string
+	Status      string
+}
+
+// sessionInboxResolver is an optional port (session-message-layer plan §5.1):
+// the runtime's adapter resolves one canonical identity to its live inbox. The
+// bool means safe to use — a row was found and its path is vetted by the
+// vendor's own rules; the string carries the reason when the bool is false
+// (no live inbox, unvettable path, ambiguous identity, stale registry row, or
+// a path the vendor moved aside). A zero inbox with a reason is the
+// not-found form. Detection of registry ambiguity lives in the resolver (it
+// can see the rows); the generic layer only refuses to choose.
+type sessionInboxResolver interface {
+	ResolveSessionInbox(identity SessionIdentity) (sessionInbox, bool, string)
+}
+
 // sessionMessageCarrierBoundary marks a receipt whose transport is the target
 // session's own next boundary; the host owns the pending record.
 const sessionMessageCarrierBoundary = "boundary"
 
 type SessionMessageReceipt struct {
-	State     string `json:"state"`              // accepted | delivered | expired | unavailable | unknown
-	Tier      string `json:"tier,omitempty"`     // queued-delivery | none
+	State     string `json:"state"`              // pending | started | not_requested | accepted | delivered | expired | unavailable | unknown
+	Tier      string `json:"tier,omitempty"`     // queued-delivery | socket-post | none
 	Boundary  string `json:"boundary,omitempty"` // where the message lands, in the vendor's own terms
-	Carrier   string `json:"carrier,omitempty"`  // "" (adapter performed it) | boundary
+	Carrier   string `json:"carrier,omitempty"`  // "" (adapter performed it) | boundary | socket
 	MessageID string `json:"message_id,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	// ReasonClass is the structural cause of an unavailable receipt on an
+	// acting claim (escalation-delivery plan §4): attended_session,
+	// grant:<refusal>, dry_run, resume_error, interrupted, and the rest.
+	ReasonClass string `json:"reason_class,omitempty"`
 }
+
+// sessionMessageCarrierSocket marks a receipt whose transport was a direct post
+// to the target session's own inbox. No pending record exists for a socket
+// post: the receipt on the run is the whole of the evidence, and the vendor's
+// inbound controls may hold, drop, or expire the message after transport
+// acceptance (session-message-layer plan D5, red-team RT-3).
+const sessionMessageCarrierSocket = "socket"
 
 // ChatLaunchContext carries daemon-owned identity that exists only after task
 // admission. It is not part of ChatRequest, its JSON contract, or its idempotency
@@ -138,7 +251,7 @@ func registerChatDriver(name string, d ChatDriver) {
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeManagedJSON(w, r, &req, 0); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -151,7 +264,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	sse := &sseWriter{w: w, f: flusher}
 	if runtimeTasks == nil {
-		sse.send(map[string]string{"type": "error", "text": "runtime task service unavailable"})
+		sse.send(map[string]string{"type": "error", "text": runtimeTasksUnavailable("runtime task service unavailable")})
 		sse.send(map[string]string{"type": "done"})
 		return
 	}
@@ -166,10 +279,13 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		field := ""
 		var inputErr *taskinput.Error
+		var effortErr *EffortError
 		// Typed input rejections are classified first: adapter messages such as
 		// "not verified for the selected model" contain "mode" and would otherwise
 		// highlight the wrong control.
-		if errors.As(err, &inputErr) || strings.Contains(err.Error(), "task input") {
+		if errors.As(err, &effortErr) || errors.Is(err, store.ErrSessionEffortConflict) {
+			field = "thinking_effort"
+		} else if errors.As(err, &inputErr) || strings.Contains(err.Error(), "task input") {
 			field = "attachments"
 		} else if strings.Contains(err.Error(), "working directory") {
 			field = "cwd"

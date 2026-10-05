@@ -105,7 +105,7 @@ func registerWorkspaceRoutes(mux *http.ServeMux, host *workspaceHost) {
 // recorded. Subject-scoped failures travel in the body as a typed problem so
 // the pane can render the state; only a malformed request is an HTTP error.
 func registerWorkspaceDiffRoutes(mux *http.ServeMux, review *workspace.ReviewService) {
-	mux.HandleFunc("GET /api/workspace-diff/checkout", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/workspace-diff/checkout", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -116,8 +116,8 @@ func registerWorkspaceDiffRoutes(mux *http.ServeMux, review *workspace.ReviewSer
 			return
 		}
 		writeJSON(w, response)
-	})
-	mux.HandleFunc("GET /api/workspace-diff", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /api/workspace-diff", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -132,8 +132,8 @@ func registerWorkspaceDiffRoutes(mux *http.ServeMux, review *workspace.ReviewSer
 			return
 		}
 		writeJSON(w, response)
-	})
-	mux.HandleFunc("GET /api/workspace-diff/file", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /api/workspace-diff/file", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -153,8 +153,8 @@ func registerWorkspaceDiffRoutes(mux *http.ServeMux, review *workspace.ReviewSer
 			return
 		}
 		writeJSON(w, response)
-	})
-	mux.HandleFunc("GET /api/workspace-diff/refs", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /api/workspace-diff/refs", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -165,13 +165,13 @@ func registerWorkspaceDiffRoutes(mux *http.ServeMux, review *workspace.ReviewSer
 			return
 		}
 		writeJSON(w, response)
-	})
+	}))
 }
 
 // The Files pane's routes (console-files-pane-plan §4): one directory's
 // children and one bounded file read, over the same review service.
 func registerWorkspaceFilesRoutes(mux *http.ServeMux, review *workspace.ReviewService) {
-	mux.HandleFunc("GET /api/workspace-files", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/workspace-files", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -187,8 +187,8 @@ func registerWorkspaceFilesRoutes(mux *http.ServeMux, review *workspace.ReviewSe
 			return
 		}
 		writeJSON(w, response)
-	})
-	mux.HandleFunc("GET /api/workspace-files/read", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /api/workspace-files/read", requireReviewService(review, func(w http.ResponseWriter, r *http.Request) {
 		subject, ok := workspaceDiffSubject(w, r)
 		if !ok {
 			return
@@ -204,7 +204,21 @@ func registerWorkspaceFilesRoutes(mux *http.ServeMux, review *workspace.ReviewSe
 			return
 		}
 		writeJSON(w, response)
-	})
+	}))
+}
+
+// requireReviewService guards the git-scope routes: without the governor's store
+// the review service is absent (a degraded start), and every scope answers
+// review-unavailable rather than dereferencing it.
+func requireReviewService(review *workspace.ReviewService, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if review == nil {
+			writeWorkspaceProblem(w, http.StatusServiceUnavailable, "review-unavailable",
+				"Recorded session folders cannot be read because the governor did not start. See Governance for the reason.")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // workspaceDiffSubject reads the session identity the console carries (`id`,

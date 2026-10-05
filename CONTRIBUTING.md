@@ -1,9 +1,9 @@
 # Contributing
 
-The public product repository will become authoritative for published behavior. This local
-candidate is still being assembled; GitHub web commits require sign-off. The Source checks workflow runs the quality gate
-and checks PR commit author sign-offs; hosted execution and branch protection are pending
-the first successful hosted run. A sign-off check does not establish legal provenance.
+This repository holds the published source. GitHub web commits require sign-off. The
+Source checks workflow runs the quality gate and checks that each pull request commit is
+signed off by its author. Branch protection is not configured yet. A sign-off check does
+not establish legal provenance.
 
 Use focused branches and pull requests. Explain the user-visible problem, the affected
 workflow, verification and limitations. Update documentation alongside behavior changes.

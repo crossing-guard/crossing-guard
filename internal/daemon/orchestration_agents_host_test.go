@@ -124,7 +124,7 @@ func (fixture agentHostFixture) bindHelper(t *testing.T, bindingID string, prior
 	preview := selectManagedProfile(t, fixture.owner, helperAgentProfileSource())
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: bindingID, ProfileID: preview.ProfileID,
 		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest,
-		ProjectRoot: fixture.root, Runtime: "managed-fixture", GrantedAuthority: granted,
+		ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), ScopeRuntime: "managed-fixture", GrantedAuthority: granted,
 		AutoAction: autoAction, Priority: priority, Limits: limits,
 		ExpectedStateToken: store.ManagedBindingAbsentToken(bindingID)}); err != nil {
 		t.Fatal(err)
@@ -147,6 +147,44 @@ func waitForRuns(t *testing.T, host *orchestrationManagedHost, accept func([]sto
 	runs, _ := host.ix.ManagedRuns(50)
 	t.Fatalf("runs never reached the expected shape: %+v", runs)
 	return nil
+}
+
+// waitForTerminalsHandled returns once the pump's durable position has passed
+// every child task's last event. A run reads completed before its terminal
+// path finishes — claim tags, helper-session adoption, the pending drain, and
+// held-actor release all land after that write — and the position advances
+// only when the whole path has returned (the reconcile sweep's own gate). A
+// read after this sees settled state, including state that must NOT change.
+func waitForTerminalsHandled(t *testing.T, fixture agentHostFixture, runs []store.ManagedRun) {
+	t.Helper()
+	handled := func() bool {
+		position, err := fixture.host.ix.OrchestrationStreamPosition(managedTaskStreamKind)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range runs {
+			if run.ChildTaskID == "" {
+				continue
+			}
+			task, found, err := fixture.tasks.Task(run.ChildTaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !found || terminalKindForLifecycle(task.Lifecycle) == "" || task.LastEventID > position {
+				return false
+			}
+		}
+		return true
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if handled() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	position, _ := fixture.host.ix.OrchestrationStreamPosition(managedTaskStreamKind)
+	t.Fatalf("pump never handled the terminal events (position %d): %+v", position, runs)
 }
 
 func TestAgentPriorityArbitrationDefersLowerHelperAndWritesClaimV2(t *testing.T) {
@@ -209,6 +247,8 @@ func TestAgentPriorityArbitrationDefersLowerHelperAndWritesClaimV2(t *testing.T)
 		!strings.Contains(loser.Recovery, "agent-a") || loser.Detail["deferred_to"] != "agent-a" {
 		t.Fatalf("loser=%+v", loser)
 	}
+	// Claim tags are written after the run reads completed.
+	waitForTerminalsHandled(t, fixture, []store.ManagedRun{*winner})
 	tags, err := fixture.host.ix.ActiveOrchestrationTags("native-arb", time.Now().Unix())
 	if err != nil || len(tags) != 1 {
 		t.Fatalf("tags=%+v err=%v", tags, err)
@@ -440,7 +480,7 @@ func TestAgentBindingRejectsUnpublishedSelectorAndUndeclaredTags(t *testing.T) {
 	helper := selectManagedProfile(t, fixture.owner, helperAgentProfileSource())
 	_, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-tags", ProfileID: helper.ProfileID,
 		ProfileSourceDigest: helper.SourceDigest, ProfileBundleDigest: helper.BundleDigest,
-		ProjectRoot: fixture.root, Runtime: "managed-fixture", DeclaredTags: []string{"invented-tag"},
+		ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), DeclaredTags: []string{"invented-tag"},
 		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-tags")})
 	if err == nil || !strings.Contains(err.Error(), "may-tag") {
 		t.Fatalf("undeclared tag err=%v", err)
@@ -449,7 +489,7 @@ func TestAgentBindingRejectsUnpublishedSelectorAndUndeclaredTags(t *testing.T) {
 	follower := selectManagedProfile(t, fixture.owner, followerProfileSource())
 	_, err = fixture.host.putBinding(managedBindingCommand{BindingID: "agent-auto", ProfileID: follower.ProfileID,
 		ProfileSourceDigest: follower.SourceDigest, ProfileBundleDigest: follower.BundleDigest,
-		ProjectRoot: fixture.root, Runtime: "managed-fixture", GrantedAuthority: []string{"draft-reply"},
+		ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{"draft-reply"},
 		AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-auto")})
 	if err == nil {
 		t.Fatal("auto action on a passive follower was accepted")
@@ -605,15 +645,14 @@ func TestAnnotatorsRunBeforeActorsAndTagSnapshotReachesTheActor(t *testing.T) {
 	annotator := selectManagedProfile(t, fixture.owner, followerAnnotatorProfileSource())
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "annotator", ProfileID: annotator.ProfileID,
 		ProfileSourceDigest: annotator.SourceDigest, ProfileBundleDigest: annotator.BundleDigest,
-		ProjectRoot: fixture.root, Runtime: "managed-fixture",
-		DeclaredTags:       []string{"plan"},
+		ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), DeclaredTags: []string{"plan"},
 		ExpectedStateToken: store.ManagedBindingAbsentToken("annotator")}); err != nil {
 		t.Fatal(err)
 	}
 	reader := selectManagedProfile(t, fixture.owner, helperTagReaderProfileSource())
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "tag-reader", ProfileID: reader.ProfileID,
 		ProfileSourceDigest: reader.SourceDigest, ProfileBundleDigest: reader.BundleDigest,
-		ProjectRoot: fixture.root, Runtime: "managed-fixture", GrantedAuthority: []string{"reply"},
+		ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{"reply"},
 		ExpectedStateToken: store.ManagedBindingAbsentToken("tag-reader")}); err != nil {
 		t.Fatal(err)
 	}
@@ -654,5 +693,47 @@ func TestAnnotatorsRunBeforeActorsAndTagSnapshotReachesTheActor(t *testing.T) {
 	mu.Unlock()
 	if !strings.Contains(prompt, "session.tags") || !strings.Contains(prompt, "- plan (agent:annotator:plan)") {
 		t.Fatalf("actor prompt missing fresh tag snapshot: %q", prompt)
+	}
+}
+
+// A place saved under one spelling of a folder fires for a console task that
+// works there under another — the rail offers /tmp/x while the vendor records
+// /private/tmp/x (place-root-folder-identity plan). A place on a sibling
+// folder stays silent for the same task.
+func TestAgentPlaceFiresForItsFolderUnderAnotherSpelling(t *testing.T) {
+	driver := managedDynamicFixtureDriver{commandFor: func(request ChatRequest) string {
+		if strings.Contains(request.Prompt, "helper agent") {
+			return jsonTextCommand(helperClaimV2)
+		}
+		return jsonTextCommand("Turn complete.")
+	}}
+	fixture := newAgentHostFixture(t, driver)
+	repo, link, sibling := symlinkedFolder(t, fixture.root)
+	preview := selectManagedProfile(t, fixture.owner, helperAgentProfileSource())
+	for bindingID, root := range map[string]string{"agent-place": link, "agent-sibling": sibling} {
+		if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: bindingID, ProfileID: preview.ProfileID,
+			ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest,
+			ProjectRoot: root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{},
+			ExpectedStateToken: store.ManagedBindingAbsentToken(bindingID)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, _, err := fixture.tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "work", SessionID: "native-spelling", Cwd: repo}, "spelling-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTaskState(t, fixture.tasks, source.ID, TaskCompleted, 3*time.Second)
+	runs := waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+		for _, run := range runs {
+			if run.BindingID == "agent-place" && run.State == "completed" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, run := range runs {
+		if run.BindingID == "agent-sibling" {
+			t.Fatalf("a place on a sibling folder fired: %+v", run)
+		}
 	}
 }

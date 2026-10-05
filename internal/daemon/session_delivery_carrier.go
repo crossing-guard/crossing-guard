@@ -66,8 +66,12 @@ func claimForReply(g *Governor, r *http.Request, boundary carrierBoundary) []sto
 		return nil
 	}
 	g.writeMu.Lock()
-	claimed, err := g.ix.ClaimSessionDeliveries(boundary.Runtime, boundary.SessionID, boundary.Kind, boundary.ObservationID,
-		boundary.NativeCallID, time.Now().Unix(), config.Delivery.ClaimBytes)
+	// A handoff's brief rides only a kind at which the runtime's hook can tell a
+	// nested call from the session's own, so it is never handed to a child (team
+	// rest-of-release plan §6.5, K-1); helper rows ride every carrier kind.
+	claimed, err := g.ix.ClaimSessionDeliveriesAt(store.SessionDeliveryClaim{Runtime: boundary.Runtime, SessionID: boundary.SessionID,
+		Kind: boundary.Kind, ObservationID: boundary.ObservationID, NativeCallID: boundary.NativeCallID, Now: time.Now().Unix(),
+		MaxBytes: config.Delivery.ClaimBytes, CarriesHandoff: handoffCarrierKind(boundary.Runtime, boundary.Kind)})
 	g.writeMu.Unlock()
 	if err != nil {
 		// A failed claim leaves the record pending for the next boundary; the

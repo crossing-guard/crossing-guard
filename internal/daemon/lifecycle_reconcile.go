@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,17 +21,11 @@ const (
 	lifecycleTranscriptActionSchema = "transcript-action-v1"
 )
 
+// transcriptGenerationDigest identifies a transcript's generation by its first
+// bytes. The digest lives in harvest so the usage reader shares it
+// (token-usage-analytics plan §3.4); this caller's window is unchanged.
 func transcriptGenerationDigest(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	prefix, err := io.ReadAll(io.LimitReader(f, 64<<10))
-	if err != nil {
-		return "", err
-	}
-	return observation.DigestBytes(prefix), nil
+	return harvest.SourcePrefixDigest(path, harvest.SourcePrefixWindow)
 }
 
 func lifecycleParserIssues(sessionID, runtime, sourceRef, sourceSegment string,

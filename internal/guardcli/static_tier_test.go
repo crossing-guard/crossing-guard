@@ -28,10 +28,10 @@ func TestMixedFormatFileKeepsFormat1RulesEnforcing(t *testing.T) {
 	}
 	t.Setenv("CG_RULES", mixed)
 
-	if v, _ := CheckCommand("run alpha now"); v.Decision != "deny" {
+	if v, _ := CheckCommand("run alpha now", nil); v.Decision != "deny" {
 		t.Errorf("format-1 rule in a mixed file stopped enforcing: alpha → %s", v.Decision)
 	}
-	if v, _ := CheckCommand("run bravo now"); v.Decision != "ask" {
+	if v, _ := CheckCommand("run bravo now", nil); v.Decision != "ask" {
 		t.Errorf("format-2 rule in a mixed file did not migrate: bravo → %s", v.Decision)
 	}
 }
@@ -85,7 +85,7 @@ func TestStaticTierEnforcesWithoutDaemon(t *testing.T) {
 	for _, c := range cases {
 		// A command-only caller supplies no tool; the existing command decisions stay
 		// identical and no tool identity is invented.
-		d := engine.Decide(staticInvocationTags("", c.command), pol)
+		d := engine.Decide(engine.InvocationTags("", c.command), pol)
 		v := verdictOf(d)
 		if v.Decision != c.want {
 			t.Errorf("static tier: %q → %s, want %s", c.command, v.Decision, c.want)
@@ -109,7 +109,7 @@ func TestStaticTierCanDenyOneExactToolWithoutDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	artifact := engine.Decide(staticInvocationTags("Artifact", ""), pol)
+	artifact := engine.Decide(engine.InvocationTags("Artifact", ""), pol)
 	if got := verdictOf(artifact); got.Decision != "deny" || got.Rule != "deny-publication" {
 		t.Fatalf("Artifact verdict=%+v decision=%+v", got, artifact)
 	}
@@ -117,10 +117,10 @@ func TestStaticTierCanDenyOneExactToolWithoutDaemon(t *testing.T) {
 		strings.Contains(reason, "override") || strings.Contains(reason, "run it yourself") {
 		t.Fatalf("hard-deny reason invites bypass: %q", reason)
 	}
-	if got := verdictOf(engine.Decide(staticInvocationTags("Write", ""), pol)); got.Decision != "allow" {
+	if got := verdictOf(engine.Decide(engine.InvocationTags("Write", ""), pol)); got.Decision != "allow" {
 		t.Fatalf("Write verdict=%+v", got)
 	}
-	if got := staticInvocationTags("mcp__provider__Artifact", ""); len(got) != 2 ||
+	if got := engine.InvocationTags("mcp__provider__Artifact", ""); len(got) != 2 ||
 		got[1].Key != engine.ToolTagKey || got[1].Value != "Artifact" {
 		t.Fatalf("canonical tool tags=%+v", got)
 	}

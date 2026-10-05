@@ -20,7 +20,25 @@ const codexMarkEnd = "# <<< crossing-guard memory <<<"
 // codexAdapter integrates memory hooks into a Codex config.toml.
 type codexAdapter struct{}
 
-func (codexAdapter) Name() string       { return "codex" }
+func (codexAdapter) Name() string { return "codex" }
+func (codexAdapter) EncodeMemoryIndex(block string) ([]byte, error) {
+	out, err := json.MarshalIndent(map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName": "SessionStart", "additionalContext": block,
+		},
+	}, "", "  ")
+	return append(out, '\n'), err
+}
+
+func (codexAdapter) MatchesLegacyMemoryHook(payload []byte) bool {
+	var hook struct {
+		Event string `json:"hook_event_name"`
+		Path  string `json:"transcript_path"`
+		CWD   string `json:"cwd"` // Preserve the old payload decoder's type validation.
+	}
+	return json.Unmarshal(payload, &hook) == nil && hook.Event != "" &&
+		strings.Contains(hook.Path, "/.codex/")
+}
 func (codexAdapter) ConfigFlag() string { return "config" }
 func (codexAdapter) DefaultConfigPath() string {
 	return filepath.Join(home(), filepath.FromSlash(vendorpaths.CodexConfigRelative))
@@ -56,35 +74,22 @@ var codexHookCommand = regexp.MustCompile(`(?m)^\s*command\s*=\s*(?:"([^"]*)"|'(
 // (registration format probed live 2026-07-14). Execution is TRUST-GATED by
 // Codex: until the user approves via /hooks, the hook is parsed but SILENTLY
 // SKIPPED — hence the printed onboarding step.
-func (codexAdapter) Attach(configPath, selfPath string) error {
+func (codexAdapter) Attach(configPath, selfPath string) (bool, error) {
 	snapshot, err := vendorconfig.Read(configPath)
 	if err != nil {
-		return err
+		return false, err
 	}
-	content := string(snapshot.Data)
-	block := fmt.Sprintf(`%s
-[[hooks.SessionStart]]
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = "%s memory index"
-%s`, codexMarkBegin, selfPath, codexMarkEnd)
-	if i := strings.Index(content, codexMarkBegin); i >= 0 {
-		if j := strings.Index(content, codexMarkEnd); j > i {
-			old := content[i : j+len(codexMarkEnd)]
-			if old == block {
-				fmt.Println("already installed:", configPath)
-				return nil
-			}
-			content = content[:i] + block + content[j+len(codexMarkEnd):]
-		} else {
-			return fmt.Errorf("%s: begin marker without end marker — fix by hand", configPath)
-		}
-	} else {
-		content = content + "\n" + block + "\n"
+	content, changed, err := vendorconfig.UpsertMarkedBlock(string(snapshot.Data), codexMarkBegin, codexMarkEnd, codexMemoryHookBlock(selfPath))
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", configPath, err)
+	}
+	if !changed {
+		fmt.Println("already installed:", configPath)
+		return false, nil
 	}
 	backup, err := vendorconfig.Replace(configPath, snapshot, []byte(content))
 	if err != nil {
-		return err
+		return false, err
 	}
 	fmt.Println("installed [[hooks.SessionStart]] →", configPath)
 	if backup != "" {
@@ -92,7 +97,43 @@ command = "%s memory index"
 	}
 	fmt.Println("REQUIRED next step (trust gate): open codex, run /hooks, approve this hook.")
 	fmt.Println("Until approved, Codex parses but SILENTLY SKIPS it. Then verify: crossing-guard doctor")
-	return nil
+	return true, nil
+}
+
+// codexMemoryHookBlock is the marked block Attach writes. Its command line is
+// pinned by a test: it is a contract with every config already written.
+func codexMemoryHookBlock(selfPath string) string {
+	return fmt.Sprintf(`%s
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "%s memory index"
+%s`, codexMarkBegin, selfPath, codexMarkEnd)
+}
+
+// Detach removes the marked block, and only when it is exactly the block an
+// Attach for selfPath wrote: a block someone edited, or another build's, is
+// left alone. A hook written outside the markers is never touched.
+func (codexAdapter) Detach(configPath, selfPath string) (bool, error) {
+	snapshot, err := vendorconfig.Read(configPath)
+	if err != nil || !snapshot.Exists {
+		return false, err
+	}
+	content := string(snapshot.Data)
+	if vendorconfig.MarkedBlock(content, codexMarkBegin, codexMarkEnd) != codexMemoryHookBlock(selfPath) {
+		return false, nil
+	}
+	content, removed, err := vendorconfig.RemoveMarkedBlock(content, codexMarkBegin, codexMarkEnd)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", configPath, err)
+	}
+	if !removed {
+		return false, nil
+	}
+	if _, err := vendorconfig.Replace(configPath, snapshot, []byte(content)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // InjectedText recognizes Codex's injected-context line: a developer-role

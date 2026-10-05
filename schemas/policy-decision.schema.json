@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:private-ai-control-plane:schema:policy-decision:0.1-draft",
+  "$id": "urn:crossing-guard:schema:policy-decision:0.1-draft",
   "title": "Policy evaluation decision",
   "type": "object",
   "additionalProperties": false,

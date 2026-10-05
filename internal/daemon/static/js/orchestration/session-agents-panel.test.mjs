@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findingRefModel, unresolvedRefCount, latestRunByBinding, groupCounters, deliveryStatusText, helperSessionForBinding, helperSessionLabel } from './session-agents-panel.js';
+import { findingRefModel, unresolvedRefCount, latestRunByBinding, groupCounters, deliveryStatusText, helperSessionForBinding, helperSessionLabel, relatedRowView, relatedRowsTree, relatedSectionModel, newerUnfinishedByBinding, runOutcomeText } from './session-agents-panel.js';
 
 test('resolved file refs become real anchors bound to the resolved path', () => {
   const model = findingRefModel({ kind: 'file', path: 'internal/daemon/main.go', line: 42, resolution: 'resolved', resolved_path: 'internal/daemon/main.go' });
@@ -94,6 +94,11 @@ test('message claims distinguish proposals, queue receipts, and uncertain effect
   }
   const queued = deliveryStatusText({ action: 'send_message', detail: { delivery: { state: 'accepted', boundary: 'next hook boundary' } } });
   assert.match(queued, /Boundary: next hook boundary/);
+  const posted = deliveryStatusText({ action: 'send_message', detail: { delivery: { state: 'accepted', tier: 'socket-post', carrier: 'socket' } } });
+  assert.match(posted, /peer message .*hold or drop it/);
+  assert.doesNotMatch(posted, /Message queued/);
+  const stillQueued = deliveryStatusText({ action: 'send_message', detail: { delivery: { state: 'accepted', tier: 'queued-delivery' } } });
+  assert.match(stillQueued, /Message queued/);
 });
 
 test('the helper session shown is the binding\'s newest group for THIS session, and only once a turn reported one', () => {
@@ -112,4 +117,92 @@ test('the helper session shown is the binding\'s newest group for THIS session, 
   assert.equal(helperSessionForBinding(groups, 'b3', ['ses-1']), null);
   assert.equal(helperSessionForBinding([groups[3]], 'b1', ['ses-1']), null);
   assert.equal(helperSessionForBinding(groups, 'b1', []).group_id, 'g-other');
+});
+
+test('a reply the daemon classed as a draft says it was not sent, with the receipt reason', () => {
+  const run = { action: 'reply', attention_class: 'draft',
+    detail: { delivery: { state: 'unavailable', reason_class: 'attended_session', detail: 'The session is not daemon-owned.' } } };
+  assert.equal(deliveryStatusText(run), 'Reply not sent · The session is not daemon-owned.');
+  assert.equal(deliveryStatusText({ action: 'reply', detail: { delivery: { state: 'started' } } }), '');
+  assert.equal(deliveryStatusText({ action: 'send_message', detail: { delivery: { state: 'not_requested' } } }),
+    'Message proposed · automatic delivery was not requested.');
+});
+
+test('a related row links only when the daemon says its id can open; an agent id is text', () => {
+  const agent = relatedRowView({ kind: 'spawned', provenance: 'observed', direction: 'child', runtime: 'rt-a',
+    session_id: 'a0aa1b7579b8e57c4', role: 'Explore', description: 'map the flow', openable: false });
+  assert.equal(agent.link, null);
+  assert.equal(agent.idLabel, 'rt-a \u00b7 a0aa1b7579b8e5\u2026');
+  assert.equal(agent.description, 'map the flow');
+  assert.equal(agent.text, 'spawned \u00b7 child \u00b7 Explore');
+  // A row that omits `openable` is not a link: an absent fact never yields a dead link.
+  assert.equal(relatedRowView({ kind: 'spawned', runtime: 'rt-a', session_id: 'x' }).link, null);
+  const session = relatedRowView({ kind: 'spawned', provenance: 'observed', direction: 'child', runtime: 'rt-b',
+    session_id: 'abcdef00-aaaa-7bbb-8ccc-00000000000c', openable: true });
+  assert.deepEqual(session.link, { runtime: 'rt-b', id: 'abcdef00-aaaa-7bbb-8ccc-00000000000c', label: 'rt-b \u00b7 abcdef00-aaaa-\u2026' });
+  assert.equal(relatedRowView({ kind: 'spawned', runtime: '', session_id: 'x', openable: true }).link, null);
+});
+
+test('a collapsed caused row states its runs, replies and newest state', () => {
+  const view = relatedRowView({ kind: 'reviewed-by', provenance: 'caused', direction: 'child', role: 'helper',
+    state: 'running', runs: 39, replies: 1, runtime: 'rt-b', session_id: 's-1', openable: true });
+  assert.equal(view.text, 'reviewed-by \u00b7 child \u00b7 helper \u00b7 running \u00b7 39 runs \u00b7 1 reply');
+  assert.equal(relatedRowView({ kind: 'resumed-by', provenance: 'caused', direction: 'self', role: 'helper', runs: 1 }).text,
+    'resumed-by \u00b7 self \u00b7 helper');
+  const unresolved = relatedRowView({ kind: 'read_context_of', direction: 'peer', label: 'list_threads', unresolved: true });
+  assert.equal(unresolved.label, 'list_threads');
+  assert.equal(unresolved.link, null);
+});
+
+test('a nested agent sits under the agent that launched it, and no row is ever dropped', () => {
+  const rows = [
+    { session_id: 'c1', direction: 'child' },
+    { session_id: 'd1', direction: 'descendant', via: 'c2' },
+    { session_id: 'c2', direction: 'child' },
+    { session_id: 'd2', direction: 'descendant', via: 'd1' },
+    { session_id: 'o1', direction: 'descendant', via: 'gone' },
+    { session_id: 'x1', via: 'x2' },
+    { session_id: 'x2', via: 'x1' },
+  ];
+  const tree = relatedRowsTree(rows).map(({ row, depth }) => row.session_id + ':' + depth);
+  assert.deepEqual(tree, ['c1:0', 'c2:0', 'd1:1', 'd2:2', 'o1:0', 'x1:0', 'x2:1']);
+  assert.equal(relatedRowsTree(rows).length, rows.length);
+});
+
+test('a failed or partial related read says so; only a complete empty read renders nothing', () => {
+  assert.deepEqual(relatedSectionModel({ status: 'rejected', reason: new Error('HTTP 500') }),
+    { unavailable: 'Related sessions unavailable: HTTP 500' });
+  assert.equal(relatedSectionModel({ status: 'fulfilled', value: { related: [], coverage: '' } }), null);
+  const partial = relatedSectionModel({ status: 'fulfilled', value: { related: [], coverage: 'caused relations unavailable: locked' } });
+  assert.deepEqual(partial, { rows: [], coverage: 'caused relations unavailable: locked' });
+  const nested = relatedSectionModel({ status: 'fulfilled', value: { related: [
+    { kind: 'spawned', direction: 'descendant', runtime: 'rt-a', session_id: 'n1', via: 'c1', openable: false },
+    { kind: 'spawned', direction: 'child', runtime: 'rt-a', session_id: 'c1', openable: false },
+  ] } });
+  assert.deepEqual(nested.rows.map(({ view, depth }) => view.sessionId + ':' + depth), ['c1:0', 'n1:1']);
+  assert.ok(nested.rows.every(({ view }) => view.link === null));
+});
+
+// managed-turn-profile-limits plan §4.8 (R2-1): the panel shows a binding's
+// last completed claim, so a newer refusal or timeout must surface beside it.
+test('a newer unfinished run is found beside the completed claim the panel shows', () => {
+  const runs = [
+    { run_id: 'r4', binding_id: 'recall', state: 'suppressed', error_class: 'destination_locality', recovery: 'Not a local route.' },
+    { run_id: 'r3', binding_id: 'recall', state: 'failed', error_class: 'timeout', recovery: 'Stopped.' },
+    { run_id: 'r2', binding_id: 'recall', state: 'completed', action: 'send_message' },
+    { run_id: 'r1', binding_id: 'recall', state: 'failed', error_class: 'context' },
+    { run_id: 'q2', binding_id: 'quiet', state: 'completed' },
+    { run_id: 'q1', binding_id: 'quiet', state: 'failed', error_class: 'timeout' },
+    { run_id: 'n1', binding_id: 'never', state: 'suppressed', error_class: 'destination_locality' },
+  ];
+  const later = newerUnfinishedByBinding(runs, latestRunByBinding(runs));
+  assert.equal(later.get('recall').run_id, 'r4');
+  assert.equal(later.has('quiet'), false, 'an OLDER failure than the shown claim is not news');
+  assert.equal(later.has('never'), false, 'when the shown run is itself unfinished the card states it directly');
+});
+
+test('an unfinished run reads as its class and recovery; a completed one says nothing', () => {
+  assert.equal(runOutcomeText({ state: 'failed', error_class: 'timeout', recovery: 'Stopped after 2m6s.' }), 'timeout: Stopped after 2m6s.');
+  assert.equal(runOutcomeText({ state: 'suppressed', error_class: 'destination_locality' }), 'destination locality');
+  assert.equal(runOutcomeText({ state: 'completed', recovery: 'x' }), '');
 });

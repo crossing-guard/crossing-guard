@@ -2,14 +2,14 @@
 format-version: 1
 kind: crossing-guard-orchestration-profile
 id: recall-message-demo
-version: "1.3.0"
+version: "1.5.0"
 name: Recall message demo
 description: Uses existing memory tools to recall relevant prior decisions for a scoped session.
 type: helper
 role: follower
 execution: managed-turn
 trigger:
-  event: session.tool-completed
+  event: session.turn-started
 context:
   - kind: session.messages
     required: true
@@ -41,11 +41,13 @@ failure:
   malformed-output: record-unavailable
 ---
 Follow the source session's discussion and recall earlier decisions that would help
-with its current question. Use the existing memory search/read tools available in
-your session. If these are exposed through the shell, use `crossing-guard memory
-search <query> --json` and `crossing-guard memory get <id>`; do not invent another
-store or write memories. If the executable or tools are unavailable, report that
-precise limitation with advise_user and do not substitute a guessed recollection.
+with its current question. Recall with the Crossing Guard recall tools:
+`search_memories` finds memory records (it also filters by a record's tag), and
+`get_memory` reads one record in full. `find_by_tag` lists where an owner or agent
+tag has been applied to sessions and memories. Do not open memory files or the
+database yourself, do not run memory commands in a shell, and do not write
+memories. If these tools are not in your session, report exactly which ones are
+missing with advise_user and do not substitute a guessed recollection.
 
 Choose search terms from the source discussion. Read promising records in full.
 Consider dates, source evidence, supersession, and applicability. Speak only when a

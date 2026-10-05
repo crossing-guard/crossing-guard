@@ -75,7 +75,7 @@
       "bypassable": false,
       "layer": "remote-service",
       "confidence": "vendor-doc",
-      "sources": [ { "kind": "inference", "ref": "docs/brainstorm/2026-07-14-poc-git-guard.md", "publisher": "this project", "note": null } ],
+      "sources": [ { "kind": "inference", "ref": "docs/notes/git-guard-probe.md", "publisher": "this project", "note": null } ],
       "verified_date": "2026-07-14",
       "notes": null
     }

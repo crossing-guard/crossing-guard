@@ -164,7 +164,7 @@ func taskForwarder(after int64) func(TaskEvent) bool {
 
 func taskFeed(ctx context.Context, after int64, emit feedEmitter, opened func()) error {
 	if runtimeTasks == nil {
-		return emitUnavailable(emit, feedTasks, "runtime task service unavailable")
+		return emitUnavailable(emit, feedTasks, runtimeTasksUnavailable("runtime task service unavailable"))
 	}
 	start, err := taskFeedOpen(after)
 	if err != nil {

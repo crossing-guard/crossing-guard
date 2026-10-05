@@ -31,9 +31,45 @@ func TestHookInputRetainsUnknownToolInputAndBuildsExactClaims(t *testing.T) {
 		t.Fatalf("envelope=%+v", e)
 	}
 	c := e.ResourceClaims[0]
-	if c.RawIdentity != "src/a.go" || c.Identity != filepath.Join(repo, "src", "a.go") ||
+	if c.RawIdentity != "src/a.go" || c.Identity != filepath.Join(repo, "src/a.go") ||
 		c.SourceField != "tool_input.file_path" || c.Operation != "write" {
 		t.Fatalf("claim=%+v", c)
+	}
+}
+
+// TestStagedLayerSurvivesTheEnvelopeSeam is the 3a postwork fold's fix: the staged
+// tier must reach the daemon, not die in the one constructor every flush lane uses.
+// Without this, the first layered loader (3c) would ship with every live event
+// recording layer=” — a silent absence at the exact moment the field starts
+// meaning something.
+func TestStagedLayerSurvivesTheEnvelopeSeam(t *testing.T) {
+	pendingObserve = nil
+	t.Cleanup(func() { pendingObserve = nil })
+	observeAttempt(hookInput{SessionID: "s", Runtime: "claude", ToolName: "Bash",
+		RawToolInput: json.RawMessage(`{"command":"inspect workspace"}`)})
+	if pendingObserve == nil {
+		t.Fatal("no staged action")
+	}
+	stageRule("deny-org")
+	stageLayer("organization")
+	if pendingObserve.Layer != "organization" {
+		t.Fatalf("staging dropped the layer: %+v", pendingObserve)
+	}
+	e, err := buildObservationEnvelope(*pendingObserve, "deny", "blocked by the org bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Rule != "deny-org" || e.Layer != "organization" {
+		t.Fatalf("the envelope seam dropped what staging held: rule=%q layer=%q", e.Rule, e.Layer)
+	}
+	// The staged tier is inside the digest: a same-content envelope without it
+	// hashes differently, so a 33–37 daemon and a 38 daemon can never confuse the two.
+	withLayer, _ := e.Digest()
+	stripped := e
+	stripped.Layer = ""
+	withoutLayer, _ := stripped.Digest()
+	if withLayer == withoutLayer {
+		t.Fatal("the layer must be inside the envelope digest")
 	}
 }
 

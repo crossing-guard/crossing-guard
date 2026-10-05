@@ -201,7 +201,7 @@ func TestRuntimeIntegrationFrontendIsProviderNeutralAndExplicit(t *testing.T) {
 		return body
 	}
 	client := read("js/runtime-integrations.js")
-	settings := read("js/views/settings.js")
+	settings := read("js/views/settings-runtimes.js")
 	for _, required := range []string{"/api/runtime-integrations", "preview-", "preview_token", "confirmed: true", "/watch", "/confirm-visible", "JSON.parse", "payload.message.trim()"} {
 		if !bytes.Contains(client, []byte(required)) {
 			t.Errorf("runtime connection client lost %q", required)
@@ -270,7 +270,7 @@ func TestRuntimeIntegrationWatchUsesExactEventCursorAndOwnerConfirmation(t *test
 	}
 	defer index.Close()
 	oldGovernor := governor
-	governor = &Governor{ix: index}
+	governor = NewGovernor(index, nil) // a real governor: the final canary arrives through ingest
 	t.Cleanup(func() { governor = oldGovernor })
 
 	start := runtimeIntegrationRequest(handler, http.MethodPost,
@@ -293,10 +293,12 @@ func TestRuntimeIntegrationWatchUsesExactEventCursorAndOwnerConfirmation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	nearMatchTags, _ := json.Marshal([]map[string]string{{"key": "command", "value": "echo prefix-" + rulebook.CanaryMarker}})
+	// A deny by some OTHER rule proves the hook fires, and must not count as the proof
+	// rule blocking: only rule_id identifies that, because no command text is ever
+	// frozen onto an event.
 	if _, err := tx.AppendEvent(store.EventRecord{TS: 200, SessionID: "cursor-natural",
-		Runtime: "cursor", Verb: "exec", Tool: "Shell", Decision: "deny", Reason: "canary",
-		Origin: "live", Tags: string(nearMatchTags)}, nil); err != nil {
+		Runtime: "cursor", Verb: "exec", Tool: "Shell", Decision: "deny", Reason: "another rule",
+		Origin: "live", Tags: `[]`, RuleID: "destructive-rm"}, nil); err != nil {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
@@ -320,11 +322,21 @@ func TestRuntimeIntegrationWatchUsesExactEventCursorAndOwnerConfirmation(t *test
 			t.Fatal(err)
 		}
 	}
-	tags, _ := json.Marshal([]map[string]string{{"key": "command", "value": "echo " + rulebook.CanaryMarker}})
-	if _, err := tx.AppendEvent(store.EventRecord{TS: 302, SessionID: "cursor-natural",
-		Runtime: "cursor", Verb: "exec", Tool: "Shell", Decision: "deny", Reason: "canary",
-		Origin: "live", Tags: string(tags)}, nil); err != nil {
-		_ = tx.Rollback()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// The canary itself takes the production path: hook envelope → ingest → store, so this
+	// test cannot pass by seeding a shape the hook never produces.
+	canary := testV1Envelope(t, t.TempDir())
+	canary.ObservationID, canary.ActionID = "obs_feedfacefeedfacefeedfacefeedfa02", "act_feedfacefeedfacefeedfacefeedfa02"
+	canary.SessionID, canary.Runtime, canary.Tool = "cursor-natural", "cursor", "Shell"
+	canary.Decision, canary.Reason, canary.Rule = "deny", "proof rule", rulebook.CanaryRuleID
+	canary.TS = 302
+	if _, err := ingestObservationV1(t.Context(), governor, canary); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = index.BeginGov()
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

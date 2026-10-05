@@ -298,7 +298,7 @@ func recordResultIssue(g *Governor, e observation.ResultEnvelope, kind string, c
 
 func handleGovernResultV1(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, observation.MaxEnvelopeBytes)
@@ -339,7 +339,7 @@ func handleGovernResultV1(w http.ResponseWriter, r *http.Request) {
 
 func handleGovernResults(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		writeGovernorUnavailable(w)
 		return
 	}
 	session := r.URL.Query().Get("session")

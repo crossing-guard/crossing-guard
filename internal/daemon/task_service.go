@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,9 @@ type TaskApplicationService struct {
 	executions    *TaskExecutionRegistry
 	subscribers   *TaskSubscriberHub
 	deltas        *TaskDeltaBuffer
+	usage         *TaskUsageTotals
+	models        func(runtime, id string) (ChatModelOption, bool)
+	effort        func(ChatRequest) (ChatRequest, error)
 	runtime       func(string) (ChatDriver, bool)
 	catalog       func(string, string) (bool, error)
 	launchDataDir string
@@ -51,6 +56,9 @@ func NewTaskApplicationServiceWithInputs(repository taskRepository, executions *
 		subscribers: subscribers, states: TaskStateMachine{}, runtime: runtime, catalog: catalog,
 		inputs: inputs, launchDataDir: launchDataDir}
 	service.deltas = NewTaskDeltaBuffer(service.appendDelta)
+	service.models = chatModels.Model
+	service.effort = resolveRequestEffort
+	service.usage = NewTaskUsageTotals(func(runtime, id string) (ChatModelOption, bool) { return service.models(runtime, id) })
 	return service
 }
 
@@ -85,6 +93,20 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 	driver, ok := s.runtime(req.Runtime)
 	if !ok {
 		return RuntimeTask{}, false, errors.New("unknown runtime")
+	}
+	if req.HandoffTicket != "" {
+		// The first turn of a console Open of a handoff: the session starts in the
+		// ticket's folder unless the request names one.
+		prepared, err := prepareHandoffLaunch(req)
+		if err != nil {
+			return RuntimeTask{}, false, err
+		}
+		req = prepared
+	}
+	var effortErr error
+	req, effortErr = normalizeEffort(req)
+	if effortErr != nil {
+		return RuntimeTask{}, false, effortErr
 	}
 	if canonicalizer, ok := driver.(chatRequestCanonicalizer); ok {
 		var err error
@@ -124,6 +146,20 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 			RetentionDeadline: existing.RetentionDeadline})
 		return checked, false, err
 	}
+	if req.HandoffTicket != "" {
+		// After the idempotent retry above, which returns the task already launched:
+		// a new launch needs a ticket that is waiting, for this runtime, whose
+		// handoff has not ended.
+		if err := admitHandoffLaunch(req); err != nil {
+			return RuntimeTask{}, false, err
+		}
+	}
+	if s.effort != nil {
+		req, effortErr = s.effort(req)
+		if effortErr != nil {
+			return RuntimeTask{}, false, effortErr
+		}
+	}
 	var resolvedInputs []taskinput.ResolvedInput
 	if hasInputScope {
 		if s.inputs == nil {
@@ -138,7 +174,12 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 		if !ok {
 			return RuntimeTask{}, false, errors.New("selected runtime does not accept task inputs")
 		}
+		// The adapter's own rule first: its refusal names the runtime's real
+		// constraint. The model-list rule then applies what the runtime reports.
 		if err := validator.ValidateChatInputs(req, resolvedInputs); err != nil {
+			return RuntimeTask{}, false, err
+		}
+		if err := s.admitModelConditionalInputs(driver, req, resolvedInputs); err != nil {
 			return RuntimeTask{}, false, err
 		}
 	}
@@ -178,7 +219,7 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 		}
 		req.Cwd, workspaceVersion = candidate.Root, version
 	}
-	record := taskCreateRecord{ID: taskID, ConsoleScope: taskConsoleScope,
+	record := taskCreateRecord{RequestedSettings: requestedSettings(req), SessionEffortToken: req.SessionEffortToken, SessionEffortID: req.effortSessionID, ID: taskID, ConsoleScope: taskConsoleScope,
 		IdempotencyKey: idempotencyKey, RequestDigest: digest, Runtime: req.Runtime,
 		CatalogSessionID: req.CatalogSessionID, NativeSessionID: req.SessionID, WorkingDirectory: req.Cwd, CreatedAt: createdAt,
 		WorkspaceSelectionID: req.WorkspaceSelectionID, WorkspaceSelectionVersion: workspaceVersion,
@@ -197,6 +238,15 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 			_ = s.workspace.ReleaseConsumer(req.WorkspaceSelectionID, "task", taskID)
 		}
 		return task, false, nil
+	}
+	if req.HandoffTicket != "" {
+		// The ticket names its launched task before the process exists, so the
+		// task's session frame can never arrive for a ticket that does not know it.
+		if err := recordHandoffLaunch(req, task.ID); err != nil {
+			s.executions.Release(reservation)
+			s.finish(task.ID, executionOutcome{Err: err})
+			return RuntimeTask{}, false, err
+		}
 	}
 	if hasInputScope {
 		claim, claimErr := s.inputs.Claim(req.InputScopeID, req.InputIDs, task.ID)
@@ -218,14 +268,19 @@ func (s *TaskApplicationService) Create(req ChatRequest, idempotencyKey string) 
 		_ = s.appendAndPublish(task.ID, "task.inputs", "task-input-owner",
 			ChatEvent{"type": "inputs", "items": items}, time.Now().UnixMilli())
 	}
-	cmd, err := driver.BuildCmd(req, ChatLaunchContext{TaskID: task.ID, DataDir: s.launchDataDir, Inputs: resolvedInputs})
+	launchContext := ChatLaunchContext{TaskID: task.ID, DataDir: s.launchDataDir, Inputs: resolvedInputs}
+	cmd, err := driver.BuildCmd(req, launchContext)
 	if err != nil {
 		s.executions.Release(reservation)
 		s.finish(task.ID, executionOutcome{Err: err})
 		failed, _, _ := s.repository.ByID(task.ID)
 		return failed, true, nil
 	}
+	s.usage.Start(task.ID, task.Runtime, req.Model)
 	launch := taskExecutionLaunch{taskID: task.ID, runtime: task.Runtime, cmd: cmd, driver: driver}
+	if factory, ok := driver.(chatProcessProtocolFactory); ok {
+		launch.protocol = factory.ProcessProtocol(req, launchContext, cmd)
+	}
 	launch.started = func() { s.started(task.ID, task.Runtime) }
 	launch.event = func(event ChatEvent) { s.ingest(task.ID, task.Runtime, event) }
 	launch.done = func(outcome executionOutcome) { s.finish(task.ID, outcome) }
@@ -288,11 +343,24 @@ func (s *TaskApplicationService) ingest(taskID, runtime string, event ChatEvent)
 			}
 		}
 	}
+	if anyString(event["type"]) == "usage" {
+		applied, ok := s.usage.Apply(taskID, event)
+		if !ok {
+			// Never persisted raw, and never narrated into the conversation: an
+			// adapter defect is the daemon log's business.
+			log.Printf("runtime task %s (%s): usage report not in the expected form; dropped", taskID, runtime)
+			return
+		}
+		event = applied
+	}
 	kind := taskEventKind(event)
 	if kind == "message.delta" || kind == "reasoning.delta" {
 		s.deltas.Add(taskID, runtime, kind, event)
 		return
 	}
+	// Completed text/tools must follow their coalesced drafts. Waiting here
+	// also settles timer publication so no late tail follows a final answer.
+	s.deltas.FlushTask(taskID)
 	if err := s.appendAndPublish(taskID, kind, runtime+"-owned-stream", event, time.Now().UnixMilli()); err != nil {
 		s.failPersistence(taskID, runtime, err)
 	}
@@ -307,6 +375,7 @@ func (s *TaskApplicationService) finish(taskID string, outcome executionOutcome)
 		}()
 	}
 	s.deltas.FlushTask(taskID)
+	s.usage.Drop(taskID)
 	task, found, err := s.repository.ByID(taskID)
 	if err != nil || !found || terminalTaskLifecycle(task.Lifecycle) {
 		return
@@ -321,7 +390,8 @@ func (s *TaskApplicationService) finish(taskID string, outcome executionOutcome)
 		target = TaskFailed
 		errorText = outcome.Err.Error()
 		prefix := "process: "
-		if errors.Is(outcome.Err, ErrSessionInUse) {
+		var handoffErr *handoffLaunchError
+		if errors.Is(outcome.Err, ErrSessionInUse) || errors.As(outcome.Err, &handoffErr) {
 			prefix = "" // the daemon's own refusal, not the vendor process's failure
 		}
 		payload = ChatEvent{"type": "error", "text": prefix + truncate(errorText, 500)}
@@ -519,3 +589,43 @@ func (s *TaskApplicationService) EventRange() (int64, int64, error) {
 }
 
 func (s *TaskApplicationService) Unsubscribe(id uint64) { s.subscribers.Unsubscribe(id) }
+
+// admitModelConditionalInputs is the framework's model rule for input kinds a
+// runtime marks model-conditional and explicitly catalog-required. Discovery of
+// effort alone does not establish modality authority. It applies only
+// to a runtime that discovers its models, and only when the request names a
+// model (typed ids included): that model must be in the runtime's list and
+// list the kind. Otherwise the adapter's own validator is the only authority.
+func (s *TaskApplicationService) admitModelConditionalInputs(driver ChatDriver, req ChatRequest,
+	inputs []taskinput.ResolvedInput) error {
+	if req.Model == "" {
+		return nil
+	}
+	provider, ok := driver.(chatCapabilityProvider)
+	if !ok {
+		return nil
+	}
+	conditional := map[string]bool{}
+	for _, capability := range provider.ChatCapability().Inputs {
+		if capability.ModelConditional && capability.CatalogRequired {
+			conditional[capability.Kind] = true
+		}
+	}
+	for _, input := range inputs {
+		kind := string(input.Kind)
+		if !conditional[kind] {
+			continue
+		}
+		if _, discovers := driver.(chatModelDiscoverer); !discovers {
+			return fmt.Errorf("task input: %s requires a model catalog but this runtime cannot discover it", kind)
+		}
+		model, found := s.models(req.Runtime, req.Model)
+		if !found {
+			return fmt.Errorf("task input: the selected model is not in the runtime's model list, so %s input cannot be checked; refresh the list in Settings", kind)
+		}
+		if !slices.Contains(model.Inputs, kind) {
+			return fmt.Errorf("task input: the runtime does not report %s input for the selected model", kind)
+		}
+	}
+	return nil
+}

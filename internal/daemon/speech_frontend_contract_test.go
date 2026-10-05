@@ -57,7 +57,7 @@ func TestDictationNeverWritesProvisionalTextIntoTheComposer(t *testing.T) {
 		t.Fatal("speech-api.js must call the canonical /api/v1 surface")
 	}
 
-	settings := read("js/views/settings.js")
+	settings := read("js/views/settings-system.js")
 	if !bytes.Contains(settings, []byte("renderSpeechSettings")) || !bytes.Contains(settings, []byte("cg:speech-capabilities-changed")) {
 		t.Fatal("settings.js must render the speech card")
 	}

@@ -73,6 +73,25 @@ type SessionStreamConfig struct {
 	// the client either.
 	ClientBackoffCapSeconds int `json:"client_backoff_cap_seconds"`
 	ClientAgeTickSeconds    int `json:"client_age_tick_seconds"`
+	// Attention bounds what the frame carries about a helper's line for the
+	// owner (escalation-delivery plan §6.8).
+	Attention SessionAttentionConfig `json:"attention"`
+}
+
+// SessionAttentionConfig owns the owner-attention bounds on the frame.
+type SessionAttentionConfig struct {
+	// AskLineMaxChars cuts the line an ask or draft shows.
+	AskLineMaxChars int `json:"ask_line_max_chars"`
+	// AskHorizonSeconds is how far back an unresolved ask or draft still
+	// holds its session on the rail.
+	AskHorizonSeconds int `json:"ask_horizon_seconds"`
+	// AskNotify turns the one OS notification per ask on or off; the
+	// CG_NOTIFY=off environment switch still wins.
+	AskNotify bool `json:"ask_notify"`
+	// SubagentReentryMS is the gap after a sub-agent ends inside which a new
+	// turn start is read as the vendor re-entering the sub-agent's result,
+	// not as the owner answering.
+	SubagentReentryMS int `json:"subagent_reentry_ms"`
 }
 
 // sessionStreamPollFloor is mechanism, not policy: below the harvest burst
@@ -95,6 +114,8 @@ func defaultSessionStreamConfig() SessionStreamConfig {
 		GovernanceWindow:           60,
 		ClientBackoffCapSeconds:    10,
 		ClientAgeTickSeconds:       15,
+		Attention: SessionAttentionConfig{AskLineMaxChars: 280, AskHorizonSeconds: 7 * 24 * 3600,
+			AskNotify: true, SubagentReentryMS: 2000},
 	}
 }
 
@@ -152,6 +173,9 @@ func (c SessionStreamConfig) validate() error {
 		"governance_window":             c.GovernanceWindow,
 		"client_backoff_cap_seconds":    c.ClientBackoffCapSeconds,
 		"client_age_tick_seconds":       c.ClientAgeTickSeconds,
+		"attention.ask_line_max_chars":  c.Attention.AskLineMaxChars,
+		"attention.ask_horizon_seconds": c.Attention.AskHorizonSeconds,
+		"attention.subagent_reentry_ms": c.Attention.SubagentReentryMS,
 	}
 	for name, value := range positive {
 		if value <= 0 {
@@ -173,6 +197,11 @@ func (c SessionStreamConfig) Poll() time.Duration {
 // Quiet is the silence bound past which an in-flight state reads as unknown.
 func (c SessionStreamConfig) Quiet() time.Duration {
 	return time.Duration(c.QuietSeconds) * time.Second
+}
+
+// AskHorizon is how far back an unresolved ask or draft is read.
+func (c SessionStreamConfig) AskHorizon() time.Duration {
+	return time.Duration(c.Attention.AskHorizonSeconds) * time.Second
 }
 
 // Keepalive is the SSE comment cadence of the session stream.

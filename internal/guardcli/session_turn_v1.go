@@ -28,7 +28,10 @@ func buildSessionTurnEnvelope(in hookInput, kind string) (observation.SessionTur
 		return observation.SessionTurnEnvelope{}, err
 	}
 	native := in.HookEventName
-	if in.NotificationType != "" {
+	// The sub-type is provenance: one that would push the value past the
+	// daemon's bound is left out, never truncated, so it cannot cost the turn.
+	if in.NotificationType != "" &&
+		len(native)+1+len(in.NotificationType) <= observation.MaxNativeSourceBytes {
 		native += ":" + in.NotificationType
 	}
 	now := time.Now().Unix()
@@ -39,6 +42,18 @@ func buildSessionTurnEnvelope(in hookInput, kind string) (observation.SessionTur
 		TranscriptPath: in.TranscriptPath, Cwd: in.Cwd, ObservedAt: now, QueuedAt: now,
 		DeliveryAttempts: 1, DeliveryMode: "direct", Carrier: in.Carrier,
 	}, nil
+}
+
+// HookTurnEnvelope is the session-turn envelope the installed hook for runtime posts
+// for one raw payload at kind: the payload decoded by cmdHook's own reader, so the
+// envelope's Carrier is the hook's answer and not a caller's. The daemon's tests drive
+// recorded vendor payloads through it to the handlers.
+func HookTurnEnvelope(runtime string, payload io.Reader, kind string) (observation.SessionTurnEnvelope, error) {
+	in, err := readHookInput(payload, runtime, "")
+	if err != nil {
+		return observation.SessionTurnEnvelope{}, err
+	}
+	return buildSessionTurnEnvelope(in, kind)
 }
 
 func spoolSessionTurn(turn observation.SessionTurnEnvelope) (string, error) {

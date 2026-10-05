@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/ncruces/go-sqlite3/driver"
@@ -232,7 +233,7 @@ CREATE INDEX IF NOT EXISTS orchestration_review_session
 CREATE INDEX IF NOT EXISTS orchestration_review_active
   ON orchestration_review_invocation(binding_id,profile_id,profile_bundle_digest,state);
 
-` + orchestrationManagedSchemaV25 + sessionDeliverySchemaV29 + sessionOwnerTagSchema + `
+` + orchestrationManagedSchemaV25 + sessionDeliverySchemaV29 + sessionOwnerTagSchema + usageCallSchema + `
 
 ` + workspaceSchemaV26 + `
 
@@ -648,9 +649,11 @@ CREATE TABLE IF NOT EXISTS collection_issue(
 CREATE INDEX IF NOT EXISTS collection_issue_active
   ON collection_issue(kind,resolved_at,id);
 
--- C7 durable understanding evidence. These are immutable analyzer generations,
+-- C7 durable understanding evidence. These are append-only analyzer generations,
 -- deliberately separate from entity_state: that table is the governed-event fold
--- and is directly visible to stateful policy.
+-- and is directly visible to stateful policy. A generation row is never rewritten
+-- except for facts_state, which retention flips to 'pruned' once when it removes
+-- the row's unit, edge and coverage children (understanding-facts-retention plan).
 CREATE TABLE IF NOT EXISTS understanding_generation(
   id INTEGER PRIMARY KEY,
   repository_id TEXT NOT NULL,
@@ -674,6 +677,7 @@ CREATE TABLE IF NOT EXISTS understanding_generation(
   error_total INTEGER NOT NULL DEFAULT 0 CHECK(error_total >= 0),
   limitation_code TEXT NOT NULL DEFAULT '',
   limitation TEXT NOT NULL DEFAULT '',
+  facts_state TEXT NOT NULL DEFAULT 'present' CHECK(facts_state IN ('present','pruned')),
   CHECK(ended_at >= started_at),
   CHECK(
     (convention_state='none' AND convention_source_ref='' AND convention_source_digest='') OR
@@ -691,16 +695,28 @@ CREATE INDEX IF NOT EXISTS understanding_generation_snapshot
   ON understanding_generation(repository_id,checkout_id,snapshot_digest,analyzer_bundle_digest,
     convention_state,started_at DESC,id DESC);
 
+-- A unit's descriptor is stored once per distinct text (v45): scans of an unchanged
+-- file repeat the same descriptor, and 2M unit rows held 51K distinct ones. The
+-- digest is of the descriptor text itself. The index on descriptor_digest is created
+-- by the v45 migration step, because this DDL runs before migrate() on a store whose
+-- unit table does not have the column yet.
+CREATE TABLE IF NOT EXISTS understanding_descriptor(
+  digest TEXT PRIMARY KEY CHECK(digest LIKE 'sha256-v1:%'),
+  descriptor_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS understanding_unit(
   generation_id INTEGER NOT NULL REFERENCES understanding_generation(id) ON DELETE RESTRICT,
   path TEXT NOT NULL,
   source_hash TEXT NOT NULL CHECK(source_hash LIKE 'sha256-v1:%'),
   language TEXT NOT NULL DEFAULT '',
   namespace TEXT NOT NULL DEFAULT '',
-  descriptor_json TEXT NOT NULL,
+  descriptor_digest TEXT NOT NULL REFERENCES understanding_descriptor(digest) ON DELETE RESTRICT,
   PRIMARY KEY(generation_id,path)
 );
 
+-- WITHOUT ROWID (v45): the primary key spans nine of the eleven columns, so a rowid
+-- table stored nearly every edge twice. Lookups by (generation_id,from_kind,from_ref)
+-- use the primary key itself; there is no separate "from" index.
 CREATE TABLE IF NOT EXISTS understanding_edge(
   generation_id INTEGER NOT NULL REFERENCES understanding_generation(id) ON DELETE RESTRICT,
   from_kind TEXT NOT NULL CHECK(from_kind IN ('file','package','symbol','document','item')),
@@ -728,9 +744,7 @@ CREATE TABLE IF NOT EXISTS understanding_edge(
     (relation='document_defines_item' AND from_kind='document' AND to_kind='item') OR
     (relation='item_references_file' AND from_kind='item' AND to_kind='file')
   )
-);
-CREATE INDEX IF NOT EXISTS understanding_edge_from
-  ON understanding_edge(generation_id,from_kind,from_ref);
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS understanding_edge_to
   ON understanding_edge(generation_id,to_kind,to_ref);
 
@@ -767,6 +781,148 @@ BEGIN
   SELECT CASE WHEN COALESCE((SELECT status FROM understanding_generation WHERE id=NEW.generation_id),'')!='complete'
     THEN RAISE(ABORT,'understanding coverage requires a complete generation') END;
 END;
+
+-- Memory as first-class records (v36; memory-first-class-records plan §3.1).
+-- Store-canonical dossiers with WIRE identity: global_id mem_… (RT-4), author
+-- {type,id} always present (RT-3 — an empty author is invalid on the wire),
+-- per-record revision with content_hash over the wire shape. The files directory
+-- is a write-through mirror, never truth.
+CREATE TABLE IF NOT EXISTS memory_record(
+  id TEXT PRIMARY KEY,
+  global_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status IN ('active','pending','rejected')),
+  scope_type TEXT NOT NULL DEFAULT 'user' CHECK(scope_type IN ('user','repository','organization')),
+  scope_id TEXT NOT NULL DEFAULT '',
+  repository_identity TEXT NOT NULL DEFAULT 'weak' CHECK(repository_identity IN ('weak','remote-sha256')),
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  body TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  aliases TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL CHECK(source IN ('human','agent','import','harvest')),
+  origin TEXT NOT NULL DEFAULT '',
+  superseded_by TEXT NOT NULL DEFAULT '',
+  verified_at TEXT NOT NULL DEFAULT '',
+  verified_by TEXT NOT NULL DEFAULT '',
+  author_type TEXT NOT NULL DEFAULT 'user',
+  author_id TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+  content_hash TEXT NOT NULL,
+  reject_reason TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  -- Team sync state (v44, team item 5 decisions 13/14/15). share_state: only a shared
+  -- record leaves the device. pushed_hash / server_revision / synced_projection_hash:
+  -- the base the next push names, its server number, and the content projection at that
+  -- moment (in sync = the current projection equals it). held_*: a pulled revision
+  -- waiting for this record's in-flight push to settle. wire_slug: the team's slug when
+  -- the local id is a collision alias. collision: alias | shadowed (by a user record).
+  share_state TEXT NOT NULL DEFAULT 'unshared' CHECK(share_state IN ('unshared','shared')),
+  sync_origin TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local','pulled')),
+  pushed_hash TEXT NOT NULL DEFAULT '',
+  server_revision INTEGER NOT NULL DEFAULT 0,
+  synced_projection_hash TEXT NOT NULL DEFAULT '',
+  held_wire_record TEXT NOT NULL DEFAULT '',
+  held_server_revision INTEGER NOT NULL DEFAULT 0,
+  wire_slug TEXT NOT NULL DEFAULT '',
+  collision TEXT NOT NULL DEFAULT '' CHECK(collision IN ('','alias','shadowed')),
+  team_author TEXT NOT NULL DEFAULT '',
+  identity_note TEXT NOT NULL DEFAULT '',
+  -- The team record's global id a user-scope copy was detached from (O-11); '' otherwise.
+  detached_from TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS memory_record_updated ON memory_record(updated_at);
+CREATE INDEX IF NOT EXISTS memory_record_status ON memory_record(status);
+-- Session citations (ADR 0013 D2): the contested-memory evidence path.
+-- anchor_kind closes O2: event-uuid | turn-id | line-offset | none.
+-- Sources cascade with the record row (a resurrected id starts fresh);
+-- REVISIONS do not (see below).
+CREATE TABLE IF NOT EXISTS memory_source(
+  record_id TEXT NOT NULL REFERENCES memory_record(id) ON DELETE CASCADE,
+  vendor TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  anchor TEXT NOT NULL DEFAULT '',
+  anchor_kind TEXT NOT NULL DEFAULT 'none' CHECK(anchor_kind IN ('none','event-uuid','turn-id','line-offset')),
+  captured_at INTEGER NOT NULL,
+  PRIMARY KEY(record_id,vendor,session_id,anchor)
+);
+-- Per-record hash-chained revision snapshots — the git-history replacement:
+-- blame/bisect/undo are queries, not filesystem archaeology. Revisions are
+-- deliberately NOT cascade-deleted: honest deletion (ADR 0013 D7) removes the
+-- record from store/index/mirror while the revision history keeps the content,
+-- exactly as the archived git history did before it — EXCEPT for team records
+-- (shared or pulled), whose deletion erases their revisions too (team item 5, O-7).
+-- Keyed by the record's global id (v44), so a re-created slug never overwrites
+-- another record's history; revision is the LOCAL counter and server_revision the
+-- team server's number when the revision was accepted or landed from a pull.
+` + memoryRevisionDDL + `
+-- Deletion that syncs (ADR 0013 D7 honest deletion, made shareable). Keyed by the
+-- record's global id (v44): a slug deleted, re-created and deleted again is two
+-- tombstones. A slug deleted before v44 is keyed 'slug:<id>'. origin says whether this
+-- device deleted it or a teammate's deletion arrived by pull.
+` + memoryTombstoneDDL + `
+CREATE INDEX IF NOT EXISTS memory_tombstone_slug ON memory_tombstone(id);
+-- Conflict copies (team item 5, decision 13b): a local version the team's revision
+-- displaced — a stale push, a pulled revision over an unsent edit, or a deletion over an
+-- edit. Disclosed, never merged (invariant 3).
+CREATE TABLE IF NOT EXISTS memory_conflict(
+  conflict_id INTEGER PRIMARY KEY,
+  global_id TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('stale_base','pulled_over_edit','deleted')),
+  local_revision INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  by_author TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_conflict_record ON memory_conflict(global_id);
+-- Owner tags on memory records (plan §6): the SAME grammar, folding and
+-- validation as session owner tags (session_owner_tag.go), one more record
+-- kind — not a second tag system. The row is separate because the session
+-- table's CHECKs encode session identity; the TAG DISCIPLINE is shared code.
+CREATE TABLE IF NOT EXISTS memory_owner_tag(
+  tag_id TEXT PRIMARY KEY,
+  record_id TEXT NOT NULL CHECK(length(record_id) > 0),
+  key TEXT NOT NULL DEFAULT '' CHECK(length(key) <= 64),
+  value TEXT NOT NULL CHECK(length(value) BETWEEN 1 AND 64),
+  key_fold TEXT NOT NULL DEFAULT '',
+  value_fold TEXT NOT NULL,
+  applied_at INTEGER NOT NULL,
+  retracted_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(record_id,key_fold,value_fold,applied_at)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS memory_owner_tag_active
+  ON memory_owner_tag(record_id,key_fold,value_fold) WHERE retracted_at=0;
+CREATE INDEX IF NOT EXISTS memory_owner_tag_fold ON memory_owner_tag(key_fold,value_fold);
+-- Agent-initiated cross-vendor sends (v42; planned as v37, renumbered at merge; session-message-cross-vendor-plan §4).
+-- One record per MCP send request: admission facts (digest), resolved tier, and
+-- the terminal outcome. The boundary carrier claims from session_delivery; the
+-- by-target index here serves the per-target budget and the console display.
+-- Additive; rolling back is dropping the table and stamping 41.
+CREATE TABLE IF NOT EXISTS session_message_invocation(
+  invocation_id TEXT PRIMARY KEY,
+  caller_runtime TEXT NOT NULL,
+  caller_native_id TEXT NOT NULL DEFAULT '',
+  target_runtime TEXT NOT NULL,
+  target_catalog_id TEXT NOT NULL DEFAULT '',
+  target_native_id TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','refused','accepted','delivered','expired','unavailable','unknown')),
+  receipt TEXT NOT NULL DEFAULT '',
+  digest TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  settled_at INTEGER NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL DEFAULT '',
+  delivery_run_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS session_message_invocation_target
+  ON session_message_invocation(state,target_runtime,target_native_id,target_catalog_id,created_at);
+CREATE INDEX IF NOT EXISTS session_message_invocation_caller
+  ON session_message_invocation(caller_runtime,caller_native_id,created_at);
+CREATE INDEX IF NOT EXISTS session_message_invocation_digest
+  ON session_message_invocation(digest,state,created_at);
+CREATE INDEX IF NOT EXISTS session_message_invocation_settle
+  ON session_message_invocation(state,created_at);
 `
 
 type Index struct {
@@ -1214,6 +1370,96 @@ CREATE INDEX collection_issue_active ON collection_issue(kind,resolved_at,id);`)
 	}
 	if err := migrateSyncV31(db); err != nil {
 		return err
+	}
+	if err := migrateRuleV33(db); err != nil {
+		return err
+	}
+	if err := migrateUsageRoleV35(db); err != nil {
+		return err
+	}
+	if err := migrateThinkingEffortV37(db); err != nil {
+		return err
+	}
+	if err := migrateLayerV38(db); err != nil {
+		return err
+	}
+	if err := migrateFlowsV39(db); err != nil {
+		return err
+	}
+	if err := migrateOwnerAttentionV40(db); err != nil {
+		return err
+	}
+	if err := migrateFlowMemberExclusionV41(db); err != nil {
+		return err
+	}
+	if err := migrateSessionMessageInvocationV42(db); err != nil {
+		return err
+	}
+	if err := migrateUnderstandingFactsStateV43(db); err != nil {
+		return err
+	}
+	if err := migrateTeamMemoryV44(db); err != nil {
+		return err
+	}
+	if err := migrateUnderstandingShapeV45(db); err != nil {
+		return err
+	}
+	if err := migrateTeamRestOfReleaseV46(db); err != nil {
+		return err
+	}
+	return ensurePathReconciliationIndexes(db)
+}
+
+// migrateUnderstandingFactsStateV43 gives understanding_generation the facts_state
+// column and narrows the complete-identity unique index to rows that still hold
+// their facts, so a re-scan of a pruned snapshot appends a new row instead of
+// colliding with history (understanding-facts-retention plan §4.2). Both halves
+// probe the layout, so the step runs once: the column by name, the index by its
+// stored definition. The v16 step above keeps creating the un-narrowed index on a
+// fresh store (IF NOT EXISTS never narrows an existing one); this step owns the swap.
+func migrateUnderstandingFactsStateV43(db schemaDB) error {
+	cols, err := columnSet(db, "understanding_generation")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	if !cols["facts_state"] {
+		if _, err := db.Exec(`ALTER TABLE understanding_generation ADD COLUMN facts_state TEXT NOT NULL DEFAULT 'present' CHECK(facts_state IN ('present','pruned'))`); err != nil {
+			return fmt.Errorf("migrate understanding facts state v43: add column: %w", err)
+		}
+	}
+	var indexSQL string
+	err = db.QueryRow(`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND name='understanding_generation_complete_identity'`).Scan(&indexSQL)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("migrate understanding facts state v43: inspect identity index: %w", err)
+	}
+	if strings.Contains(indexSQL, "facts_state") {
+		return nil
+	}
+	if _, err := db.Exec(`DROP INDEX IF EXISTS understanding_generation_complete_identity;
+CREATE UNIQUE INDEX understanding_generation_complete_identity
+  ON understanding_generation(repository_id,checkout_id,snapshot_digest,structural_schema,
+    analyzer_bundle_digest,convention_state,convention_source_digest)
+  WHERE status='complete' AND facts_state='present'`); err != nil {
+		return fmt.Errorf("migrate understanding facts state v43: narrow identity index: %w", err)
+	}
+	return nil
+}
+
+// ensurePathReconciliationIndexes gives path_reconciliation its two lookup
+// indexes: the per-path supersede lookup, and the per-session console reads.
+// It is the last step of migrate, not part of the schema string, because
+// repairCheckpointDependentForeignKeysV8 rebuilds the table and drops whatever
+// indexes it had. Additive and idempotent, so it runs on every Open and does not
+// bump SchemaVersion (observe-hook-latency plan §15).
+func ensurePathReconciliationIndexes(db schemaDB) error {
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS path_reconciliation_current
+		ON path_reconciliation(current_checkpoint_id,path,algorithm,id);
+CREATE INDEX IF NOT EXISTS path_reconciliation_session
+		ON path_reconciliation(session_id,reconciled_at,id)`); err != nil {
+		return fmt.Errorf("ensure path reconciliation indexes: %w", err)
 	}
 	return nil
 }
@@ -1960,6 +2206,8 @@ func migrateUnderstandingIdentityV16(db schemaDB, version int) error {
 // migration step is added, so an OLDER binary opening a NEWER database can refuse
 // rather than silently write against a layout it does not know (D12). A release is
 // N binaries × M databases; "works at 1×1" is not the shipping condition.
+// An additive CREATE INDEX IF NOT EXISTS that every binary can read need not
+// bump it (ensurePathReconciliationIndexes).
 // v2 adds event.runtime; v3 adds C6 change evidence; v4 adds C7 typed
 // understanding generations outside the governed-event fold; v5 adds the C8
 // responsibility-fingerprint coverage family without adding a second fact store;
@@ -2008,7 +2256,130 @@ func migrateUnderstandingIdentityV16(db schemaDB, version int) error {
 // never a detector fact, a rule input or agent context. Additive, created by the
 // base schema on open; no backfill. (Written as v31; the team plan's sync schema
 // merged first and holds that number.)
-const SchemaVersion = 32
+// v33 (2026-09-24): event.rule_id — the rule that produced or asked for a decision, as a
+// field instead of prose inside reason (team plan §5.15); additive, no backfill.
+// v34 (2026-09-25): usage_call, usage_call_copy, usage_source, usage_prune — model calls
+// the usage recorder reads from vendor sources, kept past vendor pruning
+// (token-usage-analytics plan §3.6). Additive, created by the base schema on open; the
+// recorder backfills from the sources still on disk. Rolling back is dropping the four
+// tables and stamping 33.
+// v35 (2026-09-26): usage_source.role — the vendor-published agent type of a delegated
+// source, for the Usage page's subagents-by-type card (session usage breakdown plan
+// §5.2). Additive, no backfill here: the recorder fills it from the listing (Claude) or
+// a re-read (Codex). Rolling back is dropping the column and stamping 34.
+// v36 (2026-09-26): memory as first-class records (memory-first-class-records plan §3):
+// memory_record (store-canonical dossiers with wire identity: mem_… global_id,
+// scope_type/scope_id, author {type,id}, revision, content_hash), memory_source
+// (session citations — ADR 0013 D2 landed), memory_revision (per-record hash-chained
+// snapshots — the git-history replacement), memory_tombstone (deletion that syncs).
+// Additive tables; the file import itself runs as the daemon's one-time migration
+// pass, not here (it touches the filesystem, which DDL may not). Rolling back is
+// dropping the four tables and stamping 35. The number is provisional per the
+// plan's RT-1 fold: re-derived from origin/main at merge time; renumbering is
+// mechanical because the change is additive-only.
+// v37 (2026-09-26): session/model effort defaults, immutable task requested settings,
+// and managed primary effort. Additive; old rows remain unrecorded/inherited.
+// v38 (2026-09-27): event.layer — the distribution tier (user|repository|organization)
+// the deciding rule arrived by (team plan §5.16, item 3a). Additive ADD COLUMN with a
+// partial index, the rule_id pattern exactly; no backfill — a row's layer is a fact
+// about the moment of decision, and rows decided before layered bundles existed carry
+// none, never a guessed user. Rolling back is dropping the index and column and
+// stamping 37.
+// v39 (2026-09-27): orchestration-flows pilot — the append-only owner-tag
+// change journal and the flow tables (journal, flow records, stage members,
+// flow-scoped bindings, folded-state ceiling counters, dry-run receipts).
+// Additive; no existing table changes.
+// v40 (2026-09-29): owner attention (escalation-delivery plan §6.7, §13). One
+// column, orchestration_managed_run.settled_seq (claim-settle order, the agent-ask
+// id space; runs settled before v40 keep 0), plus indexes: orchestration_group by
+// (root_runtime, root_native_session_id) and (root_runtime, root_catalog_session_id);
+// completed runs by completed_at, by receipt state + completed_at, and by
+// settled_seq; runs by (profile_id, error_class). Rolling back: a v39 binary refuses
+// a v40 store, so restore the pre-install copy (index.pre-schema-40-*), or drop the
+// six indexes, rebuild the table without settled_seq, and stamp 39.
+//
+// v41 (2026-09-28; planned as 40 and renumbered at merge, because owner attention took
+// 40 first): orchestration_flow_member.excluded's CHECK becomes the class
+// vocabulary the daemon writes — no-stage added (the postwork fold wrote it and every
+// such INSERT failed), the never-written no-root dropped (owner D-1). NOT additive: a
+// table REBUILD (rename, create, named-column copy, drop), probed by the generated
+// CHECK clause so it runs once; a row in a retired class refuses the open instead of
+// being rewritten (flow-member-exclusion-class plan D-3). Any later change to this
+// CHECK must extend this rebuild, never add a sibling one. Rolling back is restoring
+// the pre-install copy, or — with no no-stage rows — rebuilding with the v39 CHECK
+// and stamping 40.
+//
+// v42 (2026-09-27; planned as 37 and renumbered at merge, because main reached 41
+// first): session_message_invocation (session-message-cross-vendor-plan §4) — one
+// ledger record per agent-initiated cross-vendor send, minted by the send route:
+// admission digest, state vocabulary pending→terminal, receipt, and the synthetic
+// delivery-run link for hook targets. Additive table + four indexes, plus two
+// canonical-id columns added to a table an earlier build created; rolling back is
+// dropping the table and stamping 41.
+//
+// v43 (2026-10-03): understanding_generation.facts_state ('present'|'pruned') and the
+// complete-identity unique index narrowed to present rows (understanding-facts-retention
+// plan §4.2). Additive ADD COLUMN plus an index swap, both layout-probed. A v42 binary
+// refuses a v43 store. Rolling back, daemon stopped, needs no spare disk and does NOT
+// rebuild the table (it is the foreign-key parent of three tables; the v42 binary names
+// its columns, so the extra column is harmless):
+//
+//	(the statements are understandingFactsStateV43RollbackSQL, below)
+//
+// The pruned rows must go: a v42 binary would read them as "measured, empty" and never
+// re-scan. The three child deletes clear rows a stopped daemon had not finished
+// removing. Remove the understanding_retention section from daemon.json first; the
+// older binary decodes that file strictly.
+//
+// v44 (2026-10-03, built 2026-10-02 as 43 and renumbered when main took 43): team item 5 — memory by scope across the team
+// (team-plane-item5-plan.md decision 2). memory_record gains the sync state and
+// share_state (additive columns); memory_revision is REBUILT keyed UNIQUE(global_id,
+// revision) with global_id backfilled from its body and a nullable server_revision;
+// memory_tombstone is REBUILT keyed by global_id (legacy slug rows become
+// 'slug:<id>') with prior hash, scope, reason and origin; memory_conflict holds conflict
+// copies; sync_outbox gains revision, ack_code, sent_body_hash and the frozen
+// sent_wire_body / sent_wire_hash. The pre-44 memory backlog is NOT touched here: the
+// drain acks each such row not_shareable on its first tick (C-11). Each rebuild is
+// probed by its new column so it runs once. Rolling back is restoring the pre-install
+// copy (index.pre-schema-44-*): a v43 binary refuses a v44 store. The step probes the layout,
+// so it is correct from a v42 store and from a store already at main's v43.
+//
+// v45 (2026-10-03; built as 44 and renumbered at merge, because team memory took 44
+// first): understanding storage shape (understanding-facts-retention plan §5).
+// understanding_unit.descriptor_json becomes descriptor_digest referencing the new
+// understanding_descriptor table (each distinct descriptor text stored once), and
+// understanding_edge becomes WITHOUT ROWID with understanding_edge_from dropped (a
+// prefix of the primary key). NOT additive: both tables are rebuilt by rename, create,
+// copy, drop, probed by layout so it runs once, and refused before it starts when the
+// volume lacks room (store/understanding_shape.go). The copy is proportional to the
+// rows left, so run it after retention has drained. Rolling back is restoring the
+// pre-install copy; a v44 binary refuses a v45 store.
+//
+// v46 (2026-10-04): the rest of the team release (team-rest-of-release-plan.md §5.3,
+// §6.7). Additive only: route_id, route_revision_digest, route_problem and adoption_key
+// on orchestration_managed_binding and orchestration_review_binding (the existing
+// runtime/model/endpoint columns become the resolved copy of a named model route);
+// the handoff, team_member, handoff_open and handoff_runtime_readiness tables. No row
+// is rewritten here: bindings get their routes from a pure, idempotent pass after the
+// store opens (plan §5.6). Rolling back is restoring the pre-install copy and the
+// profile directory copy and removing <dataDir>/models/routes/ (plan §5.6 step 5); a
+// v45 binary refuses a v46 store.
+const SchemaVersion = 46
+
+// understandingFactsStateV43RollbackSQL is the v43 rollback procedure named in the
+// schema note above. It is a constant so the test that proves it runs the very text
+// an operator would.
+const understandingFactsStateV43RollbackSQL = `
+DELETE FROM understanding_edge WHERE generation_id IN (SELECT id FROM understanding_generation WHERE facts_state='pruned');
+DELETE FROM understanding_unit WHERE generation_id IN (SELECT id FROM understanding_generation WHERE facts_state='pruned');
+DELETE FROM understanding_coverage WHERE generation_id IN (SELECT id FROM understanding_generation WHERE facts_state='pruned');
+DELETE FROM understanding_generation WHERE facts_state='pruned';
+DROP INDEX understanding_generation_complete_identity;
+CREATE UNIQUE INDEX understanding_generation_complete_identity
+  ON understanding_generation(repository_id,checkout_id,snapshot_digest,structural_schema,
+    analyzer_bundle_digest,convention_state,convention_source_digest)
+  WHERE status='complete';
+PRAGMA user_version = 42;`
 
 // checkSchemaVersion is the version half of D12. `migrate` already brings an older
 // database's COLUMNS forward idempotently; this adds the forward-compat guard the
@@ -2054,10 +2425,36 @@ func columnSet(db schemaDB, table string) (map[string]bool, error) {
 }
 
 // Open opens (creating if needed) the index at path and ensures the schema.
-func Open(path string) (*Index, error) {
+func Open(path string) (*Index, error) { return open(path, false) }
+
+// OpenExclusive opens the store the way Open does, but holds it exclusively from the
+// first byte, migration included: locking_mode(EXCLUSIVE) is in the connection string
+// ahead of the journal mode, on a pool of one connection (a second pooled connection
+// would be locked out by the first). It is for whole-file maintenance — the schema-45
+// rebuild and Compact — and fails busy when any other process has the store open for
+// writing. The pool of one means a method that holds a cursor while issuing another
+// statement would wait on itself; use the returned Index for maintenance only.
+func OpenExclusive(path string) (*Index, error) { return open(path, true) }
+
+func open(path string, exclusive bool) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
+	// Only in a test binary that asked for it (SeedFreshStores): a path with nothing
+	// at it then starts from a copy of a migrated, empty store, and everything below
+	// runs over the copy as over any existing store. A production binary never reads
+	// the seed.
+	if testing.Testing() {
+		if seed := freshStoreSeed.Load(); seed != nil {
+			placeFreshStoreSeed(path, *seed)
+		}
+	}
+	return openAt(path, exclusive)
+}
+
+// openAt opens the store at path as it is: it creates the schema in a new file and
+// migrates an older one.
+func openAt(path string, exclusive bool) (*Index, error) {
 	// Pragmas in the DSN so they apply to EVERY pooled connection, not just the one
 	// that would serve a post-open Exec (that was the bug: busy_timeout is
 	// per-connection). WAL lets the live governor (writer) run without blocking
@@ -2073,9 +2470,16 @@ func Open(path string) (*Index, error) {
 	// write lock at BEGIN puts the contention where busy_timeout genuinely
 	// works; plain queries open no transaction and keep WAL's readers-never-
 	// block property.
-	db, err := driver.Open("file:"+path+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(2000)&_pragma=foreign_keys(1)", fts5.Register)
+	locking := ""
+	if exclusive {
+		locking = "&_pragma=locking_mode(EXCLUSIVE)"
+	}
+	db, err := driver.Open("file:"+path+"?_txlock=immediate"+locking+"&_pragma=journal_mode(WAL)&_pragma=busy_timeout(2000)&_pragma=foreign_keys(1)", fts5.Register)
 	if err != nil {
 		return nil, err
+	}
+	if exclusive {
+		db.SetMaxOpenConns(1)
 	}
 	// Version gate FIRST, before any write. A store stamped NEWER than this binary
 	// understands must be refused before DDL or migration touches it — a `CREATE TABLE
@@ -2085,6 +2489,20 @@ func Open(path string) (*Index, error) {
 	if err := checkSchemaVersion(db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// The schema-45 rebuild copies every unit and edge row. An ordinary open never
+	// starts that under whoever else has the store open: only the exclusive open does
+	// (the daemon at boot, or crossing-guard compact).
+	if !exclusive {
+		pending, pendingErr := understandingShapeRebuildPending(db)
+		if pendingErr != nil {
+			db.Close()
+			return nil, pendingErr
+		}
+		if pending {
+			db.Close()
+			return nil, ErrUnderstandingRebuildPending
+		}
 	}
 	// DDL, legacy repair and the version stamp are ONE transaction. The old order
 	// stamped first, so a failed migration could leave a v3 label on a v2 layout.
@@ -2161,6 +2579,16 @@ func OpenRO(path string) (*Index, error) {
 		db.Close()
 		return nil, err
 	}
+	// A read-only open never migrates. A store still awaiting the schema-45 rebuild
+	// would answer this binary's unit and edge reads with "no such table"; say what
+	// is actually wrong instead.
+	if pending, err := understandingShapeRebuildPending(db); err != nil || pending {
+		db.Close()
+		if err == nil {
+			err = ErrUnderstandingRebuildPending
+		}
+		return nil, err
+	}
 	return &Index{db: db}, nil
 }
 
@@ -2193,6 +2621,68 @@ func (ix *Index) Export(destPath string) error {
 	// The snapshot inherits nothing from the source's perms; it holds the same
 	// sensitive record, so lock it down the same way (best-effort, as restrictPerms).
 	_ = os.Chmod(destPath, 0o600)
+	return nil
+}
+
+// migrateRuleV33 makes the deciding rule a field (team plan §5.15). Until now a rule id
+// reached storage only as prose inside reason, so nothing durable could say "the canary
+// was blocked": the fleet's core claim had no source. Additive and idempotent. There is
+// deliberately NO backfill — a rule id parsed out of a reason string would be inference
+// stored as fact, which EventRecord.Runtime's own comment forbids for that column too.
+// The index is partial because almost every row has no rule. SQLite qualifies a partial
+// index only when the query repeats its WHERE term literally — `rule_id = ?` does not
+// imply `rule_id != ”` to the planner — so RuntimeCanaries carries that term, and a test
+// reads the query plan.
+func migrateRuleV33(db schemaDB) error {
+	cols, err := columnSet(db, "event")
+	if err != nil {
+		return err
+	}
+	if !cols["rule_id"] {
+		if _, err := db.Exec(`ALTER TABLE event ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add event.rule_id: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS event_rule ON event(rule_id, runtime, id) WHERE rule_id != ''`); err != nil {
+		return fmt.Errorf("index event.rule_id: %w", err)
+	}
+	return nil
+}
+
+// migrateLayerV38 gives the event table the layer column (team plan §5.16, schema 38):
+// the distribution tier — user, repository, organization — whose rule decided, the same
+// shape as rule_id's v33 migration. Additive and idempotent by the probe-the-column
+// discipline; the partial index exists for the sessions view's per-layer filtering and
+// is partial because most rows carry no layer, exactly as most carry no rule.
+func migrateLayerV38(db schemaDB) error {
+	cols, err := columnSet(db, "event")
+	if err != nil {
+		return err
+	}
+	if !cols["layer"] {
+		if _, err := db.Exec(`ALTER TABLE event ADD COLUMN layer TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add event.layer: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS event_layer ON event(layer, runtime, id) WHERE layer != ''`); err != nil {
+		return fmt.Errorf("index event.layer: %w", err)
+	}
+	return nil
+}
+
+// migrateUsageRoleV35 gives an existing usage_source table the role column
+// (session usage breakdown plan §5.2). Additive; the recorder fills it.
+func migrateUsageRoleV35(db schemaDB) error {
+	cols, err := columnSet(db, "usage_source")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 || cols["role"] {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE usage_source ADD COLUMN role TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add usage_source.role: %w", err)
+	}
 	return nil
 }
 
@@ -2238,7 +2728,7 @@ CREATE TABLE IF NOT EXISTS sync_content_optin(
 	}
 	if devices == 0 {
 		if _, err := db.Exec(`INSERT INTO sync_device(id,created_at,linked) VALUES(?,?,0)`,
-			engine.NewTypedID("dev"), time.Now().UnixNano()); err != nil {
+			engine.NewTypedID(engine.DeviceIDPrefix), time.Now().UnixNano()); err != nil {
 			return fmt.Errorf("migrate sync v31: mint device: %w", err)
 		}
 	}
@@ -2297,6 +2787,174 @@ CREATE TABLE IF NOT EXISTS sync_content_optin(
 CREATE UNIQUE INDEX IF NOT EXISTS event_global_id ON event(global_id) WHERE global_id != '';
 CREATE INDEX IF NOT EXISTS event_chain ON event(session_id, chain_seq);`); err != nil {
 		return fmt.Errorf("migrate sync v31: indexes: %w", err)
+	}
+	return nil
+}
+
+// migrateSessionMessageInvocationV42 gives an existing session_message_invocation
+// table the canonical-id columns the postwork red-team fold added (postwork
+// PW-3: the loop bound forms edges over canonical ids, so one session under
+// its rollout/meta/thread id forms is one node). Additive ADD COLUMN with
+// defaults, guarded by the probe-the-column discipline; a store without the
+// table (a store the DDL created fresh on open) takes the base DDL.
+func migrateSessionMessageInvocationV42(db schemaDB) error {
+	cols, err := columnSet(db, "session_message_invocation")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	for _, addition := range []struct {
+		name string
+		ddl  string
+	}{
+		{"caller_canonical_id", `ALTER TABLE session_message_invocation ADD COLUMN caller_canonical_id TEXT NOT NULL DEFAULT ''`},
+		{"target_canonical_id", `ALTER TABLE session_message_invocation ADD COLUMN target_canonical_id TEXT NOT NULL DEFAULT ''`},
+	} {
+		if cols[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return fmt.Errorf("migrate session_message_invocation: add %s: %w", addition.name, err)
+		}
+	}
+	return nil
+}
+
+// memoryRevisionDDL and memoryTombstoneDDL are the v44 shapes, shared by the base DDL
+// (a fresh store) and migrateTeamMemoryV44's rebuild (an older store), so the two can
+// never disagree.
+const memoryRevisionDDL = `CREATE TABLE IF NOT EXISTS memory_revision(
+  revision_id INTEGER PRIMARY KEY,
+  record_id TEXT NOT NULL,
+  global_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  server_revision INTEGER,
+  author TEXT NOT NULL,
+  actor_source TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  prev_hash TEXT NOT NULL DEFAULT '',
+  changed TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(global_id,revision)
+);`
+
+const memoryTombstoneDDL = `CREATE TABLE IF NOT EXISTS memory_tombstone(
+  global_id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
+  deleted_at INTEGER NOT NULL,
+  deleted_by TEXT NOT NULL DEFAULT '',
+  prior_content_hash TEXT NOT NULL DEFAULT '',
+  scope_type TEXT NOT NULL DEFAULT '',
+  scope_id TEXT NOT NULL DEFAULT '',
+  reason_class TEXT NOT NULL DEFAULT 'user-request',
+  origin TEXT NOT NULL DEFAULT 'local' CHECK(origin IN ('local','pulled'))
+);`
+
+// migrateTeamMemoryV44 brings an older store to the team item 5 layout
+// (team-plane-item5-plan.md decision 2). Each step is probed by a column it adds, so it
+// runs once and is safe on every open:
+//   - memory_record: the sync-state and share_state columns (additive);
+//   - memory_revision: rebuilt UNIQUE(global_id, revision), global_id from the body;
+//   - memory_tombstone: rebuilt keyed by global_id, legacy slug rows as 'slug:<id>';
+//   - sync_outbox: revision, ack_code, sent_body_hash, sent_wire_body, sent_wire_hash.
+//
+// Pending pre-44 memory outbox rows name no revision; the drain acks them
+// not_shareable on its first tick (C-11, K-6), never encoding them from current state.
+func migrateTeamMemoryV44(db schemaDB) error {
+	cols, err := columnSet(db, "memory_record")
+	if err != nil {
+		return err
+	}
+	for _, addition := range []struct{ name, ddl string }{
+		{"share_state", `ALTER TABLE memory_record ADD COLUMN share_state TEXT NOT NULL DEFAULT 'unshared' CHECK(share_state IN ('unshared','shared'))`},
+		{"sync_origin", `ALTER TABLE memory_record ADD COLUMN sync_origin TEXT NOT NULL DEFAULT 'local' CHECK(sync_origin IN ('local','pulled'))`},
+		{"pushed_hash", `ALTER TABLE memory_record ADD COLUMN pushed_hash TEXT NOT NULL DEFAULT ''`},
+		{"server_revision", `ALTER TABLE memory_record ADD COLUMN server_revision INTEGER NOT NULL DEFAULT 0`},
+		{"synced_projection_hash", `ALTER TABLE memory_record ADD COLUMN synced_projection_hash TEXT NOT NULL DEFAULT ''`},
+		{"held_wire_record", `ALTER TABLE memory_record ADD COLUMN held_wire_record TEXT NOT NULL DEFAULT ''`},
+		{"held_server_revision", `ALTER TABLE memory_record ADD COLUMN held_server_revision INTEGER NOT NULL DEFAULT 0`},
+		{"wire_slug", `ALTER TABLE memory_record ADD COLUMN wire_slug TEXT NOT NULL DEFAULT ''`},
+		{"collision", `ALTER TABLE memory_record ADD COLUMN collision TEXT NOT NULL DEFAULT '' CHECK(collision IN ('','alias','shadowed'))`},
+		{"team_author", `ALTER TABLE memory_record ADD COLUMN team_author TEXT NOT NULL DEFAULT ''`},
+		{"identity_note", `ALTER TABLE memory_record ADD COLUMN identity_note TEXT NOT NULL DEFAULT ''`},
+		{"detached_from", `ALTER TABLE memory_record ADD COLUMN detached_from TEXT NOT NULL DEFAULT ''`},
+	} {
+		if len(cols) == 0 || cols[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return fmt.Errorf("migrate team memory v44: memory_record.%s: %w", addition.name, err)
+		}
+	}
+	if cols, err = columnSet(db, "memory_revision"); err != nil {
+		return err
+	}
+	if len(cols) > 0 && !cols["global_id"] {
+		for _, q := range []string{
+			`ALTER TABLE memory_revision RENAME TO memory_revision_pre44`,
+			memoryRevisionDDL,
+			`INSERT OR IGNORE INTO memory_revision(revision_id, record_id, global_id, revision, server_revision, author, actor_source, content_hash, prev_hash, changed, body, created_at)
+			 SELECT revision_id, record_id, COALESCE(NULLIF(json_extract(body, '$.id'), ''), 'slug:' || record_id), revision, NULL,
+			        author, actor_source, content_hash, prev_hash, changed, body, created_at FROM memory_revision_pre44`,
+			`DROP TABLE memory_revision_pre44`,
+		} {
+			if _, err := db.Exec(q); err != nil {
+				return fmt.Errorf("migrate team memory v44: memory_revision rebuild: %w", err)
+			}
+		}
+	}
+	if cols, err = columnSet(db, "memory_tombstone"); err != nil {
+		return err
+	}
+	if len(cols) > 0 && !cols["global_id"] {
+		for _, q := range []string{
+			`DROP INDEX IF EXISTS memory_tombstone_slug`,
+			`ALTER TABLE memory_tombstone RENAME TO memory_tombstone_pre44`,
+			memoryTombstoneDDL,
+			`INSERT OR IGNORE INTO memory_tombstone(global_id, id, deleted_at, deleted_by)
+			 SELECT 'slug:' || id, id, deleted_at, deleted_by FROM memory_tombstone_pre44`,
+			`DROP TABLE memory_tombstone_pre44`,
+			`CREATE INDEX IF NOT EXISTS memory_tombstone_slug ON memory_tombstone(id)`,
+		} {
+			if _, err := db.Exec(q); err != nil {
+				return fmt.Errorf("migrate team memory v44: memory_tombstone rebuild: %w", err)
+			}
+		}
+	}
+	if cols, err = columnSet(db, "sync_outbox"); err != nil {
+		return err
+	}
+	for _, addition := range []struct{ name, ddl string }{
+		{"revision", `ALTER TABLE sync_outbox ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`},
+		{"ack_code", `ALTER TABLE sync_outbox ADD COLUMN ack_code TEXT NOT NULL DEFAULT ''`},
+		{"sent_body_hash", `ALTER TABLE sync_outbox ADD COLUMN sent_body_hash TEXT NOT NULL DEFAULT ''`},
+		{"sent_wire_body", `ALTER TABLE sync_outbox ADD COLUMN sent_wire_body TEXT NOT NULL DEFAULT ''`},
+		{"sent_wire_hash", `ALTER TABLE sync_outbox ADD COLUMN sent_wire_hash TEXT NOT NULL DEFAULT ''`},
+	} {
+		if len(cols) == 0 || cols[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return fmt.Errorf("migrate team memory v44: sync_outbox.%s: %w", addition.name, err)
+		}
+	}
+	// Two indexes over the outbox, each built once over the whole table at first open (the
+	// one step of this migration whose cost grows with the store). sync_outbox_record
+	// serves the per-record reads (one in flight, the hold rule). sync_outbox_kind_scope
+	// serves the status reads GET /api/team and the session footer make on every call:
+	// measured 2026-10-02 on 1,000,000 acknowledged rows, the status read took 316 ms
+	// and the footer's count 237 ms scanning the table, 48 ms and 18 ms with the index,
+	// which took 1.5 s to build (CR-12).
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS sync_outbox_record ON sync_outbox(global_id, acked_at, seq)`,
+		`CREATE INDEX IF NOT EXISTS sync_outbox_kind_scope ON sync_outbox(record_kind, scope, ack_code)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			return fmt.Errorf("migrate team memory v44: outbox index: %w", err)
+		}
 	}
 	return nil
 }

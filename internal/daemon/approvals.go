@@ -44,25 +44,60 @@ type ApprovalOrigin string
 const (
 	ApprovalOriginPolicyHook  ApprovalOrigin = "policy_hook"
 	ApprovalOriginRuntimeTool ApprovalOrigin = "runtime_tool"
+	approvalGrantRequest                     = "request"
+	approvalGrantRunExact                    = "run_exact"
 )
 
+type ApprovalGrantOption struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Scope    string `json:"scope"`
+	Duration string `json:"duration"`
+}
+
+var requestGrantOption = ApprovalGrantOption{
+	ID: approvalGrantRequest, Label: "Allow once", Scope: "This request only",
+	Duration: "Until this request finishes; it is not remembered",
+}
+
+var exactRunGrantOption = ApprovalGrantOption{
+	ID: approvalGrantRunExact, Label: "Allow exact matches for this run",
+	Scope:    "Same permission and exact targets",
+	Duration: "Until this message finishes or is stopped; the next message can ask again",
+}
+
+func approvalGrantOptions(approval *Approval) []ApprovalGrantOption {
+	if approval != nil && len(approval.GrantOptions) != 0 {
+		return approval.GrantOptions
+	}
+	return []ApprovalGrantOption{requestGrantOption}
+}
+
 type Approval struct {
-	ID               string         `json:"id"`
-	CreatedAt        string         `json:"created_at"`
-	Deadline         string         `json:"deadline"`
-	Origin           ApprovalOrigin `json:"origin"`
-	Session          string         `json:"session,omitempty"`
-	Runtime          string         `json:"runtime,omitempty"`
-	TaskID           string         `json:"task_id,omitempty"`
-	CatalogSessionID string         `json:"catalog_session_id,omitempty"`
-	NativeSessionID  string         `json:"native_session_id,omitempty"`
-	ToolCallID       string         `json:"tool_call_id,omitempty"`
-	ToolName         string         `json:"tool_name,omitempty"`
-	Rule             string         `json:"rule,omitempty"`
-	Mode             string         `json:"mode"` // hard-block | confirm-and-record | ask (legacy guard)
-	Message          string         `json:"message,omitempty"`
-	Command          string         `json:"command,omitempty"` // the guarded action (daemon-side redaction applied)
-	Summary          string         `json:"summary,omitempty"` // bounded provider-owned display summary
+	ID               string                `json:"id"`
+	CreatedAt        string                `json:"created_at"`
+	Deadline         string                `json:"deadline"`
+	Origin           ApprovalOrigin        `json:"origin"`
+	Session          string                `json:"session,omitempty"`
+	Runtime          string                `json:"runtime,omitempty"`
+	TaskID           string                `json:"task_id,omitempty"`
+	CatalogSessionID string                `json:"catalog_session_id,omitempty"`
+	NativeSessionID  string                `json:"native_session_id,omitempty"`
+	ToolCallID       string                `json:"tool_call_id,omitempty"`
+	ToolName         string                `json:"tool_name,omitempty"`
+	Rule             string                `json:"rule,omitempty"`
+	Mode             string                `json:"mode"` // hard-block | confirm-and-record | ask (legacy guard)
+	Message          string                `json:"message,omitempty"`
+	Command          string                `json:"command,omitempty"` // the guarded action (daemon-side redaction applied)
+	Summary          string                `json:"summary,omitempty"` // bounded provider-owned display summary
+	Action           string                `json:"action"`
+	Targets          []string              `json:"targets,omitempty"`
+	ApprovalReason   string                `json:"approval_reason"`
+	AllowLabel       string                `json:"allow_label"`
+	GrantScope       string                `json:"grant_scope"`
+	GrantDuration    string                `json:"grant_duration"`
+	GrantOptions     []ApprovalGrantOption `json:"grant_options,omitempty"`
+	SelectedGrantID  string                `json:"selected_grant_id,omitempty"`
 	// Prompts are the questions the held call is asking its approver. An
 	// operative allow on an approval that has prompts must answer all of them.
 	// PromptsCompleteness says whether what the requester sent was carried
@@ -80,26 +115,43 @@ type Approval struct {
 	// Late is set when a decision arrived AFTER the hook's budget lapsed:
 	// recorded + attributed, but the hook already failed closed — advisory.
 	Late bool `json:"late,omitempty"`
+
+	RawTargets []string `json:"-"`
+	GrantToken string   `json:"-"`
 }
 
 type approvalRequest struct {
-	Origin           ApprovalOrigin                `json:"origin,omitempty"`
-	Session          string                        `json:"session,omitempty"`
-	Runtime          string                        `json:"runtime,omitempty"`
-	TaskID           string                        `json:"task_id,omitempty"`
-	CatalogSessionID string                        `json:"catalog_session_id,omitempty"`
-	NativeSessionID  string                        `json:"native_session_id,omitempty"`
-	ToolCallID       string                        `json:"tool_call_id,omitempty"`
-	ToolName         string                        `json:"tool_name,omitempty"`
-	Rule             string                        `json:"rule,omitempty"`
-	Mode             string                        `json:"mode,omitempty"`
-	Message          string                        `json:"message,omitempty"`
-	Command          string                        `json:"command,omitempty"`
-	Summary          string                        `json:"summary,omitempty"`
-	Prompts          []approvalchoice.ChoicePrompt `json:"prompts,omitempty"`
-	FiredTags        []string                      `json:"fired_tags,omitempty"`
-	Boundary         string                        `json:"boundary,omitempty"`
-	TimeoutMS        int                           `json:"timeout_ms"`
+	Origin             ApprovalOrigin                `json:"origin,omitempty"`
+	Session            string                        `json:"session,omitempty"`
+	Runtime            string                        `json:"runtime,omitempty"`
+	TaskID             string                        `json:"task_id,omitempty"`
+	CatalogSessionID   string                        `json:"catalog_session_id,omitempty"`
+	NativeSessionID    string                        `json:"native_session_id,omitempty"`
+	ToolCallID         string                        `json:"tool_call_id,omitempty"`
+	ToolName           string                        `json:"tool_name,omitempty"`
+	Rule               string                        `json:"rule,omitempty"`
+	Mode               string                        `json:"mode,omitempty"`
+	Message            string                        `json:"message,omitempty"`
+	Command            string                        `json:"command,omitempty"`
+	Summary            string                        `json:"summary,omitempty"`
+	Action             string                        `json:"action,omitempty"`
+	Targets            []string                      `json:"targets,omitempty"`
+	ApprovalReason     string                        `json:"approval_reason,omitempty"`
+	OfferExactRunGrant bool                          `json:"offer_exact_run_grant,omitempty"`
+	GrantToken         string                        `json:"grant_token,omitempty"`
+	Prompts            []approvalchoice.ChoicePrompt `json:"prompts,omitempty"`
+	FiredTags          []string                      `json:"fired_tags,omitempty"`
+	Boundary           string                        `json:"boundary,omitempty"`
+	TimeoutMS          int                           `json:"timeout_ms"`
+}
+
+type runtimeApprovalGrant struct {
+	Token           string
+	Runtime         string
+	TaskID          string
+	NativeSessionID string
+	ToolName        string
+	Targets         []string
 }
 
 type approvalsHub struct {
@@ -110,11 +162,13 @@ type approvalsHub struct {
 	streams            map[chan []byte]bool      // SSE clients
 	responderGrants    map[string]map[string]approvalResponderCapability
 	responseIDs        map[string]string
+	runtimeGrants      map[string]runtimeApprovalGrant
 	pendingObservers   map[uint64]approvalPendingObserver
 	nextObserverID     uint64
 	now                func() time.Time
 	newResponseID      func() string
 	newCapabilityNonce func() ([32]byte, error)
+	newGrantToken      func() string
 }
 
 func newApprovalsHub() *approvalsHub {
@@ -124,10 +178,12 @@ func newApprovalsHub() *approvalsHub {
 		streams:            map[chan []byte]bool{},
 		responderGrants:    map[string]map[string]approvalResponderCapability{},
 		responseIDs:        map[string]string{},
+		runtimeGrants:      map[string]runtimeApprovalGrant{},
 		pendingObservers:   map[uint64]approvalPendingObserver{},
 		now:                defaultApprovalNow,
 		newResponseID:      mintApprovalResponseID,
 		newCapabilityNonce: mintApprovalCapabilityNonce,
+		newGrantToken:      mintRuntimeApprovalGrantToken,
 	}
 }
 
@@ -237,6 +293,30 @@ func normalizeApprovalRequest(in approvalRequest) (approvalRequest, time.Duratio
 	if in.Boundary, err = trim(in.Boundary, 2048, "boundary"); err != nil {
 		return in, 0, err
 	}
+	if in.Action, err = trim(in.Action, 512, "action"); err != nil {
+		return in, 0, err
+	}
+	if in.ApprovalReason, err = trim(in.ApprovalReason, 2048, "approval_reason"); err != nil {
+		return in, 0, err
+	}
+	if in.GrantToken, err = trim(in.GrantToken, 128, "grant_token"); err != nil {
+		return in, 0, err
+	}
+	if in.GrantToken != "" && !validRuntimeApprovalGrantToken(in.GrantToken) {
+		return in, 0, fmt.Errorf("grant_token is invalid")
+	}
+	if len(in.Targets) > 32 {
+		return in, 0, fmt.Errorf("too many targets")
+	}
+	for index := range in.Targets {
+		in.Targets[index], err = trim(in.Targets[index], 2048, "target")
+		if err != nil {
+			return in, 0, err
+		}
+		if in.Targets[index] == "" {
+			return in, 0, fmt.Errorf("target cannot be empty")
+		}
+	}
 	config := activeApprovalsConfig()
 	if len(in.Summary) > config.MaxSummaryBytes {
 		return in, 0, fmt.Errorf("summary is too long")
@@ -257,6 +337,9 @@ func normalizeApprovalRequest(in approvalRequest) (approvalRequest, time.Duratio
 	var fallback time.Duration
 	switch in.Origin {
 	case ApprovalOriginPolicyHook:
+		if in.OfferExactRunGrant || in.GrantToken != "" {
+			return in, 0, fmt.Errorf("runtime grant fields require runtime_tool origin")
+		}
 		if in.Rule == "" {
 			return in, 0, fmt.Errorf("rule required for policy_hook")
 		}
@@ -264,12 +347,27 @@ func normalizeApprovalRequest(in approvalRequest) (approvalRequest, time.Duratio
 			in.Mode = "ask"
 		}
 		fallback = guardcli.MaxAskBudget
+		if in.Action == "" {
+			in.Action = "Allow the held action"
+		}
+		if len(in.Targets) == 0 && in.Command != "" {
+			in.Targets = []string{in.Command}
+		}
+		if in.ApprovalReason == "" {
+			in.ApprovalReason = "Crossing Guard policy “" + in.Rule + "” requires approval."
+		}
 	case ApprovalOriginRuntimeTool:
 		if in.Runtime == "" || in.TaskID == "" || in.ToolCallID == "" || in.ToolName == "" {
 			return in, 0, fmt.Errorf("runtime, task_id, tool_call_id, and tool_name required for runtime_tool")
 		}
 		in.Mode = "ask"
 		fallback = config.runtimeToolTimeout()
+		if in.Action == "" {
+			in.Action = "Allow " + in.ToolName
+		}
+		if in.ApprovalReason == "" {
+			in.ApprovalReason = "The runtime requires approval before it can continue."
+		}
 	default:
 		return in, 0, fmt.Errorf("unsupported approval origin")
 	}
@@ -287,6 +385,74 @@ func approvalAttentionText(a *Approval) string {
 	return fmt.Sprintf("Approval needed: %s (%s)", a.Rule, a.Mode)
 }
 
+func approvalFromRequest(in approvalRequest, budget time.Duration, now time.Time) *Approval {
+	options := []ApprovalGrantOption{requestGrantOption}
+	if in.OfferExactRunGrant {
+		options = append(options, exactRunGrantOption)
+	}
+	a := &Approval{
+		ID: mintApprovalID(), CreatedAt: now.Format(time.RFC3339),
+		Deadline: now.Add(budget).Format(time.RFC3339), Origin: in.Origin,
+		Session: in.Session, Runtime: in.Runtime, TaskID: in.TaskID,
+		CatalogSessionID: in.CatalogSessionID, NativeSessionID: in.NativeSessionID,
+		ToolCallID: in.ToolCallID, ToolName: in.ToolName,
+		Rule: in.Rule, Mode: in.Mode, Message: in.Message,
+		Command: redactSecrets(in.Command), Summary: redactSecrets(in.Summary),
+		Action: redactSecrets(in.Action), Targets: redactApprovalTargets(in.Targets),
+		ApprovalReason: redactSecrets(in.ApprovalReason),
+		AllowLabel:     requestGrantOption.Label, GrantScope: requestGrantOption.Scope,
+		GrantDuration: requestGrantOption.Duration, GrantOptions: options,
+		FiredTags: in.FiredTags, Boundary: in.Boundary, Status: "pending",
+		RawTargets: append([]string(nil), in.Targets...),
+	}
+	a.Prompts, a.PromptsCompleteness = carriedPrompts(in.Prompts, activeApprovalsConfig())
+	return a
+}
+
+func sameApprovalTargets(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *approvalsHub) applyRuntimeGrant(a *Approval, token string) (*Approval, bool) {
+	h.mu.Lock()
+	grant, ok := h.runtimeGrants[token]
+	if !ok || grant.Runtime != a.Runtime || grant.TaskID != a.TaskID ||
+		grant.NativeSessionID != a.NativeSessionID || grant.ToolName != a.ToolName ||
+		!sameApprovalTargets(grant.Targets, a.RawTargets) {
+		h.mu.Unlock()
+		return nil, false
+	}
+	acceptedAt := h.now()
+	a.Status = "allowed"
+	a.DecidedAt = acceptedAt.UTC().Format(time.RFC3339)
+	a.SelectedGrantID = approvalGrantRunExact
+	a.AllowLabel = exactRunGrantOption.Label
+	a.GrantScope = exactRunGrantOption.Scope
+	a.GrantDuration = exactRunGrantOption.Duration
+	a.GrantOptions = []ApprovalGrantOption{requestGrantOption, exactRunGrantOption}
+	a.GrantToken = token
+	responseID := h.newResponseID()
+	a.Responses = []ApprovalResponse{{
+		ID: responseID, Responder: automaticApprovalResponder("remembered-run-grant"),
+		Decision: "allow", GrantID: approvalGrantRunExact,
+		SubmittedAt: acceptedAt.UTC().Format(time.RFC3339Nano),
+		AcceptedAt:  acceptedAt.UTC().Format(time.RFC3339Nano), Disposition: "operative",
+	}}
+	h.responseIDs[responseID] = a.ID
+	h.addHistoryLocked(a)
+	snapshot := cloneApproval(a)
+	h.mu.Unlock()
+	return &snapshot, true
+}
+
 // POST /api/approvals/request blocks the requesting policy hook or runtime
 // callback until the canonical human decision lands or its own deadline expires.
 func handleApprovalRequest(w http.ResponseWriter, r *http.Request) {
@@ -300,19 +466,21 @@ func handleApprovalRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	id := mintApprovalID()
 	now := time.Now().UTC()
-	a := &Approval{
-		ID: id, CreatedAt: now.Format(time.RFC3339),
-		Deadline: now.Add(budget).Format(time.RFC3339), Origin: in.Origin,
-		Session: in.Session, Runtime: in.Runtime, TaskID: in.TaskID,
-		CatalogSessionID: in.CatalogSessionID, NativeSessionID: in.NativeSessionID,
-		ToolCallID: in.ToolCallID, ToolName: in.ToolName,
-		Rule: in.Rule, Mode: in.Mode, Message: in.Message,
-		Command: redactSecrets(in.Command), Summary: redactSecrets(in.Summary),
-		FiredTags: in.FiredTags, Boundary: in.Boundary, Status: "pending",
+	a := approvalFromRequest(in, budget, now)
+	id := a.ID
+	if in.GrantToken != "" {
+		applied, ok := approvals.applyRuntimeGrant(a, in.GrantToken)
+		if !ok {
+			http.Error(w, "runtime approval grant is invalid or does not match", http.StatusForbidden)
+			return
+		}
+		approvals.broadcast("decided", applied)
+		appendApprovalRecord(applied)
+		refoldForApproval(applied)
+		writeApprovalWaitResult(w, id, applied)
+		return
 	}
-	a.Prompts, a.PromptsCompleteness = carriedPrompts(in.Prompts, activeApprovalsConfig())
 	wait := make(chan *Approval, 1)
 	if err := approvals.admit(a, wait); err != nil {
 		http.Error(w, "could not prepare approval", http.StatusInternalServerError)
@@ -343,6 +511,17 @@ func handleApprovalRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func redactApprovalTargets(targets []string) []string {
+	if len(targets) == 0 {
+		return nil
+	}
+	redacted := make([]string, len(targets))
+	for index, target := range targets {
+		redacted[index] = redactSecrets(target)
+	}
+	return redacted
+}
+
 // ApprovalWaitResult is what a blocked requester receives when its hold ends. It is
 // a declared type rather than a map literal because a runtime adapter on the other
 // end has to build its own reply from these exact fields.
@@ -351,6 +530,10 @@ type ApprovalWaitResult struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
 	Note     string `json:"note,omitempty"`
+	GrantID  string `json:"grant_id,omitempty"`
+	// GrantToken is an opaque runtime capability. It is returned only to the
+	// blocked local adapter and is never part of Approval projections or audit.
+	GrantToken string `json:"grant_token,omitempty"`
 	// Selections is the approver's answer, present only when the held call was
 	// asking questions and the answer became operative. PromptsCompleteness says
 	// what the inbox did with the questions that were sent, so an adapter can
@@ -371,11 +554,41 @@ func writeApprovalWaitResult(w http.ResponseWriter, id string, approval *Approva
 		return
 	}
 	result := ApprovalWaitResult{ID: id, Decision: approval.Status, Reason: approval.Reason,
+		GrantID: approval.SelectedGrantID, GrantToken: approval.GrantToken,
 		PromptsCompleteness: approval.PromptsCompleteness}
 	if response := operativeApprovalResponse(approval); response != nil {
 		result.Selections = response.Selections
 	}
 	writeJSON(w, result)
+}
+
+func (h *approvalsHub) revokeRuntimeGrant(token string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.runtimeGrants[token]; !ok {
+		return false
+	}
+	delete(h.runtimeGrants, token)
+	return true
+}
+
+func handleApprovalGrantRevoke(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		GrantToken string `json:"grant_token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil || !validRuntimeApprovalGrantToken(in.GrantToken) {
+		http.Error(w, "valid grant_token required", http.StatusBadRequest)
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "grant release must contain exactly one JSON object", http.StatusBadRequest)
+		return
+	}
+	approvals.revokeRuntimeGrant(in.GrantToken)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // carriedPrompts applies the operator's ceilings. Prompts that fit are carried and
@@ -464,6 +677,7 @@ func handleApprovalDecision(w http.ResponseWriter, r *http.Request) {
 		ID         string                           `json:"id"`
 		Decision   string                           `json:"decision"` // allow | deny
 		Reason     string                           `json:"reason"`
+		GrantID    string                           `json:"grant_id,omitempty"`
 		Selections []approvalchoice.ChoiceSelection `json:"selections,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -498,6 +712,7 @@ func handleApprovalDecision(w http.ResponseWriter, r *http.Request) {
 		responder:  interactiveConsoleResponder,
 		decision:   in.Decision,
 		reason:     reason,
+		grantID:    in.GrantID,
 		selections: in.Selections,
 		submitted:  approvals.now(),
 		capability: capability,
@@ -604,7 +819,9 @@ func appendApprovalRecord(a *Approval) {
 			"boundary": a.Boundary, "summary": a.Summary, "runtime": a.Runtime,
 			"task_id": a.TaskID, "catalog_session_id": a.CatalogSessionID,
 			"native_session_id": a.NativeSessionID, "tool_call_id": a.ToolCallID,
-			"tool_name": a.ToolName},
+			"tool_name": a.ToolName, "action": a.Action, "targets": a.Targets,
+			"approval_reason": a.ApprovalReason, "selected_grant_id": a.SelectedGrantID,
+			"grant_scope": a.GrantScope, "grant_duration": a.GrantDuration},
 		"untainted": false,
 	}
 	if a.Reason != "" {
@@ -624,6 +841,9 @@ func appendApprovalRecord(a *Approval) {
 }
 
 func approvalRecordVia(a *Approval) string {
+	if len(a.Responses) != 0 && a.Responses[len(a.Responses)-1].Responder.ID == "remembered-run-grant" {
+		return "remembered-run-grant"
+	}
 	if len(a.Responses) != 0 && a.Responses[len(a.Responses)-1].Responder.Kind == "service" {
 		return "approval-responder"
 	}
@@ -653,4 +873,20 @@ func redactSecrets(s string) string {
 
 func mintApprovalID() string {
 	return "ap_" + rand.Text()
+}
+
+func mintRuntimeApprovalGrantToken() string {
+	return "arg_" + rand.Text()
+}
+
+func validRuntimeApprovalGrantToken(token string) bool {
+	if !strings.HasPrefix(token, "arg_") || len(token) < 30 || len(token) > 128 {
+		return false
+	}
+	for _, r := range strings.TrimPrefix(token, "arg_") {
+		if (r < 'A' || r > 'Z') && (r < '2' || r > '7') {
+			return false
+		}
+	}
+	return true
 }

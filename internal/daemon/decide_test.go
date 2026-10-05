@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"crossing-guard/engine"
+	"crossing-guard/internal/platform"
 	"crossing-guard/store"
 )
 
@@ -20,7 +21,7 @@ func statefulTestPolicy(t *testing.T) {
 	  {"id":"no-egress-after-personal","action":"deny",
 	   "message":"session touched personal data, then tried to egress",
 	   "if":{"all":[
-	     {"tag":"session:data-class","value":"personal"},
+	     {"tag":"session:data-class","value":"personal-data"},
 	     {"tag":"command","matches":"EGRESS_CANARY"}
 	   ]}},
 	  {"id":"static-rm","action":"deny","if":{"tag":"command","matches":"PURE_STATIC"}}
@@ -46,7 +47,7 @@ func statefulGovernor(t *testing.T) *Governor {
 	// Pin the platform gate to a demonstrated platform so these tests assert the STATEFUL
 	// logic on any GOOS — otherwise they'd only run on darwin and go vacuously green
 	// (gate closed → rule never evaluated) on the linux CI.
-	g.platform = PlatformSupportFor("darwin")
+	g.platform = platform.For("darwin")
 	return g
 }
 
@@ -55,12 +56,12 @@ func statefulGovernor(t *testing.T) *Governor {
 func TestStatefulTierGatedByPlatform(t *testing.T) {
 	statefulTestPolicy(t)
 	g := statefulGovernor(t)
-	g.platform = PlatformSupportFor("linux") // untested → must not arm
+	g.platform = platform.For("linux") // untested → must not arm
 	if err := g.Observe(Observation{SessionID: "s", Tool: "Write",
 		Content: "alice@example.com", TS: 10, Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -77,14 +78,14 @@ func TestStatefulRuleFiresOverAccumulatedState(t *testing.T) {
 	statefulTestPolicy(t)
 	g := statefulGovernor(t)
 
-	// Prior action establishes session:data-class=personal (data.email over the body).
+	// Prior action establishes session:data-class=personal-data (data.email over the body).
 	if err := g.Observe(Observation{SessionID: "s", Tool: "Write",
 		Content: "reach the admin at alice@example.com", TS: 10, Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// The egress action, in the SAME session, is denied by the stateful rule.
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +103,7 @@ func TestFailOpenWhenNoAccumulatedState(t *testing.T) {
 	g := statefulGovernor(t)
 
 	// No prior action → the session has no folded state.
-	d, err := g.DecideStateful(Observation{SessionID: "fresh", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "fresh", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +122,7 @@ func TestPureCommandRulesAreNotStateful(t *testing.T) {
 
 	// PURE_STATIC matches the static-only rule. The daemon must NOT report it — even
 	// though it would "match", it is not a stateful rule.
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run PURE_STATIC now", TS: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -137,15 +138,15 @@ func TestStatefulRuleDetection(t *testing.T) {
 		{Tag: "session:data-class", Value: "secrets"},
 		{Tag: "net", Value: "egress-external"},
 	}}
-	if !predicateReferencesState(stateful) {
+	if !engine.ReferencesState(stateful) {
 		t.Error("a predicate over session:* must be detected as stateful")
 	}
 	pure := engine.Predicate{Tag: "command", Matches: "rm"}
-	if predicateReferencesState(pure) {
+	if engine.ReferencesState(pure) {
 		t.Error("a pure command predicate must NOT be detected as stateful")
 	}
 	target := engine.Predicate{Not: &engine.Predicate{Tag: "target:data-class", Value: "public"}}
-	if !predicateReferencesState(target) {
+	if !engine.ReferencesState(target) {
 		t.Error("a predicate over target:* (even negated) must be detected as stateful")
 	}
 }
@@ -159,7 +160,7 @@ func TestFailOpenOnStateReadError(t *testing.T) {
 	// Close the store so SessionState errors — simulating a degraded/failing daemon.
 	g.ix.Close()
 
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err == nil {
 		t.Fatal("a state-read error must surface (→ handler fails open), not be swallowed into a decision")
@@ -175,7 +176,7 @@ func TestWarnStatefulRuleDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	rules := filepath.Join(dir, "rules.json")
 	doc := `{"rules":[{"id":"warn-egress","mode":"warn-and-proceed",
-	  "if":{"all":[{"tag":"session:data-class","value":"personal"},{"tag":"command","matches":"EGRESS_CANARY"}]}}]}`
+	  "if":{"all":[{"tag":"session:data-class","value":"personal-data"},{"tag":"command","matches":"EGRESS_CANARY"}]}}]}`
 	if err := os.WriteFile(rules, []byte(doc), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestWarnStatefulRuleDoesNotBlock(t *testing.T) {
 		Content: "alice@example.com", TS: 10, Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +203,7 @@ func TestAskStatefulRuleStaysOverridable(t *testing.T) {
 	dir := t.TempDir()
 	rules := filepath.Join(dir, "rules.json")
 	doc := `{"rules":[{"id":"ask-egress","action":"ask",
-	  "if":{"all":[{"tag":"session:data-class","value":"personal"},{"tag":"command","matches":"EGRESS_CANARY"}]}}]}`
+	  "if":{"all":[{"tag":"session:data-class","value":"personal-data"},{"tag":"command","matches":"EGRESS_CANARY"}]}}]}`
 	if err := os.WriteFile(rules, []byte(doc), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestAskStatefulRuleStaysOverridable(t *testing.T) {
 		Content: "alice@example.com", TS: 10, Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
+	d, _, err := g.DecideStateful(Observation{SessionID: "s", Tool: "Bash",
 		Command: "run EGRESS_CANARY now", TS: 20})
 	if err != nil {
 		t.Fatal(err)

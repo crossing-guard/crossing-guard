@@ -63,7 +63,7 @@ func writeClaudeProjectionFixture(t *testing.T) (string, string) {
 	path := filepath.Join(dir, id+".jsonl")
 	body := `{"type":"user","sessionId":"` + id + `","timestamp":"2026-08-28T10:00:00Z","message":{"role":"user","content":"first prompt"}}` + "\n" +
 		`{"type":"assistant","sessionId":"` + id + `","timestamp":"2026-08-28T10:00:01Z","message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"first answer"}],"usage":{"input_tokens":3,"output_tokens":2}}}` + "\n" +
-		`{"type":"custom-title","customTitle":"Due diligence fixture"}` + "\n"
+		`{"type":"custom-title","customTitle":"Sprint retro fixture"}` + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestClaudeProjectionReusesParserAndRejectsMutation(t *testing.T) {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
 	session := discovery.Sessions[0]
-	if session.ID != id || session.Summary.Title != "Due diligence fixture" || len(session.Segments) != 1 {
+	if session.ID != id || session.Summary.Title != "Sprint retro fixture" || len(session.Segments) != 1 {
 		t.Fatalf("session=%+v", session)
 	}
 	snapshot, err := runtime.ReadTranscriptProjection(context.Background(), session, ProjectionReadLimits{})

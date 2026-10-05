@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -76,7 +77,7 @@ func TestCodexExtraArgsAllowlist(t *testing.T) {
 	} {
 		req := ChatRequest{Runtime: "codex", Prompt: "hi", ExtraArgs: extra}
 		got, err := driver.CanonicalizeChatRequest(req)
-		if err != nil || got.ExtraArgs != extra || got.Prompt != "hi" {
+		if err != nil || got.Prompt != "hi" || (strings.Contains(extra, "model_reasoning_effort=") && got.ThinkingEffort == nil) {
 			t.Fatalf("%q: accepted request changed or refused: %+v %v", extra, got, err)
 		}
 	}
@@ -150,7 +151,7 @@ func TestCodexExtraArgsAllowlist(t *testing.T) {
 }
 
 func TestCodexExtraArgsRefusalNamesThePosition(t *testing.T) {
-	const where = " (Settings → extra args for Codex, or the request's extra_args)"
+	const where = " (Settings → Runtimes → extra args for Codex, or the request's extra_args)"
 	cases := map[string]string{
 		"--skip-git-repo-check --yolo":                  "codex extra arguments accept only --skip-git-repo-check and one -c reasoning-effort override; argument 2 is not accepted" + where,
 		"--skip-git-repo-check --skip-git-repo-check":   "codex extra arguments accept each option once; argument 2 repeats one" + where,
@@ -177,15 +178,15 @@ func TestCodexArgvKeepsPositionalsAfterBoundary(t *testing.T) {
 		{ChatRequest{Prompt: "p", ExtraArgs: "--skip-git-repo-check -c model_reasoning_effort=medium"},
 			[]string{"exec", "--sandbox", "read-only", "--json", "--skip-git-repo-check", "-c", "model_reasoning_effort=medium", "--", "p"}},
 		{ChatRequest{Prompt: "p", ExtraArgs: "--config model_reasoning_effort=low"},
-			[]string{"exec", "--sandbox", "read-only", "--json", "--config", "model_reasoning_effort=low", "--", "p"}},
+			[]string{"exec", "--sandbox", "read-only", "--json", "-c", "model_reasoning_effort=low", "--", "p"}},
 		{ChatRequest{Prompt: "p", ExtraArgs: "--config=model_reasoning_effort=xhigh"},
-			[]string{"exec", "--sandbox", "read-only", "--json", "--config=model_reasoning_effort=xhigh", "--", "p"}},
+			[]string{"exec", "--sandbox", "read-only", "--json", "-c", "model_reasoning_effort=xhigh", "--", "p"}},
 		{ChatRequest{Prompt: "p", SessionID: thread, ExtraArgs: "-c model_reasoning_effort=high"},
 			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "-c", "model_reasoning_effort=high", "--", thread, "p"}},
 		{ChatRequest{Prompt: "p", SessionID: thread, ExtraArgs: "--config model_reasoning_effort=low"},
-			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "--config", "model_reasoning_effort=low", "--", thread, "p"}},
+			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "-c", "model_reasoning_effort=low", "--", thread, "p"}},
 		{ChatRequest{Prompt: "p", SessionID: thread, ExtraArgs: "--config=model_reasoning_effort=low"},
-			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "--config=model_reasoning_effort=low", "--", thread, "p"}},
+			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "-c", "model_reasoning_effort=low", "--", thread, "p"}},
 		{ChatRequest{Prompt: "p", SessionID: thread, ExtraArgs: "--skip-git-repo-check -c model_reasoning_effort=medium"},
 			[]string{"exec", "--sandbox", "read-only", "resume", "--json", "--skip-git-repo-check", "-c", "model_reasoning_effort=medium", "--", thread, "p"}},
 		{ChatRequest{Prompt: "-h", SessionID: "--yolo"},
@@ -299,5 +300,152 @@ func assertCodexExecOptionsBeforeResume(t *testing.T, args []string, model strin
 	}
 	if strings.HasPrefix(model, "local:") && slices.Contains(options, "-m") {
 		t.Fatalf("model flag sent for a local model: %q", args)
+	}
+}
+
+// LocalRoute agrees with BuildCmd's own local-lane decision
+// (managed-turn-profile-limits plan §4.1, VR-6, R2-7): a request is local
+// exactly when the argv selects --oss with a BUILT-IN local provider. Codex
+// 0.154 accepts any configured provider id after --local-provider, so any
+// other provider — or none — is not a local claim.
+func TestCodexLocalRouteAgreesWithTheLocalLaneBuildCmdEmits(t *testing.T) {
+	bin := testChatExecutable(t)
+	driver := codexChatDriver{}
+	cases := []struct {
+		req   ChatRequest
+		local bool
+	}{
+		{ChatRequest{}, false},
+		{ChatRequest{Model: "gpt-5.6-sol"}, false},
+		{ChatRequest{Model: "local:"}, false},
+		{ChatRequest{Model: "local:ollama"}, true},
+		{ChatRequest{Model: "local:lmstudio"}, true},
+		{ChatRequest{Model: "local:foo"}, false},
+		{ChatRequest{Model: "Local:ollama"}, false},
+		{ChatRequest{OSS: true}, false},
+		{ChatRequest{OSS: true, LocalProvider: "ollama"}, true},
+		{ChatRequest{OSS: true, LocalProvider: "foo"}, false},
+		{ChatRequest{Model: "local:ollama", LocalProvider: "lmstudio"}, true},
+		{ChatRequest{Model: "local:foo", LocalProvider: "ollama"}, false},
+	}
+	for _, tc := range cases {
+		req := tc.req
+		req.Binary, req.Cwd, req.Prompt = bin, t.TempDir(), "p"
+		cmd, err := driver.BuildCmd(req, ChatLaunchContext{})
+		if err != nil {
+			t.Fatalf("%+v: %v", tc.req, err)
+		}
+		oss, provider := false, ""
+		for index, arg := range cmd.Args {
+			if arg == "--" {
+				break
+			}
+			if arg == "--oss" {
+				oss = true
+			}
+			if arg == "--local-provider" && index+1 < len(cmd.Args) {
+				provider = cmd.Args[index+1]
+			}
+		}
+		emittedLocal := oss && (provider == "ollama" || provider == "lmstudio")
+		local, basis := driver.LocalRoute(tc.req)
+		if local != tc.local || local != emittedLocal {
+			t.Fatalf("%+v: LocalRoute=%v want %v; argv local lane=%v (%v)", tc.req, local, tc.local, emittedLocal, cmd.Args)
+		}
+		if local && !strings.Contains(basis, provider) {
+			t.Fatalf("%+v: basis %q does not name the provider", tc.req, basis)
+		}
+	}
+}
+
+// The declared Local options are the ones LocalRoute claims, and they are the
+// ones that need no vendor sign-in — one fact, three encodings, kept equal.
+func TestCodexDeclaredLocalOptionsMatchLocalRoute(t *testing.T) {
+	driver := codexChatDriver{}
+	claimed := 0
+	for _, option := range driver.ChatCapability().Models {
+		if option.Custom {
+			continue
+		}
+		local, _ := driver.LocalRoute(ChatRequest{Model: option.ID})
+		needsNoSignIn := option.VendorAuthRequired != nil && !*option.VendorAuthRequired
+		if local != needsNoSignIn {
+			t.Fatalf("option %q: LocalRoute=%v but vendor sign-in not required=%v", option.ID, local, needsNoSignIn)
+		}
+		if local {
+			claimed++
+		}
+	}
+	if claimed == 0 {
+		t.Fatal("Codex declares no local option; the local-route advice would never be offered")
+	}
+}
+
+func TestCodexBundledBinariesNewestLayoutFirst(t *testing.T) {
+	if len(codexBundledBinaries) < 2 {
+		t.Fatalf("both app layouts must stay listed: %v", codexBundledBinaries)
+	}
+	if !strings.HasSuffix(codexBundledBinaries[0], "/codex-cli/bin/codex") {
+		t.Fatalf("the declared entrypoint of the current layout must be tried first: %v", codexBundledBinaries)
+	}
+	if !strings.HasSuffix(codexBundledBinaries[1], "/Contents/Resources/codex") {
+		t.Fatalf("the pre-2026-09-30 location must stay as the second entry: %v", codexBundledBinaries)
+	}
+	for _, path := range codexBundledBinaries {
+		if !filepath.IsAbs(path) || filepath.Base(path) != "codex" {
+			t.Errorf("bundle entry %q must be an absolute path to the codex executable", path)
+		}
+	}
+}
+
+// TestCodexBundlePathHasOneOwner guards the call sites: the app moved its CLI once and
+// six scattered literals all broke. Only chat_codex.go may name a bundle path, only
+// codexBinary may resolve "codex", and the skills probe keeps no lookup of its own.
+// It is a line scan, not a parser: a path assembled from pieces, or a token after a
+// "//" inside a string literal, would escape it.
+func TestCodexBundlePathHasOneOwner(t *testing.T) {
+	root := filepath.Join("..", "..")
+	tokens := []string{"/Applications/ChatGPT", "CodexCLI.app", "Resources/codex"}
+	resolves := 0
+	for _, dir := range []string{"engine", "store", "harvest", "memory", "internal", "cmd", "ruledoc", "schemas", "teamwire"} {
+		top := filepath.Join(root, dir)
+		if _, err := os.Stat(top); os.IsNotExist(err) {
+			continue // not every listed directory exists in every checkout
+		}
+		err := filepath.WalkDir(top, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			rel := filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator)))
+			owner := rel == "internal/daemon/chat_codex.go"
+			for n, line := range strings.Split(string(src), "\n") {
+				code, _, _ := strings.Cut(line, "//")
+				for _, token := range tokens {
+					if strings.Contains(code, token) && !owner {
+						t.Errorf("%s:%d names a Codex bundle path (%s); codexBundledBinaries owns it", rel, n+1, token)
+					}
+				}
+				if strings.Contains(code, `guardcli.ResolveRuntimeBinary("codex"`) {
+					resolves++
+					if !owner {
+						t.Errorf("%s:%d resolves codex itself; call codexBinary", rel, n+1)
+					}
+				}
+				if rel == "internal/daemon/skills_codex.go" && strings.Contains(code, "LookPath") {
+					t.Errorf("%s:%d keeps a private lookup; call codexBinary", rel, n+1)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resolves != 1 {
+		t.Fatalf(`guardcli.ResolveRuntimeBinary("codex" must appear exactly once, in chat_codex.go; found %d`, resolves)
 	}
 }

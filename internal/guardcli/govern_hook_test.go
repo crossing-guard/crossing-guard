@@ -1,6 +1,8 @@
 package guardcli
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,5 +96,91 @@ func TestGovernOpenCodeFailsOpenVisiblyWhenRulesAreBroken(t *testing.T) {
 	}
 	if !strings.Contains(decision.Reason, "governance error") {
 		t.Fatalf("fail-open reason hides the governance error: %q", decision.Reason)
+	}
+}
+
+const governWarnRules = `{"rules":[
+  {"id":"warn-unreviewed","mode":"warn-and-proceed","message":"always warns (a non-state term: the static tier never evaluates state rules)","if":{"not":{"tag":"command","matches":"^never-a-real-command$"}}},
+  {"id":"warn-echo","mode":"warn-and-proceed","message":"echo seen","if":{"tag":"command","matches":"^echo warnme"}},
+  {"id":"deny-alpha","action":"deny","message":"alpha is restricted","if":{"tag":"command","matches":"alpha"}},
+  {"id":"ask-bravo","action":"ask","message":"bravo needs a human","if":{"tag":"command","matches":"bravo"}}
+]}`
+
+// governWarnHome is governTestHome with no invocation policy, so only the standalone
+// tier sees the warn rule.
+func governWarnHome(t *testing.T) {
+	governTestHome(t, governWarnRules)
+	t.Setenv("CG_POLICY", filepath.Join(t.TempDir(), "absent-policy.json"))
+}
+
+// A warn rule proceeds in the headless lane and is named in the recorded reason;
+// before, any non-allow standalone decision denied as "confirm-class".
+func TestGovernWarnRuleProceedsNamingTheRule(t *testing.T) {
+	governWarnHome(t)
+	decision := governHookPreToolUse(governPreToolCall("ls -la"))
+	if decision.Decision != "allow" || decision.Error != "" {
+		t.Fatalf("warn-only match did not proceed: %+v", decision)
+	}
+	if decision.Reason != "warn-and-proceed: rule warn-unreviewed" {
+		t.Fatalf("allow reason does not name the warn: %q", decision.Reason)
+	}
+}
+
+func TestGovernEveryFiredWarnIsNamed(t *testing.T) {
+	governWarnHome(t)
+	d := governHookPreToolUse(governPreToolCall("echo warnme"))
+	if d.Decision != "allow" || d.Reason != "warn-and-proceed: rule warn-unreviewed, warn-echo" {
+		t.Fatalf("two warns not both named: %+v", d)
+	}
+}
+
+// With an invocation policy the engine tier warns the user rulebook's rule first; the
+// reason names it once, not once per tier.
+func TestGovernEngineTierWarnNamedOnce(t *testing.T) {
+	governWarnHome(t)
+	policy := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(policy, []byte(`{"rules":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CG_POLICY", policy)
+	d := governHookPreToolUse(governPreToolCall("ls -la"))
+	if d.Decision != "allow" || d.Reason != "warn-and-proceed: rule warn-unreviewed" {
+		t.Fatalf("engine+static warn not named exactly once: %+v", d)
+	}
+}
+
+func TestGovernWarnDoesNotMaskAGatingRule(t *testing.T) {
+	governWarnHome(t)
+	if d := governHookPreToolUse(governPreToolCall("run bravo")); d.Decision != "deny" ||
+		!strings.Contains(d.Reason, "confirm-class rule ask-bravo") {
+		t.Fatalf("ask beside a warn did not gate: %+v", d)
+	}
+	pendingObserve = nil
+	if d := governHookPreToolUse(governPreToolCall("run alpha")); d.Decision != "deny" ||
+		!strings.Contains(d.Reason, "deny-alpha") {
+		t.Fatalf("deny beside a warn did not gate: %+v", d)
+	}
+}
+
+// A warn never ends the pipeline: the stateful consult still runs and its deny wins.
+func TestGovernWarnStillConsultsTheStatefulTier(t *testing.T) {
+	governWarnHome(t)
+	consulted := 0
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/govern/decide" {
+			http.NotFound(w, r) // observation posts: tolerated, not under test
+			return
+		}
+		consulted++
+		_, _ = w.Write([]byte(`{"decision":"deny","rule":"stateful-unreviewed","message":"not reviewed yet","evaluated":true}`))
+	}))
+	defer daemon.Close()
+	t.Setenv("CG_GOVERN", strings.TrimPrefix(daemon.URL, "http://"))
+	d := governHookPreToolUse(governPreToolCall("ls -la"))
+	if consulted != 1 {
+		t.Fatalf("stateful tier consulted %d times after a warn, want 1", consulted)
+	}
+	if d.Decision != "deny" || !strings.Contains(d.Reason, "stateful-unreviewed") {
+		t.Fatalf("stateful deny after a warn did not gate: %+v", d)
 	}
 }

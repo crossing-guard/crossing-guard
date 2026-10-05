@@ -14,6 +14,7 @@ func migrateRuntimeTasksV20(db schemaDB, version int) error {
 	}
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS runtime_task(
+  requested_settings TEXT NOT NULL DEFAULT '',
   id TEXT PRIMARY KEY,
   console_scope TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,

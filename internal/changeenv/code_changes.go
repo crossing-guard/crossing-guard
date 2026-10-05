@@ -38,6 +38,18 @@ type CodeChangeBoundary struct {
 	CapturedAt     int64  `json:"captured_at"`
 	SnapshotDigest string `json:"snapshot_digest"`
 	GenerationID   int64  `json:"generation_id,omitempty"`
+	// FactsState is the generation's facts_state ("present" or "pruned"); empty
+	// when the boundary has no generation.
+	FactsState string `json:"facts_state,omitempty"`
+}
+
+// factsPrunedReason is what every reader says about a generation whose facts
+// retention removed. It is a reason on the existing unavailable states, never an
+// empty comparison.
+const factsPrunedReason = "analysis facts were removed by retention"
+
+func factsPruned(generation store.UnderstandingGeneration) bool {
+	return generation.Status == "complete" && generation.FactsState == store.UnderstandingFactsPruned
 }
 
 // CodeDeclarationFacts is a bounded population of declaration-level changes.
@@ -1071,6 +1083,11 @@ func loadCurrentCodeAnalysis(ix *store.Index, analyzerBundle string, ctx *codeCh
 		ctx.reason = strings.TrimSpace(ctx.currentGen.LimitationCode + ": " + ctx.currentGen.Limitation)
 		return false, nil
 	}
+	if factsPruned(ctx.currentGen) {
+		ctx.currentExact = false
+		ctx.state, ctx.reason = "unavailable", factsPrunedReason
+		return false, nil
+	}
 	return true, nil
 }
 
@@ -1094,6 +1111,11 @@ func loadBaselineCodeAnalysis(ix *store.Index, analyzerBundle string, ctx *codeC
 		ctx.baselineExact = false
 		ctx.state = "baseline_unavailable"
 		ctx.reason = "the first observed baseline has no exact current-analyzer generation"
+		return false, nil
+	}
+	if factsPruned(ctx.baselineGen) {
+		ctx.baselineExact = false
+		ctx.state, ctx.reason = "baseline_unavailable", factsPrunedReason
 		return false, nil
 	}
 	return true, nil
@@ -1148,7 +1170,7 @@ func uniqueChangePathCount(items []store.ChangeItem) int {
 func boundaryFact(checkpoint store.UnderstandingCheckpoint, generation store.UnderstandingGeneration) *CodeChangeBoundary {
 	return &CodeChangeBoundary{CheckpointID: checkpoint.Checkpoint.ID, Kind: checkpoint.Checkpoint.Kind,
 		CapturedAt: checkpoint.Checkpoint.CaptureEndedAt, SnapshotDigest: checkpoint.Change.SnapshotDigest,
-		GenerationID: generation.ID}
+		GenerationID: generation.ID, FactsState: generation.FactsState}
 }
 
 func indexUnits(units []store.UnderstandingUnit) map[string]store.UnderstandingUnit {

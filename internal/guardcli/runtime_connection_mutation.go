@@ -90,13 +90,23 @@ func DisconnectRuntime(runtimeName, executable, expectedStateDigest string) (Run
 			}
 			result.ConsentChanged = true
 		}
+		// The recall registration goes with the hooks (recall-mcp-v1-plan §3.7),
+		// attempted even when the hook removal fails.
+		recallRemoved, _, recallErr := unregisterRecallLocked(runtimeName, current.ConfigPath, executable)
 		removed, removeErr := installer.Uninstall(current.ConfigPath, executable)
+		result.ConfigChanged = removed || recallRemoved
 		if removeErr != nil {
 			result.ResidualHook = installer.HookBinary(current.ConfigPath) != ""
-			return connectionError("partial_disconnect",
-				"provider consent was removed, but the owned hook could not be removed; automatic repair is disabled")
+			detail := "provider consent was removed, but the owned hook could not be removed; automatic repair is disabled"
+			if recallErr != nil {
+				detail += "; the recall tools could not be unregistered either"
+			}
+			return connectionError("partial_disconnect", detail)
 		}
-		result.ConfigChanged = removed
+		if recallErr != nil {
+			return connectionError("partial_disconnect",
+				"hooks and consent were removed, but the recall tools could not be unregistered; remove them with: crossing-guard uninstall")
+		}
 		return nil
 	})
 	if err != nil {

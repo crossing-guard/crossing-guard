@@ -55,7 +55,7 @@ func validateSessionTurnEnvelope(turn observation.SessionTurnEnvelope) error {
 	if !observation.SessionTurnKinds[turn.Kind] {
 		return invalidObservation("session turn kind is not in the framework vocabulary")
 	}
-	if len(turn.NativeSource) > 128 || len(turn.Cwd) > 16<<10 || len(turn.TranscriptPath) > 16<<10 {
+	if len(turn.NativeSource) > observation.MaxNativeSourceBytes || len(turn.Cwd) > 16<<10 || len(turn.TranscriptPath) > 16<<10 {
 		return invalidObservation("session turn source/cwd metadata is invalid")
 	}
 	if turn.ObservedAt <= 0 || turn.DeliveryAttempts < 1 ||
@@ -134,7 +134,7 @@ func ingestSessionTurnV1(g *Governor, turn observation.SessionTurnEnvelope) (obs
 
 func handleGovernSessionTurnV1(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, observation.MaxEnvelopeBytes)

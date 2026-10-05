@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"crossing-guard/engine"
 	"crossing-guard/internal/changeenv"
 	"crossing-guard/internal/collectionconfig"
 	"crossing-guard/internal/observation"
@@ -33,7 +34,7 @@ func checkpointCaptureLock(checkpoint store.SessionCheckpoint) *sync.Mutex {
 
 func handleGovernObserveV1(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, observation.MaxEnvelopeBytes)
@@ -121,6 +122,9 @@ func validateObservationV1(e observation.Envelope) error {
 		len(e.Command) > 256<<10 || len(e.Content) > 256<<10 || len(e.Reason) > 64<<10 {
 		return invalidObservation("legacy projection field exceeds its bound")
 	}
+	if len(e.Rule) > maxTransportRuleBytes {
+		return invalidObservation("rule exceeds its transport bound")
+	}
 	if len(e.FilePaths) > 512 {
 		return invalidObservation("too many compatibility file paths")
 	}
@@ -191,6 +195,23 @@ func ingestObservationV1(ctx context.Context, g *Governor, e observation.Envelop
 	if err != nil {
 		return observation.Receipt{}, err
 	}
+	digestWithoutRule := ""
+	digestWithoutLayer := ""
+	if e.Rule != "" {
+		before := e
+		before.Rule = ""
+		before.Layer = "" // a pre-33 daemon knew neither field
+		if digestWithoutRule, err = before.Digest(); err != nil {
+			return observation.Receipt{}, fmt.Errorf("digest observation: %w", err)
+		}
+	}
+	if e.Layer != "" {
+		before := e
+		before.Layer = "" // a 33–37 daemon knew the rule but not the layer
+		if digestWithoutLayer, err = before.Digest(); err != nil {
+			return observation.Receipt{}, fmt.Errorf("digest observation: %w", err)
+		}
+	}
 	attachment := prepareAttachment(g.ix, e)
 	input := store.EventInput{MediaType: observation.InputMediaTypeJSON, RawBytes: e.ToolInputBytes,
 		CapturedBytes: len(e.ToolInput), Digest: e.ToolInputDigest, Completeness: e.ToolInputCompleteness,
@@ -212,7 +233,10 @@ func ingestObservationV1(ctx context.Context, g *Governor, e observation.Envelop
 	result, err := g.ObserveV1(Observation{SessionID: e.SessionID, Runtime: e.Runtime, Tool: e.Tool,
 		Command: e.Command, Content: e.Content, FilePath: e.FilePath, FilePaths: e.FilePaths,
 		Cwd: e.Cwd, URL: e.URL, Skill: e.Skill, TS: e.TS, Decision: e.Decision, Reason: e.Reason,
+		Rule: storableRule(e.Rule), Layer: storableLayer(e.Layer), LayerReasons: e.LayerReasons,
 		Origin: "live", ResourceClaims: e.ResourceClaims}, ObservationEvidence{
+		DigestWithoutRule:  digestWithoutRule,
+		DigestWithoutLayer: digestWithoutLayer,
 		Delivery: store.EventDelivery{ObservationID: e.ObservationID, ObservationSchema: e.Schema,
 			ActionID: e.ActionID, EnvelopeDigest: digest, CollectorID: e.CollectorID, CollectorVersion: e.CollectorVersion,
 			NativeCallID: e.NativeCallID, NativeCallKind: e.NativeCallKind, QueuedAt: e.QueuedAt,
@@ -255,6 +279,14 @@ func ingestObservationV1(ctx context.Context, g *Governor, e observation.Envelop
 		return observation.Receipt{}, fmt.Errorf("queue action lifecycle reconciliation: %w", err)
 	}
 	requestNaturalSignalEmit()
+	// A newly committed session-scoped action updates the status snapshot
+	// (opencode-session-visibility-and-status plan D1): every receiver that
+	// lands a status fact publishes the refold seam. A duplicate delivery
+	// cannot introduce a newer fact, so it skips the publish. Publication is
+	// outside the database lock and before the HTTP success reply.
+	if e.Runtime != "" && e.SessionID != "" && !result.Duplicate {
+		sessionStatusRefold(e.Runtime, e.SessionID)
+	}
 	// Pending helper messages are claimed by the HTTP reply, not here
 	// (delivery-claim-on-reply plan D1): only the reply knows whether the hook
 	// can still read them.
@@ -410,6 +442,13 @@ func captureSessionCheckpointSource(ctx context.Context, g *Governor, sessionID,
 			if err := reconcileCheckpointPaths(ix, current); err != nil {
 				recordObservationIssueLocked(ix, observation.Envelope{ObservationID: observationID, SessionID: sessionID, Runtime: runtime, CollectorID: "checkpoint-scheduler"}, "reconciliation-failed", err)
 			}
+			// The monitoring-owned uncommitted-work fact (orchestration-flows
+			// pilot slice A): authored at settle from the completed record —
+			// edits with no covering commit. Failure is loud to the issue
+			// recorder, never blocking the completed checkpoint.
+			recordUncommittedWorkFact(ix, sessionID, record, completedAt, func(err error) {
+				recordObservationIssueLocked(ix, observation.Envelope{ObservationID: issueObservationID, SessionID: sessionID, Runtime: runtime, CollectorID: "checkpoint-scheduler"}, "uncommitted-fact-failed", err)
+			})
 		}
 		return current
 	}()
@@ -436,4 +475,33 @@ func recordObservationIssueLocked(ix *store.Index, e observation.Envelope, kind 
 
 func observationIssueID(kind, observationID string) string {
 	return observation.DigestBytes([]byte(kind + "\x00" + observationID))
+}
+
+// maxTransportRuleBytes bounds the rule field on the loopback envelope, like every other
+// envelope field; maxStoredRuleID is the wire's bound on a rule id
+// (schemas/event.schema.json payload.rule maxLength), pinned by a test against the schema.
+const (
+	maxTransportRuleBytes = 16 << 10
+	maxStoredRuleID       = 255
+)
+
+// storableRule keeps a rule id only when the wire could carry it. A longer one is stored
+// as unknown — absent is honest; a truncated id would name a rule that does not exist.
+func storableRule(rule string) string {
+	if len(rule) > maxStoredRuleID {
+		return ""
+	}
+	return rule
+}
+
+// storableLayer keeps a layer only when it is one of the three tiers. An unrecognized
+// value is stored as unknown — absent is honest; a stored tier that is not a tier would
+// be vocabulary nobody can filter on.
+func storableLayer(layer string) string {
+	switch engine.Layer(layer) {
+	case engine.LayerUser, engine.LayerRepository, engine.LayerOrganization:
+		return layer
+	default:
+		return ""
+	}
 }

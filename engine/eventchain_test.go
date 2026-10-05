@@ -133,3 +133,38 @@ func TestTagsDigestCommitsWithoutExposingTags(t *testing.T) {
 		t.Fatalf("digest shape: %q", body.TagsDigest)
 	}
 }
+
+// A receiver's linkage verification over rows the real chain produced: continuous is
+// verified-over-pushed, a rewritten history is a fork at the divergence, a missing seq is
+// a gap, and a session linked mid-way (first received seq > 1) still verifies.
+func TestVerifyChainLinkageOverRealChainRows(t *testing.T) {
+	a := NewGenesisAnchor("claude/s")
+	var links []ChainLink
+	for i := 0; i < 5; i++ {
+		b := EventChainBody{GlobalID: NewTypedID("evt"), TS: int64(100 + i), Session: "claude/s", Verb: "exec", Origin: "live"}
+		prev, hash := a.Advance(&b)
+		links = append(links, ChainLink{ID: b.GlobalID, Seq: b.Seq, Prev: prev, Hash: hash})
+	}
+	if r := VerifyChainLinkage(links[1:]); r.Status != LinkageVerifiedOverPushed || r.FirstSeq != 2 || r.LastSeq != 5 {
+		t.Fatalf("linked mid-session: %+v", r)
+	}
+	// An offline rewrite of seq 3 re-hashed forward: the server already holds the
+	// originals of 1-3, and the next pushed row links to the rewritten tail.
+	rewritten := NewDiskSeededAnchor(3, "f00d")
+	b := EventChainBody{GlobalID: NewTypedID("evt"), TS: 200, Session: "claude/s", Verb: "exec", Origin: "live"}
+	prev, hash := rewritten.Advance(&b)
+	forked := append(append([]ChainLink{}, links[:3]...), ChainLink{ID: b.GlobalID, Seq: b.Seq, Prev: prev, Hash: hash})
+	if r := VerifyChainLinkage(forked); r.Status != "fork" || !strings.Contains(r.Detail, "diverged at seq 3") {
+		t.Fatalf("rewrite: %+v", r)
+	}
+	if r := VerifyChainLinkage(append(append([]ChainLink{}, links[:2]...), links[3:]...)); r.Status != "gap" || !strings.Contains(r.Detail, "seq 3 to 3") {
+		t.Fatalf("missing seq: %+v", r)
+	}
+	dup := append(append([]ChainLink{}, links...), ChainLink{ID: "evt_other", Seq: 2, Prev: links[0].Hash, Hash: "different"})
+	if r := VerifyChainLinkage(dup); r.Status != "fork" {
+		t.Fatalf("same seq twice: %+v", r)
+	}
+	if r := VerifyChainLinkage([]ChainLink{{ID: "evt_legacy"}}); r.Status != "none" {
+		t.Fatalf("legacy only: %+v", r)
+	}
+}

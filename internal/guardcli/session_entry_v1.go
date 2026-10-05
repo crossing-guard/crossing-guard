@@ -20,8 +20,16 @@ func buildSessionEntryEnvelope(in hookInput) (observation.SessionEntryEnvelope, 
 		return observation.SessionEntryEnvelope{}, err
 	}
 	now := time.Now().Unix()
+	// The ticket is copied as it is, when present and of a ticket's size: its
+	// meaning is the daemon's. A session the person started in a terminal has
+	// none, and claims nothing.
+	ticket := os.Getenv(observation.HandoffTicketEnv)
+	if len(ticket) > observation.MaxHandoffTicketBytes {
+		ticket = ""
+	}
 	return observation.SessionEntryEnvelope{
-		Schema: observation.SessionEntrySchemaV1, ObservationID: id,
+		HandoffTicket: ticket,
+		Schema:        observation.SessionEntrySchemaV1, ObservationID: id,
 		CollectorID: observation.CollectorSessionEntry, CollectorVersion: collectorVersion(),
 		Runtime: in.Runtime, SessionID: in.SessionID, HookEventName: in.HookEventName,
 		EntryKind: normalizeSessionEntry(in.Runtime, in.Source), NativeSource: in.Source,

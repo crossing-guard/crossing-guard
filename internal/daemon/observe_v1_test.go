@@ -154,6 +154,67 @@ func TestGovernObserveV1StoresInputResourcesAndFirstSnapshotIdempotently(t *test
 	}
 }
 
+// TestObserveV1PublishesStatusRefoldAfterCommittedAction pins plan D1: a
+// newly committed session-scoped action publishes the refold seam, a
+// duplicate delivery does not.
+func TestObserveV1PublishesStatusRefoldAfterCommittedAction(t *testing.T) {
+	repo := v1TestRepo(t)
+	ix, err := store.Open(filepath.Join(t.TempDir(), "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := governor
+	governor = NewGovernor(ix, nil)
+	t.Cleanup(func() { governor = old; _ = ix.Close() })
+
+	var published []string
+	var pubMu sync.Mutex
+	defer swapSessionStatusRefold(func(runtime, sessionID string) {
+		pubMu.Lock()
+		published = append(published, runtime+"/"+sessionID)
+		pubMu.Unlock()
+	})()
+
+	e := testV1Envelope(t, repo)
+	w, receipt := postV1(t, e)
+	if w.Code != http.StatusOK || receipt.Duplicate {
+		t.Fatalf("first response=%d %s receipt=%+v", w.Code, w.Body.String(), receipt)
+	}
+	pubMu.Lock()
+	if len(published) != 1 || published[0] != "claude/claude/s-v1" {
+		t.Fatalf("a committed action must publish one refold, got %v", published)
+	}
+	pubMu.Unlock()
+
+	// A duplicate delivery must not publish again.
+	pubMu.Lock()
+	published = nil
+	pubMu.Unlock()
+	w, dup := postV1(t, e)
+	if w.Code != http.StatusOK || !dup.Duplicate {
+		t.Fatalf("duplicate response=%d %s receipt=%+v", w.Code, w.Body.String(), dup)
+	}
+	pubMu.Lock()
+	if len(published) != 0 {
+		t.Fatalf("a duplicate delivery must not publish a refold, got %v", published)
+	}
+	pubMu.Unlock()
+
+	// A second distinct action publishes again.
+	second := e
+	second.ObservationID = "obs_2123456789abcdef0123456789abcdef"
+	second.Tool = "Read"
+	w, secondReceipt := postV1(t, second)
+	if w.Code != http.StatusOK || secondReceipt.Duplicate {
+		t.Fatalf("second action response=%d %s receipt=%+v", w.Code, w.Body.String(), secondReceipt)
+	}
+	pubMu.Lock()
+	if len(published) != 1 || published[0] != "claude/claude/s-v1" {
+		t.Fatalf("a second action must publish one refold, got %v", published)
+	}
+	pubMu.Unlock()
+}
+
 func TestGovernObserveV1RejectsObservationCollision(t *testing.T) {
 	repo := v1TestRepo(t)
 	ix, err := store.Open(filepath.Join(t.TempDir(), "index.sqlite"))
@@ -248,6 +309,47 @@ func TestObservationSpoolReplayIsIdempotentAndLate(t *testing.T) {
 	delivery, _, found, err := ix.ObservationEvidence(e.ObservationID)
 	if err != nil || !found || delivery.DeliveryAttempts != 2 || delivery.DeliveryMode != "replay" {
 		t.Fatalf("delivery=%+v found=%v err=%v", delivery, found, err)
+	}
+}
+
+// TestLayeredReplayOfAnUnlayeredObservationIsADuplicate is schema 38's upgrade window:
+// a new hook stages a layer on an action whose observation an older daemon committed
+// without one, and the acknowledgement was lost. The replay's digest differs ONLY by
+// the layer — the same observation, never a collision that quarantines the file.
+func TestLayeredReplayOfAnUnlayeredObservationIsADuplicate(t *testing.T) {
+	repo := v1TestRepo(t)
+	data := t.TempDir()
+	ix, err := store.Open(filepath.Join(data, "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := governor
+	governor = NewGovernor(ix, nil)
+	t.Cleanup(func() { governor = old; _ = ix.Close() })
+
+	// The old hook's envelope: a deny with a rule, no layer.
+	e := testV1Envelope(t, repo)
+	e.Decision, e.Reason, e.Rule = "deny", "blocked by the org bundle", "deny-alpha"
+	if w, rec := postV1(t, e); w.Code != http.StatusOK || rec.Duplicate {
+		t.Fatalf("first post: status=%d receipt=%+v", w.Code, rec)
+	}
+
+	// The upgraded hook retries with the layer staged.
+	layered := e
+	layered.Layer = "organization"
+	w, rec := postV1(t, layered)
+	if w.Code != http.StatusOK {
+		t.Fatalf("layered replay refused: %d %s", w.Code, w.Body.String())
+	}
+	if !rec.Duplicate {
+		t.Fatal("a digest differing only by the layer is the same observation — a duplicate, not a collision")
+	}
+	events, err := ix.EventsForSession(e.SessionID, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("the replay must not append a second event: events=%d err=%v", len(events), err)
+	}
+	if events[0].Layer != "" || events[0].RuleID != "deny-alpha" {
+		t.Fatalf("the committed row keeps what the FIRST delivery said — rule %q layer %q", events[0].RuleID, events[0].Layer)
 	}
 }
 

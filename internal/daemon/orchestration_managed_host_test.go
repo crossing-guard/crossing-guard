@@ -51,7 +51,7 @@ func TestManagedHTTPSettingsAndExplicitBindingLifecycle(t *testing.T) {
 	t.Cleanup(func() { chatDrivers = original })
 	mux := http.NewServeMux()
 	registerOrchestrationManagedRoutes(mux, host, owner)
-	body, _ := json.Marshal(map[string]any{"profile_id": preview.ProfileID, "profile_source_digest": preview.SourceDigest, "profile_bundle_digest": preview.BundleDigest, "project_root": root, "runtime": "managed-fixture", "mode": "", "granted_authority": []string{"draft-reply"}, "auto_action": false, "expected_state_token": store.ManagedBindingAbsentToken("managed-follower"), "confirmed": true})
+	body, _ := json.Marshal(map[string]any{"profile_id": preview.ProfileID, "profile_source_digest": preview.SourceDigest, "profile_bundle_digest": preview.BundleDigest, "project_root": root, "route_id": testRouteID(host, "managed-fixture", "", nil), "mode": "", "granted_authority": []string{"draft-reply"}, "auto_action": false, "expected_state_token": store.ManagedBindingAbsentToken("managed-follower"), "confirmed": true})
 	request := httptest.NewRequest(http.MethodPut, "/api/orchestration/agents/managed-follower", bytes.NewReader(body))
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
@@ -85,11 +85,36 @@ func (managedFixtureDriver) ChatCapability() ChatCapability {
 func (driver managedDynamicFixtureDriver) BuildCmd(request ChatRequest, _ ChatLaunchContext) (*exec.Cmd, error) {
 	return exec.Command("/bin/sh", "-c", driver.commandFor(request)), nil
 }
+
+// ProjectEvent reports a printed session_id as the runtime's session frame,
+// the way a real adapter does; a command that prints none reports no session.
 func (managedDynamicFixtureDriver) ProjectEvent(object map[string]any) []ChatEvent {
+	if id := anyString(object["session_id"]); id != "" {
+		return []ChatEvent{{"type": "session", "id": id}}
+	}
 	return []ChatEvent{{"type": "text", "text": anyString(object["text"])}}
 }
 func (managedDynamicFixtureDriver) ChatCapability() ChatCapability {
 	return managedFixtureDriver{}.ChatCapability()
+}
+
+// The fixtures run local shell commands, so they declare every route local
+// (managed-turn-profile-limits plan §4.1); fixtureNonLocalModel is the one id
+// they do not claim, for the refusal paths.
+const fixtureNonLocalModel = "hosted-fixture-model"
+
+func fixtureLocalRoute(request ChatRequest) (bool, string) {
+	if request.Model == fixtureNonLocalModel {
+		return false, ""
+	}
+	return true, "fixture: local shell command"
+}
+
+func (managedFixtureDriver) LocalRoute(request ChatRequest) (bool, string) {
+	return fixtureLocalRoute(request)
+}
+func (managedDynamicFixtureDriver) LocalRoute(request ChatRequest) (bool, string) {
+	return fixtureLocalRoute(request)
 }
 
 func followerProfileSource() []byte {
@@ -294,7 +319,7 @@ func TestManagedHostHelperConsumesDurableCompletionAndCreatesVisibleDraft(t *tes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { host.close(); _ = hostIndex.Close() })
-	if _, err := host.putBinding(managedBindingCommand{BindingID: "managed-helper", ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: root, Runtime: "managed-fixture", Mode: "", ExpectedStateToken: store.ManagedBindingAbsentToken("managed-helper")}); err != nil {
+	if _, err := host.putBinding(managedBindingCommand{BindingID: "managed-helper", ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: root, RouteID: testRouteID(host, "managed-fixture", "", nil), Mode: "", ExpectedStateToken: store.ManagedBindingAbsentToken("managed-helper")}); err != nil {
 		t.Fatal(err)
 	}
 	rootTask, _, err := tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "question", Cwd: root}, "managed-root-task")
@@ -359,7 +384,7 @@ func TestManagedHostLegacyRoleProfileBindsAsHelperAndLaunchesOnlyPinnedChild(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { host.close(); _ = hostIndex.Close() })
-	if _, err := host.putBinding(managedBindingCommand{BindingID: "agent-launch", ProfileID: launcher.ProfileID, ProfileSourceDigest: launcher.SourceDigest, ProfileBundleDigest: launcher.BundleDigest, ProjectRoot: root, Runtime: "managed-fixture", GrantedAuthority: []string{"launch-profile"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-launch")}); err != nil {
+	if _, err := host.putBinding(managedBindingCommand{BindingID: "agent-launch", ProfileID: launcher.ProfileID, ProfileSourceDigest: launcher.SourceDigest, ProfileBundleDigest: launcher.BundleDigest, ProjectRoot: root, RouteID: testRouteID(host, "managed-fixture", "", nil), GrantedAuthority: []string{"launch-profile"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-launch")}); err != nil {
 		t.Fatal(err)
 	}
 	rootTask, _, err := tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "root stage", Cwd: root}, "launch-root")
@@ -435,7 +460,7 @@ func TestManagedHostHelperInterruptStoresRequestAndExactOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { host.close(); _ = hostIndex.Close() })
-	if _, err := host.putBinding(managedBindingCommand{BindingID: "agent-interrupt", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: root, Runtime: "managed-fixture", GrantedAuthority: []string{"request-interrupt"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-interrupt")}); err != nil {
+	if _, err := host.putBinding(managedBindingCommand{BindingID: "agent-interrupt", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: root, RouteID: testRouteID(host, "managed-fixture", "", nil), GrantedAuthority: []string{"request-interrupt"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-interrupt")}); err != nil {
 		t.Fatal(err)
 	}
 	rootTask, _, err := tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "long root", SessionID: "native-course", Cwd: root}, "course-root")

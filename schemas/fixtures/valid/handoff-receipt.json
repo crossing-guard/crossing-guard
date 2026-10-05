@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "id": "rcp_01J8ZQ4M7T2V9K3NXW5R6YHBCM",
+  "handoff_id": "hnd_01J8ZQ4M7T2V9K3NXW5R6YHBCJ",
+  "transition": "started",
+  "ticket_id": "tkt_01J8ZQ4M7T2V9K3NXW5R6YHBCN",
+  "session": {
+    "id": "ses_01J8ZQ4M7T2V9K3NXW5R6YHBCP",
+    "runtime": "codex",
+    "native_id": "abcdef00-aaaa-7bbb-8ccc-00000000000e"
+  },
+  "created_at": "2026-10-04T16:05:00Z"
+}

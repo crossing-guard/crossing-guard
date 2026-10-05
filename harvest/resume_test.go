@@ -20,16 +20,16 @@ func TestResumeCopiesAreNotCountedTwice(t *testing.T) {
 	path := filepath.Join(dir, resumed+".jsonl")
 
 	// 2 copied assistant turns from session "aaaa…", then 1 turn genuinely ours.
-	line := func(sid string, out int) string {
+	line := func(sid, messageID string, out int) string {
 		return `{"type":"assistant","sessionId":"` + sid + `","timestamp":"2026-07-16T10:00:00.000Z",` +
-			`"message":{"role":"assistant","model":"claude-opus-4-8",` +
+			`"message":{"id":"` + messageID + `","role":"assistant","model":"claude-opus-4-8",` +
 			`"content":[{"type":"text","text":"reply"}],"usage":{"input_tokens":10,` +
 			`"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":` +
 			string(rune('0'+out)) + `}}}`
 	}
-	body := line("aaaaaaaa-0000-0000-0000-000000000000", 5) + "\n" +
-		line("aaaaaaaa-0000-0000-0000-000000000000", 5) + "\n" +
-		line(resumed, 7) + "\n" +
+	body := line("aaaaaaaa-0000-0000-0000-000000000000", "msg_a1", 5) + "\n" +
+		line("aaaaaaaa-0000-0000-0000-000000000000", "msg_a2", 5) + "\n" +
+		line(resumed, "msg_b1", 7) + "\n" +
 		`{"type":"user","sessionId":"aaaaaaaa-0000-0000-0000-000000000000",` +
 		`"message":{"role":"user","content":"copied prompt"}}` + "\n" +
 		`{"type":"user","sessionId":"` + resumed + `","message":{"role":"user","content":"my prompt"}}` + "\n"
@@ -73,8 +73,8 @@ func TestClaudeSyntheticFailureDoesNotReplaceConcreteModel(t *testing.T) {
 	dir := t.TempDir()
 	sid := "cccccccc-0000-0000-0000-000000000000"
 	path := filepath.Join(dir, sid+".jsonl")
-	body := `{"type":"assistant","sessionId":"` + sid + `","message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":2}}}` + "\n" +
-		`{"type":"assistant","sessionId":"` + sid + `","error":"authentication_failed","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Failed to authenticate"}],"usage":{"input_tokens":0,"output_tokens":0}}}` + "\n"
+	body := `{"type":"assistant","sessionId":"` + sid + `","timestamp":"2026-07-16T10:00:00.000Z","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":2}}}` + "\n" +
+		`{"type":"assistant","sessionId":"` + sid + `","timestamp":"2026-07-16T10:00:01.000Z","error":"authentication_failed","message":{"id":"msg_2","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Failed to authenticate"}],"usage":{"input_tokens":0,"output_tokens":0}}}` + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

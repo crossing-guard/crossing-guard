@@ -270,7 +270,7 @@ func TestRollbackPreviewMatchesCohortUnselect(t *testing.T) {
 		count  int
 	}{
 		{"fresh", false, false, 0},
-		{"legacy embedded", true, false, 8},
+		{"legacy embedded", true, false, 9},
 		{"legacy custom", true, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

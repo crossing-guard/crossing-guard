@@ -15,7 +15,9 @@ func TestReviewFrontendSpeaksUnifiedClaimWireAndBrowserHasNoDirectAuthority(t *t
 		return body
 	}
 	client := read("js/orchestration/review-api.js")
-	agentsPage := read("js/orchestration/settings-agents.js")
+	agentsPage := bytes.Join([][]byte{read("js/orchestration/agents/agent-places.js"),
+		read("js/orchestration/agents/agent-settings-review.js"), read("js/orchestration/agents/agent-move.js"),
+		read("js/orchestration/agents/agent-activity.js")}, []byte("\n"))
 	session := read("js/orchestration/session-reviews.js")
 	sessionsView := read("js/views/sessions.js")
 	css := read("css/app.css")
@@ -25,11 +27,13 @@ func TestReviewFrontendSpeaksUnifiedClaimWireAndBrowserHasNoDirectAuthority(t *t
 			t.Errorf("review client lost %q", required)
 		}
 	}
-	for _, required := range []string{"Reviewer · independent tool-call review", "Review and enable",
-		"Answer existing asks first", "approval_subdeadline_ms", "Disable new reviews",
-		"availability unverified", "Data destination", "Update available"} {
+	// The reviewer is one agent on the Agents pages (agents-settings-redesign
+	// plan D-7): its one place is written through the review routes, with the
+	// effect, answer window and choice-prompt grant it always had.
+	for _, required := range []string{"saveReviewBinding", "disableReviewBinding", "Answer existing asks first",
+		"approval_subdeadline_ms", "answer_choice_prompts", "reviewCard"} {
 		if !bytes.Contains(agentsPage, []byte(required)) {
-			t.Errorf("Agents page reviewer binding lost %q", required)
+			t.Errorf("Agents pages' reviewer lost %q", required)
 		}
 	}
 	// The claim renderer reads the unified agent-claim wire: `action`, never a

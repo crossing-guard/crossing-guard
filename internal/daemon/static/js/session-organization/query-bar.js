@@ -3,7 +3,8 @@
 // A filter the daemon cannot read is reported under the bar in its own words,
 // and the list below is left exactly as it was.
 import { $, el, api } from '../core.js';
-import { createView, updateView } from './organization-api.js';
+import { createView, loadTagVocabulary, updateView } from './organization-api.js';
+import { groupByChoices } from './view-actions.js';
 import { organization, activeQuery, isStructuredQuery, selectedView, selectView } from './organization-state.js';
 import { organizedRailUrl } from './view-group-source.js';
 
@@ -84,7 +85,44 @@ function paintStatus(rail) {
   if (view && !editing) line.appendChild(withinChip(view));
   line.appendChild(groupButton());
   line.appendChild(saveButton(editing));
-  statusHost().replaceChildren(line);
+  statusHost().replaceChildren(line, ...barNoteLines(rail.query_notes));
+}
+
+// queryNotesNode renders the daemon's notes on a query (board-view-query-
+// correctness plan) as visible sentences, for the board heading and the
+// rail's empty state. Null when there is nothing to say.
+export function queryNotesNode(notes) {
+  if (!Array.isArray(notes) || !notes.length) return null;
+  const host = el('div', 'query-notes');
+  for (const note of notes) host.appendChild(el('div', 'query-note', note.problem));
+  return host;
+}
+
+// barNoteLines are the notes under the bar. A one-click fix is offered only
+// for a term the bar text itself holds as a whole token: under "within" a
+// term may come from the view's half, which the bar must not rewrite. The fix
+// reads the bar again when clicked, so text typed since is never undone.
+function barNoteLines(notes) {
+  const barTokens = () => String($('#search').value || '').trim().split(/\s+/);
+  return (Array.isArray(notes) ? notes : []).map(note => {
+    const line = el('div', 'searchstatus-line query-note');
+    line.setAttribute('role', 'status');
+    line.appendChild(el('span', null, note.problem));
+    if (barTokens().includes(note.term)) {
+      const fix = el('button', 'btn', 'Use ' + note.suggest);
+      fix.type = 'button';
+      fix.onclick = () => {
+        const tokens = barTokens();
+        const at = tokens.indexOf(note.term);
+        if (at < 0) return;
+        tokens[at] = note.suggest;
+        $('#search').value = tokens.join(' ');
+        handleBarInput($('#search').value);
+      };
+      line.appendChild(fix);
+    }
+    return line;
+  });
 }
 
 function withinChip(view) {
@@ -101,14 +139,11 @@ function groupButton() {
   const button = el('button', 'btn', 'Group: ' + (organization.barGroupBy || 'repository'));
   button.type = 'button';
   button.onclick = async () => {
-    const choices = ['repository', 'runtime', 'none'];
+    let known = [];
     try {
-      const known = (await api('/api/session-tags/vocabulary')).known || [];
-      for (const tag of known) {
-        const choice = tag.key ? 'tag-key:' + String(tag.key).toLowerCase() : '';
-        if (choice && !choices.includes(choice)) choices.push(choice);
-      }
+      known = (await loadTagVocabulary()).known || [];
     } catch { /* the mechanical choices remain */ }
+    const choices = groupByChoices(known).map(([value]) => value || 'repository');
     const at = choices.indexOf(organization.barGroupBy || 'repository');
     organization.barGroupBy = choices[(at + 1) % choices.length];
     if (organization.barGroupBy === 'repository') organization.barGroupBy = '';

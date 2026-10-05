@@ -6,6 +6,9 @@ An open source control layer for AI coding agents.
 for inspection and local builds. This is not a supported installed alpha or binary release.
 See [the refreshed integration status](docs/refresh-status.md) for the current source pin and remaining release gates.
 
+A device can be linked to a team server that its user names. That server is a separate
+project and is not in this repository; an unlinked device sends nothing to one.
+
 The public repository is [crossing-guard/crossing-guard](https://github.com/crossing-guard/crossing-guard). 
 
 Crossing Guard connects supported coding workflows to a local control framework. Configure

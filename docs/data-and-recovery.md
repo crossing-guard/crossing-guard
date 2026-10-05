@@ -3,7 +3,8 @@
 The default data root is `~/.crossing-guard`; the local SQLite store is `index.sqlite`.
 Memory files and other configuration can live outside that database. Data may contain
 prompts, tool activity, source paths, results and recalled information. Review it before
-sharing. Do not attach whole databases or transcripts to public issues.
+sharing. Do not attach whole databases or transcripts to public issues. A device linked to
+a team server also sends records to that server; an unlinked device does not.
 
 `crossing-guard export PATH` creates a consistent SQLite snapshot. It refuses to overwrite
 an existing destination. This is a database backup, not a complete backup of memory files,
@@ -15,6 +16,12 @@ one synthetic task and its four events across upgrade to schema 32, exported the
 and reopened a pre-upgrade backup with the older binary. Existing-backup overwrite and
 newer-schema access by an older binary were refused. This does not cover every historical
 dataset or establish recovery of a live installation.
+
+The October 5 disposable trial repeated this across the larger step: a schema-32 store
+seeded by the September build (a rulebook selection, four observed tool calls, a session
+state and a checkpoint) migrated to schema 46 with every seeded row kept, exported, and
+was then refused by the September build. The pre-upgrade copy stayed readable. The same
+limits apply.
 
 An older executable is not an in-place downgrade tool. Recovery requires stopping writers
 and choosing a compatible pre-upgrade snapshot. Rehearse on a separate copy before making

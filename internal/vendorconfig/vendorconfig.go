@@ -44,7 +44,10 @@ func Read(path string) (Snapshot, error) {
 }
 
 // Replace atomically installs after only if the file still matches before. An
-// existing file first receives a private immediate-prior recovery copy.
+// existing file first receives a private immediate-prior recovery copy. The
+// match is checked again just before the rename, which narrows but cannot
+// close the window in which another writer (a vendor rewriting its own file)
+// could change it: a check-then-rename is not a lock.
 func Replace(path string, before Snapshot, after []byte) (string, error) {
 	if before.Exists && bytes.Equal(before.Data, after) {
 		return "", nil
@@ -78,13 +81,29 @@ func Replace(path string, before Snapshot, after []byte) (string, error) {
 	if !before.Exists {
 		mode = 0o644
 	}
-	if err := writeAtomic(path, after, mode); err != nil {
+	unchanged := func() error {
+		latest, err := Read(path)
+		if err != nil {
+			return err
+		}
+		if latest.Exists != before.Exists || latest.Mode != before.Mode || !bytes.Equal(latest.Data, before.Data) {
+			return fmt.Errorf("%s changed while Crossing Guard was preparing its edit; refusing to overwrite it", path)
+		}
+		return nil
+	}
+	if err := writeAtomicChecked(path, after, mode, unchanged); err != nil {
 		return "", fmt.Errorf("replace vendor config %s: %w", path, err)
 	}
 	return backup, nil
 }
 
 func writeAtomic(path string, raw []byte, mode fs.FileMode) error {
+	return writeAtomicChecked(path, raw, mode, nil)
+}
+
+// writeAtomicChecked is writeAtomic with a last check run after the temp file
+// is synced and immediately before the rename.
+func writeAtomicChecked(path string, raw []byte, mode fs.FileMode, beforeRename func() error) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".crossing-guard-config-*")
 	if err != nil {
 		return err
@@ -105,6 +124,11 @@ func writeAtomic(path string, raw []byte, mode fs.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if beforeRename != nil {
+		if err := beforeRename(); err != nil {
+			return err
+		}
 	}
 	return os.Rename(tmpPath, path)
 }

@@ -14,7 +14,7 @@ func TestClaudeMemoryAttachPreservesForeignConfigAndBacksUp(t *testing.T) {
 	if err := os.WriteFile(path, seed, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := (claudeAdapter{}).Attach(path, "/opt/crossing-guard"); err != nil {
+	if _, err := (claudeAdapter{}).Attach(path, "/opt/crossing-guard"); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -54,7 +54,7 @@ keep = true
 	if err := os.WriteFile(path, seed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := (codexAdapter{}).Attach(path, "/opt/current/crossing-guard"); err != nil {
+	if _, err := (codexAdapter{}).Attach(path, "/opt/current/crossing-guard"); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -84,7 +84,7 @@ func TestClaudeMemoryAttachRefusesWrongHookContainerShapes(t *testing.T) {
 		if err := os.WriteFile(path, seed, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := (claudeAdapter{}).Attach(path, "/opt/crossing-guard"); err == nil {
+		if _, err := (claudeAdapter{}).Attach(path, "/opt/crossing-guard"); err == nil {
 			t.Fatalf("wrong-shaped hook container must fail: %s", raw)
 		}
 		if got, _ := os.ReadFile(path); string(got) != string(seed) {

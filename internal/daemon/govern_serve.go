@@ -10,8 +10,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +28,38 @@ import (
 
 var governor *Governor // nil until initGovernor succeeds
 
+// governorProblem says why the governor never opened. Written once at start-up,
+// before the listener exists, and only read afterwards; /api/govern/health reports
+// it so the console and doctor can name the cause of a degraded start.
+var governorProblem string
+
+func setGovernorUnavailable(err error) { governorProblem = err.Error() }
+
+// governorNotConfigured is the bare 503 text. The hook-facing routes (observe,
+// result, closure, session-entry, session-turn) answer exactly this: guardcli
+// prints a non-2xx body on the hook's stderr, and a store fault belongs on the
+// console and in doctor, not on every tool call.
+const governorNotConfigured = "governor not configured"
+
+// governorUnavailable is the console and CLI form: the bare text plus the
+// start-up reason, so the Governance rail and `crossing-guard layers` say what
+// the capture strip already says (degraded-surfaces-state-the-reason plan §2.1).
+func governorUnavailable() string {
+	if governorProblem == "" {
+		return governorNotConfigured
+	}
+	return governorNotConfigured + ": " + governorProblem
+}
+
+func writeGovernorUnavailable(w http.ResponseWriter) {
+	http.Error(w, governorUnavailable(), http.StatusServiceUnavailable)
+}
+
+// governorStartupBusy reports a start-up failure that only means another process
+// held the store's write lock past busy_timeout — the one failure worth retrying.
+// A newer schema, a failed migration or bad configuration fails the same way twice.
+func governorStartupBusy(err error) bool { return err != nil && store.IsBusyError(err) }
+
 const (
 	sessionTraceDefaultLimit = 100
 	sessionTraceMaxLimit     = 200
@@ -34,34 +68,63 @@ const (
 
 // initGovernor opens the writable index and loads the layered detector library.
 // Non-fatal: absent, the daemon still serves everything else and observe returns 503.
+// Every step that can fail runs before `governor` is published, so a failure never
+// leaves a governor holding a closed index. It is published before the start*
+// calls because startTeamLink reads governor.ix synchronously.
 func initGovernor(dataDir string, dets []engine.Detector) error {
 	loaded, err := collectionconfig.Load(dataDir)
 	if err != nil {
 		return err
 	}
-	ix, err := store.Open(indexPath())
+	host, err := analyzerhost.Build(dataDir)
 	if err != nil {
 		return err
 	}
-	governor = NewGovernor(ix, dets)
-	host, hostErr := analyzerhost.Build(dataDir)
-	if hostErr != nil {
-		_ = ix.Close()
-		return hostErr
+	ix, err := store.OpenAsOwner(indexPath())
+	if err != nil {
+		return err
 	}
-	governor.analyzerAssembly = host.Assembly
+	foldRepairError := repairLegacyDataClassFolds(ix)
+	g := NewGovernor(ix, dets)
+	g.foldRepairError = foldRepairError
+	g.analyzerAssembly = host.Assembly
 	if host.SelectionError != nil {
-		governor.analyzerSelectionError = host.SelectionError.Error()
+		g.analyzerSelectionError = host.SelectionError.Error()
 		log.Printf("analyzer modules inactive: %v", host.SelectionError)
 	}
-	governor.resultPayloadMode = loaded.Document.ResultPayloadMode
-	governor.collectionConfigOrigin = loaded.Origin
+	g.resultPayloadMode = loaded.Document.ResultPayloadMode
+	g.collectionConfigOrigin = loaded.Origin
+	g.layerStore = filepath.Dir(indexPath())
+	governor = g
 	startObservationReplay(dataDir, governor)
 	startLifecycleReconciliation(governor)
 	startUnderstandingScheduling(governor)
 	recoverPendingCheckpoints(governor)
 	startIdleTimeoutScheduler(governor)
+	startTeamLink(g.layerStore)
 	return nil
+}
+
+// repairLegacyDataClassFolds moves folded state written under a legacy data-class
+// spelling onto its ladder rung, before the governor serves anything. A failure is
+// logged and returned for the health report, never fatal: matching and the water mark
+// already read the legacy spelling through the engine's alias, so only raw-value readers
+// (facets, tag search) stay stale until a later start succeeds.
+func repairLegacyDataClassFolds(ix *store.Index) string {
+	var failures []string
+	for _, a := range engine.DataClassAliases() {
+		n, err := ix.MergeStateValue(a.Key, a.From, a.To)
+		if err != nil {
+			msg := fmt.Sprintf("fold repair %s=%s → %s failed: %v", a.Key, a.From, a.To, err)
+			log.Print(msg)
+			failures = append(failures, msg)
+			continue
+		}
+		if n > 0 {
+			log.Printf("fold repair: moved %d %s=%s rows to %s", n, a.Key, a.From, a.To)
+		}
+	}
+	return strings.Join(failures, "; ")
 }
 
 // POST /api/govern/observe — the hook feed. Classify + append + fold, no decision
@@ -69,7 +132,7 @@ func initGovernor(dataDir string, dets []engine.Detector) error {
 // path, so it must return fast.
 func handleGovernObserve(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	var o Observation
@@ -145,9 +208,14 @@ func validRuntimeName(s string) bool {
 type StatefulDecision struct {
 	Decision  string `json:"decision"` // allow | deny | ask
 	Rule      string `json:"rule,omitempty"`
+	Layer     string `json:"layer,omitempty"` // the distribution tier the deciding rule arrived by
 	Message   string `json:"message,omitempty"`
 	Reason    string `json:"reason"`
 	Evaluated bool   `json:"evaluated"`
+	// Undecided counts the deny/ask stateful rules that could not be decided for this
+	// action: they read target:* state and the action resolves no single target. They
+	// did not fire. Omitted when zero.
+	Undecided int `json:"undecided,omitempty"`
 }
 
 // POST /api/govern/decide — the stateful-tier consult (Phase 3). The hook sends the
@@ -166,7 +234,7 @@ func handleGovernDecide(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	d, err := governor.DecideStateful(o)
+	d, undecided, err := governor.DecideStateful(o)
 	if err != nil {
 		// A rules-load error must not block the tool: report allow, unevaluated.
 		writeJSON(w, StatefulDecision{Decision: "allow", Evaluated: false,
@@ -175,7 +243,7 @@ func handleGovernDecide(w http.ResponseWriter, r *http.Request) {
 	}
 	if d == nil {
 		writeJSON(w, StatefulDecision{Decision: "allow", Evaluated: true,
-			Reason: "no stateful rule fired"})
+			Reason: "no stateful rule fired", Undecided: undecided})
 		return
 	}
 	// Translate the engine's severity ladder to the hook's authoring vocabulary:
@@ -186,8 +254,8 @@ func handleGovernDecide(w http.ResponseWriter, r *http.Request) {
 	if d.Mode == engine.ConfirmAndRecord {
 		wire = "ask"
 	}
-	writeJSON(w, StatefulDecision{Decision: wire, Rule: d.Rule, Message: d.Message,
-		Evaluated: true, Reason: "stateful rule " + d.Rule + " fired over live session/target state"})
+	writeJSON(w, StatefulDecision{Decision: wire, Rule: d.Rule, Layer: string(d.Layer), Message: d.Message,
+		Evaluated: true, Reason: "stateful rule " + d.Rule + " fired over live session/target state", Undecided: undecided})
 }
 
 // GET /api/govern/health — capture liveness (D13). Answers, out loud, whether
@@ -196,7 +264,7 @@ func handleGovernDecide(w http.ResponseWriter, r *http.Request) {
 // governor is down" from "the daemon is down" — both broke capture, differently.
 func handleGovernHealth(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		writeJSON(w, GovernorHealth{Configured: false})
+		writeJSON(w, GovernorHealth{Configured: false, Problem: governorProblem})
 		return
 	}
 	h, err := governor.Health()
@@ -259,7 +327,7 @@ type EntityReport struct {
 // to know our id scheme to ask about a file they can see.
 func handleGovernEntity(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		writeGovernorUnavailable(w)
 		return
 	}
 	raw := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -444,7 +512,7 @@ func sessionViewOptions(q queryGetter, sessionRoots []string) (changeenv.ViewOpt
 // change. The state rows are unchanged, under the `state` key.
 func handleGovernSession(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		writeGovernorUnavailable(w)
 		return
 	}
 	q := r.URL.Query()
@@ -886,7 +954,7 @@ func handleGovernSessionTrace(w http.ResponseWriter, q queryGetter, sessionID, s
 // session files and knows nothing about what was captured.
 func handleGovernSessions(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		writeGovernorUnavailable(w)
 		return
 	}
 	list, err := governor.GovernedSessions(governedSessionCap)

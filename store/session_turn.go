@@ -154,13 +154,50 @@ func (ix *Index) PruneSessionTurns(beforeMS int64) (int64, error) {
 }
 
 // SessionNewestActionAt returns the newest governed-action instant (event.ts,
-// daemon seconds) for a session — the decider's action.observed fact.
-func (ix *Index) SessionNewestActionAt(sessionID string) (int64, bool, error) {
+// daemon seconds) for a session — the decider's action.observed fact. It is
+// runtime-qualified so a native id shared across runtimes cannot cross wires.
+func (ix *Index) SessionNewestActionAt(runtime, sessionID string) (int64, bool, error) {
 	var ts sql.NullInt64
-	if err := ix.db.QueryRow(`SELECT MAX(ts) FROM event WHERE session_id=?`, sessionID).Scan(&ts); err != nil {
+	if err := ix.db.QueryRow(`SELECT MAX(ts) FROM event WHERE runtime=? AND session_id=?`, runtime, sessionID).Scan(&ts); err != nil {
 		return 0, false, err
 	}
 	return ts.Int64, ts.Valid, nil
+}
+
+// SessionActionCandidate lists sessions with a governed action after sinceMS
+// (daemon ms), newest first, bounded. Each row carries the newest action
+// instant for its (runtime, session_id) so the sampler can build status-only
+// candidates without an N+1 read. The result is deduplicated by
+// (runtime, session_id).
+func (ix *Index) SessionActionCandidates(sinceMS int64, limit int) ([]SessionActionCandidate, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("session action candidates: limit must be positive (the bound is policy, owned by configuration)")
+	}
+	// event.ts is daemon seconds; sinceMS is daemon milliseconds.
+	sinceUnix := sinceMS / 1000
+	rows, err := ix.db.Query(`SELECT runtime, session_id, MAX(ts) FROM event
+		WHERE ts >= ? GROUP BY runtime, session_id ORDER BY MAX(ts) DESC LIMIT ?`, sinceUnix, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionActionCandidate
+	for rows.Next() {
+		var c SessionActionCandidate
+		if err := rows.Scan(&c.Runtime, &c.SessionID, &c.NewestActionAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SessionActionCandidate is one row from the bounded action-candidate query.
+// NewestActionAt is daemon seconds (event.ts).
+type SessionActionCandidate struct {
+	Runtime        string
+	SessionID      string
+	NewestActionAt int64
 }
 
 // SessionsWithRecentTurns lists sessions that produced a turn row after the

@@ -46,14 +46,15 @@ func captureCLIOutput(t *testing.T, run func()) (string, string) {
 func TestSessionsSearchJSONCarriesCoverageAndTitleIdentity(t *testing.T) {
 	_ = writeCLITranscriptFixture(t, "Searchable planning title", "transcript-only phrase")
 	result, err := refreshTranscriptIndex(transcriptindex.RefreshModeIncremental)
-	if err != nil || result.Coverage.State != transcriptindex.CoverageCurrent {
+	if err != nil || result.Coverage.State != transcriptindex.CoverageCurrent ||
+		len(result.Coverage.Limitations) != 0 {
 		t.Fatalf("refresh=%+v err=%v", result, err)
 	}
 	stdout, stderr := captureCLIOutput(t, func() {
 		sessionsSearch([]string{"Searchable planning", "--json"})
 	})
 	if stderr != "" {
-		t.Fatalf("current search warning=%q", stderr)
+		t.Fatalf("JSON search warning=%q", stderr)
 	}
 	var response indexedSearchResult
 	if err := json.Unmarshal([]byte(stdout), &response); err != nil {

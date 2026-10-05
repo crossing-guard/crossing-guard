@@ -556,7 +556,7 @@ CREATE TRIGGER understanding_coverage_complete BEFORE INSERT ON understanding_co
   SELECT CASE WHEN COALESCE((SELECT status FROM understanding_generation WHERE id=NEW.generation_id),'')!='complete' THEN RAISE(ABORT,'understanding coverage requires a complete generation') END;
 END;
 DROP TRIGGER understanding_edge_complete;
-DROP INDEX understanding_edge_from;
+DROP INDEX IF EXISTS understanding_edge_from;
 DROP INDEX understanding_edge_to;
 ALTER TABLE understanding_edge RENAME TO understanding_edge_v18;
 CREATE TABLE understanding_edge(
@@ -583,10 +583,9 @@ PRAGMA user_version=17`); err != nil {
 	if err := ix.Close(); err != nil {
 		t.Fatal(err)
 	}
-	ix, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The fixture holds edge rows in a pre-v18 rowid table, so the reopen is the
+	// owner's: ordinary open refused, exclusive open rebuilds.
+	ix = reopenRebuilding(t, path)
 	defer ix.Close()
 	coverage, err := ix.UnderstandingCoverage(old.ID)
 	if err != nil || len(coverage) != 1 || coverage[0].Unresolved != 0 || coverage[0].Ambiguous != 0 {

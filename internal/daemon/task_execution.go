@@ -22,13 +22,14 @@ type executionReservation struct {
 }
 
 type taskExecutionLaunch struct {
-	taskID  string
-	runtime string
-	cmd     *exec.Cmd
-	driver  ChatDriver
-	started func()
-	event   func(ChatEvent)
-	done    func(executionOutcome)
+	taskID   string
+	runtime  string
+	cmd      *exec.Cmd
+	driver   ChatDriver
+	protocol chatProcessProtocol
+	started  func()
+	event    func(ChatEvent)
+	done     func(executionOutcome)
 	// admit is re-evaluated at launch, when a queued reservation is finally
 	// promoted: a session quiet at request time may be in use by then. A nil
 	// admit means nothing to re-check.
@@ -43,6 +44,9 @@ type executionOutcome struct {
 type activeTaskExecution struct {
 	launch      taskExecutionLaunch
 	interrupted bool
+	// started is set once the process start has returned. Until then the command
+	// belongs to the run goroutine and Interrupt only records the request.
+	started bool
 }
 
 // TaskExecutionRegistry is the sole owner of live process handles, admission slots,
@@ -121,7 +125,16 @@ func (r *TaskExecutionRegistry) run(launch taskExecutionLaunch) {
 			return
 		}
 	}
-	outcome := runTaskProcess(launch, func() bool {
+	process := launch
+	process.started = func() {
+		r.mu.Lock()
+		if active := r.active[launch.taskID]; active != nil {
+			active.started = true
+		}
+		r.mu.Unlock()
+		launch.started()
+	}
+	outcome := runTaskProcess(process, func() bool {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		return r.active[launch.taskID] != nil && r.active[launch.taskID].interrupted
@@ -161,9 +174,18 @@ func (r *TaskExecutionRegistry) Interrupt(taskID string) (bool, error) {
 	r.mu.Lock()
 	if active := r.active[taskID]; active != nil {
 		active.interrupted = true
-		cmd := active.launch.cmd
+		// A process that is still starting is stopped by its run goroutine, which
+		// reads interrupted once the start has returned. A started one is signalled
+		// before the lock is released, so the signal cannot follow finish: once the
+		// task has left active nothing here uses its process group id again. The
+		// reap inside Wait still precedes finish (task-interrupt-dying-process-plan,
+		// F5 is narrowed, not closed).
+		var err error
+		if active.started {
+			err = interruptTaskProcess(active.launch.cmd)
+		}
 		r.mu.Unlock()
-		if err := interruptTaskProcess(cmd); err != nil {
+		if err != nil {
 			return false, fmt.Errorf("interrupt runtime task: %w", err)
 		}
 		return true, nil

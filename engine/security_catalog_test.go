@@ -8,7 +8,7 @@ import (
 )
 
 func TestSecurityCatalogPreservesFloorAndLegacy(t *testing.T) {
-	for raw, want := range map[string]string{string(detectorsDefault): "f2f440ec779b8f5a18b7f89fea116585da651c90d953cdc974f851bf0886c7f0", string(detectorsStructural): "daba3b73ade88fe7d2033c4582ded3c07b3ad40ed31023fa0ec3c8a9d8103ac5"} {
+	for raw, want := range map[string]string{string(detectorsDefault): "97af41423034fb77ef4031a93b9cf4e2f1809648445d3de828208436429d9a01", string(detectorsStructural): "daba3b73ade88fe7d2033c4582ded3c07b3ad40ed31023fa0ec3c8a9d8103ac5"} {
 		if fmt.Sprintf("%x", sha256.Sum256([]byte(raw))) != want {
 			t.Fatal("compatibility bytes changed")
 		}

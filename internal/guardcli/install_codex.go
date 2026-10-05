@@ -113,8 +113,10 @@ func (codexInstaller) HookAskBudget() time.Duration { return MaxAskBudget }
 // codexHookContextCap: the vendor's additionalContextLimit defaults to 2,500
 // tokens (hooks page, 2026-09-12). 7,000 bytes stays under it for prose in
 // Latin scripts (~4 bytes per token); CJK-heavy text (~3 bytes per token)
-// lands near the limit, and the vendor spills the excess to disk rather than
-// failing the hook.
+// lands near the limit. Over the limit Codex cuts the middle out of the text
+// and writes no file: what was cut cannot be read back (measured on 0.159.2,
+// 2026-10-03: 10,000 bytes arrive whole, 10,001 lose the middle). So this cap
+// is kept well under it and nothing is ever left for the vendor to cut.
 const codexHookContextCap = 7000
 
 var codexContextEncoding = func() hookContextEncoding {
@@ -127,9 +129,24 @@ var codexContextEncoding = func() hookContextEncoding {
 	return hookContextEncoding{events: events, capBytes: codexHookContextCap}
 }()
 
+func (codexInstaller) hookContextCap() int { return codexHookContextCap }
+
 func (codexInstaller) EncodeHookContext(rawEvent, context string) ([]byte, bool) {
 	return codexContextEncoding.encode(rawEvent, context)
 }
+
+// HookRunsInSubagent: a Codex child thread fires its hooks under the PARENT's
+// session_id, with the child's rollout as transcript_path, and is told apart
+// only by agent_id (the child thread id) and agent_type, which a parent's hook
+// does not carry (measured on 0.159.2, 2026-10-03, at UserPromptSubmit;
+// testdata/codex_0_159_2_user_prompt_*.json). Context printed there reaches
+// the child, so such a call carries nothing addressed to the session.
+func (codexInstaller) HookRunsInSubagent(agentID string) bool { return agentID != "" }
+
+// NestedCallKinds: agent_id on a child's call is measured at the prompt event
+// only. Whether a child's tool events carry it is not, so no tool event is
+// named here and none carries a handoff's brief.
+func (codexInstaller) NestedCallKinds() []string { return []string{"turn.started"} }
 
 func (codexInstaller) EncodeHookDeny(rawEvent, reason string) []byte {
 	return hookSpecificOutputDeny(rawEvent, reason)

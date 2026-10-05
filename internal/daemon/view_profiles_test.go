@@ -12,7 +12,7 @@ import (
 
 func writeViewProfile(t *testing.T, dataDir, name, body string) string {
 	t.Helper()
-	dir := viewProfilesDir(dataDir)
+	dir := viewProfileFamily.dir(dataDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestInstalledViewProfilesReplaceAddAndReject(t *testing.T) {
 		"display.json":  `{"format_version":1,"id":"display","name":"x","rules":[{"match":{},"display":"shrink"}]}`,
 		"kind.json":     `{"format_version":1,"id":"kind","name":"x","rules":[{"match":{"kind":"attachment"},"display":"hide"}]}`,
 		"unknown.json":  `{"format_version":1,"id":"unknown","name":"x","colour":"red"}`,
-		"version.json":  `{"format_version":2,"id":"version","name":"x"}`,
+		"version.json":  `{"format_version":3,"id":"version","name":"x"}`,
 		"trailing.json": `{"format_version":1,"id":"trailing","name":"x"} {}`,
 		"noname.json":   `{"format_version":1,"id":"noname"}`,
 	}
@@ -89,12 +89,12 @@ func TestInstalledViewProfilesReplaceAddAndReject(t *testing.T) {
 			t.Fatalf("a rejection names its file and reason: %+v", rejection)
 		}
 	}
-	if len(profiles) != 3 {
+	if len(profiles) != 5 {
 		t.Fatalf("modules: %+v", profiles)
 	}
 }
 
-// console.json selects modules by id: every id must resolve and every role
+// daemon.json selects modules by id: every id must resolve and every role
 // must be an orchestration role; a file's role entries add to the defaults'.
 func TestConsoleTranscriptSelection(t *testing.T) {
 	dataDir := t.TempDir()
@@ -105,24 +105,35 @@ func TestConsoleTranscriptSelection(t *testing.T) {
 		}
 	}
 	defaults := defaultConsoleConfig().Transcript
-	if defaults.DefaultProfile != "full" || defaults.RoleProfiles["helper"] != "agent-review" || defaults.RoleProfiles["follower"] != "agent-review" {
+	if defaults.DefaultProfile != "conversation" || defaults.RoleProfiles["helper"] != "agent-review" || defaults.RoleProfiles["follower"] != "agent-review" {
 		t.Fatalf("defaults: %+v", defaults)
 	}
 	writeViewProfile(t, dataDir, "quiet.json", `{"format_version":1,"id":"quiet","name":"Quiet"}`)
 	write(`{"format_version":1,"transcript":{"role_profiles":{"reviewer":"quiet"}}}`)
-	config, _, err := loadConsoleConfig(dataDir)
-	if err != nil || config.Transcript.RoleProfiles["reviewer"] != "quiet" || config.Transcript.RoleProfiles["helper"] != "agent-review" {
+	config, _, problems, err := loadConsoleConfig(dataDir)
+	if err != nil || len(problems) != 0 || config.Transcript.RoleProfiles["reviewer"] != "quiet" || config.Transcript.RoleProfiles["helper"] != "agent-review" {
 		t.Fatalf("installed selection: %+v %v", config.Transcript, err)
 	}
+	// A selection that does not resolve degrades only the transcript section to
+	// the built-in and is reported; the rest of the file stays in force.
 	for body, want := range map[string]string{
-		`{"format_version":1,"transcript":{"default_profile":"missing"}}`:           "default_profile",
-		`{"format_version":1,"transcript":{"role_profiles":{"helper":"missing"}}}`:  "role_profiles.helper",
+		`{"format_version":1,"recently_closed":3,"transcript":{"default_profile":"missing"}}`:          "default_profile",
+		`{"format_version":1,"recently_closed":3,"transcript":{"role_profiles":{"helper":"missing"}}}`: "role_profiles.helper",
+	} {
+		write(body)
+		config, _, problems, err := loadConsoleConfig(dataDir)
+		if err != nil || len(problems) != 1 || !strings.Contains(problems[0], want) || config.RecentlyClosed != 3 ||
+			config.Transcript.DefaultProfile != defaults.DefaultProfile || config.Transcript.RoleProfiles["helper"] != "agent-review" {
+			t.Fatalf("%s: want a %q problem and the built-in selection, got %+v %v %v", body, want, config.Transcript, problems, err)
+		}
+	}
+	for body, want := range map[string]string{
 		`{"format_version":1,"transcript":{"role_profiles":{"boss":"full"}}}`:       "role must be",
 		`{"format_version":1,"transcript":{"default_profile":""}}`:                  "default_profile must be set",
 		`{"format_version":1,"transcript":{"default_profile":"full","colour":"x"}}`: "unknown field",
 	} {
 		write(body)
-		if _, _, err := loadConsoleConfig(dataDir); err == nil || !strings.Contains(err.Error(), want) {
+		if _, _, _, err := loadConsoleConfig(dataDir); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("%s: want %q, got %v", body, want, err)
 		}
 	}
@@ -145,7 +156,7 @@ func TestConsoleViewProfilesRoute(t *testing.T) {
 		}
 		return body
 	}
-	if body := read(); len(body.Profiles) != 2 || body.Rejected == nil {
+	if body := read(); len(body.Profiles) != 4 || body.Rejected == nil {
 		t.Fatalf("built-ins only: %+v", body)
 	}
 	writeViewProfile(t, dataDir, "quiet.json", `{"format_version":1,"id":"quiet","name":"Quiet"}`)

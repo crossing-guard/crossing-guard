@@ -28,7 +28,7 @@ func TestResolveDetectorsSeparatesFreshAndCompatibilityCohorts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if legacy.Origin != "embedded-catalog" || legacy.Selection != "legacy-implicit" ||
-		legacy.Selected || len(legacy.Detectors) != 69 {
+		legacy.Selected || len(legacy.Detectors) != 70 {
 		t.Fatalf("legacy detectors = %+v count=%d", legacy, len(legacy.Detectors))
 	}
 }
@@ -76,7 +76,7 @@ func TestDetectorSelectionPinsCompleteBytesAndUnselectsToCohortBaseline(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !selected.Active.Selected || len(selected.Active.Detectors) != 69 || selected.Active.Digest == before.Digest {
+	if !selected.Active.Selected || len(selected.Active.Detectors) != 70 || selected.Active.Digest == before.Digest {
 		t.Fatalf("selection = %+v", selected.Active)
 	}
 	active, archive, err := UnselectDetectors(root, DetectorSurfaceCLI, selected.Active.StateToken, "cli")
@@ -169,7 +169,7 @@ func TestInvocationOverlayDisplacesSelectionWithoutErasingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if invocation.Selection != "invocation-path" || invocation.Displaced == nil ||
-		invocation.Displaced.Digest != selected.Active.Digest || len(invocation.Detectors) != 68 {
+		invocation.Displaced.Digest != selected.Active.Digest || len(invocation.Detectors) != 69 {
 		t.Fatalf("invocation displacement = %+v count=%d", invocation, len(invocation.Detectors))
 	}
 	if got := invocation.Components[1].Count; got != 1 {

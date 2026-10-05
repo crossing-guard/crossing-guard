@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"crossing-guard/infer"
+	"crossing-guard/internal/modelroute"
 	"crossing-guard/internal/observation"
 	"crossing-guard/internal/orchestration"
 	"crossing-guard/internal/orchestration/profilefs"
@@ -25,14 +26,20 @@ type reviewRuntimeBinding struct {
 	record  store.ReviewBinding
 	profile orchestration.Profile
 	path    infer.RequestPath
+	// route is the named model route the binding references, read when the binding was
+	// resolved; nil for a binding that has none yet. locality is the pinned profile's
+	// declared destination locality — both are admission facts at run start.
+	route    *modelroute.Route
+	locality string
 }
 
 type reviewBindingCommand struct {
-	ProfileID             string
-	ProfileSourceDigest   string
-	ProfileBundleDigest   string
-	Endpoint              string
-	Model                 string
+	ProfileID           string
+	ProfileSourceDigest string
+	ProfileBundleDigest string
+	// RouteID is the named inference route the reviewer runs on (plan §5.3). The
+	// endpoint and model the binding stores are that route's resolved copy.
+	RouteID               string
 	TimeoutMS             int
 	Effect                string
 	ApprovalSubdeadlineMS int
@@ -55,15 +62,110 @@ type orchestrationReviewHost struct {
 	wg                         sync.WaitGroup
 	closing                    bool
 	unsubscribeApprovalPending func()
+	// routes resolves the reviewer's named model route (plan §5).
+	routes *modelRoutes
+	// adoptions answers what a team adoption says about the review place; the
+	// default knows of none (plan §4.1 decision 5).
+	adoptions placeAdoptions
+	// refusal is why the last offered review started no run — the place held by its
+	// adoption, or its route not admitted — or nil. The place stays on; the roster
+	// shows the reason.
+	refusal *routeRefusal
+}
+
+// setPlaceAdoptions installs the adoption owner the host asks at binding writes and at
+// run start. nil restores the default, under which nothing is adopted or held.
+func (host *orchestrationReviewHost) setPlaceAdoptions(adoptions placeAdoptions) {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if adoptions == nil {
+		adoptions = noPlaceAdoptions{}
+	}
+	host.adoptions = adoptions
+}
+
+// runRefusal is why the last offered review started no run, or nil.
+func (host *orchestrationReviewHost) runRefusal() *routeRefusal {
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	return host.refusal
+}
+
+// reloadBinding re-reads the stored binding into the running cache. The route owner
+// calls it after a route edit moved the binding, so the next review runs on the new
+// endpoint and model with the recomputed request-path identity.
+func (host *orchestrationReviewHost) reloadBinding() {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if host.closing {
+		return
+	}
+	host.runtimeBinding, host.refusal = nil, nil
+	binding, found, err := host.ix.ReviewBinding()
+	if err != nil || !found || binding.State != "enabled" {
+		return
+	}
+	runtimeBinding, resolveErr := host.resolveBinding(binding)
+	if resolveErr != nil {
+		host.startupProblem = reviewResolveProblem(resolveErr)
+		return
+	}
+	host.runtimeBinding, host.startupProblem = runtimeBinding, ""
+}
+
+// reviewResolveProblem words why an enabled review binding cannot run. A route refusal
+// is typed and says what to do; anything else keeps the one general sentence.
+func reviewResolveProblem(err error) string {
+	var refusal *routeRefusal
+	if errors.As(err, &refusal) {
+		return "The reviewer is not reviewing; a person answers instead. " + refusal.Message
+	}
+	return "The enabled review binding could not resolve its pinned profile or request path."
+}
+
+// startRefusal is the run-start check of the review lane (plan §9): the place's
+// adoption is not expired or withdrawn, and its route is admitted. A refusal starts no
+// run and is remembered for the roster; for a delegated review the person answers, as
+// they would with no reviewer. cwd is the reviewed action's working directory.
+func (host *orchestrationReviewHost) startRefusal(binding reviewRuntimeBinding, cwd string) *routeRefusal {
+	refusal := host.reviewStartRefusal(binding, cwd)
+	host.mu.Lock()
+	host.refusal = refusal
+	host.mu.Unlock()
+	return refusal
+}
+
+func (host *orchestrationReviewHost) reviewStartRefusal(binding reviewRuntimeBinding, cwd string) *routeRefusal {
+	host.mu.RLock()
+	adoptions := host.adoptions
+	host.mu.RUnlock()
+	record := binding.record
+	if reason := adoptions.HoldReason(record.AdoptionKey, record.ProfileID, record.ProfileSourceDigest, record.ProfileBundleDigest); reason != "" {
+		return &routeRefusal{Code: reason, Message: "The reviewer is held (" + reason + "): its shared agent is not current on this device. It reviews nothing until the team's bundle is refreshed; the place stays on."}
+	}
+	if record.RouteID == "" || binding.route == nil {
+		return nil // a reviewer the migration could not give a route runs as before
+	}
+	// As at a managed run start: a rulebook that cannot be read is logged by admit and
+	// does not stop a reviewer bound while it could be.
+	admission, _ := host.routes.admit(*binding.route, true, binding.locality, cwd)
+	if !admission.Allowed {
+		return &routeRefusal{Code: modelroute.AdmissionRefusedCode, Message: admission.Refusal().Error()}
+	}
+	return nil
 }
 
 func newOrchestrationReviewHost(ix *store.Index, profiles *profilefs.Owner) (*orchestrationReviewHost, error) {
 	if ix == nil || profiles == nil {
 		return nil, errors.New("review store and profile owner are required")
 	}
+	routes, err := modelRoutesBeside(profiles)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	host := &orchestrationReviewHost{ix: ix, profiles: profiles, ctx: ctx, cancel: cancel,
-		workers: make(chan struct{}, maxReviewHostWorkers)}
+		workers: make(chan struct{}, maxReviewHostWorkers), routes: routes, adoptions: noPlaceAdoptions{}}
 	if _, err := ix.RecoverReviewInvocationsUnknown(time.Now().Unix()); err != nil {
 		cancel()
 		return nil, fmt.Errorf("recover report reviews: %w", err)
@@ -76,7 +178,7 @@ func newOrchestrationReviewHost(ix *store.Index, profiles *profilefs.Owner) (*or
 	if found && binding.State == "enabled" {
 		runtimeBinding, resolveErr := host.resolveBinding(binding)
 		if resolveErr != nil {
-			host.startupProblem = "The enabled review binding could not resolve its pinned profile or request path."
+			host.startupProblem = reviewResolveProblem(resolveErr)
 		} else {
 			host.runtimeBinding = runtimeBinding
 		}
@@ -137,7 +239,18 @@ func (host *orchestrationReviewHost) resolveBinding(binding store.ReviewBinding)
 	if err != nil || path.Kind != binding.RequestPathKind || path.Digest != binding.RequestPathDigest {
 		return nil, errors.New("binding request path identity mismatch")
 	}
-	return &reviewRuntimeBinding{record: binding, profile: profile, path: path}, nil
+	resolved := &reviewRuntimeBinding{record: binding, profile: profile, path: path,
+		locality: detail.Normalized.Requirements.Destination.Locality}
+	if binding.RouteID != "" {
+		// A reviewer whose route cannot be read does not review (plan §5.3): the
+		// person answers. Nothing falls back to another endpoint or model.
+		route, routeErr := host.routes.resolve(binding.RouteID, modelroute.FamilyInference)
+		if routeErr != nil {
+			return nil, routeErr
+		}
+		resolved.route = &route
+	}
+	return resolved, nil
 }
 
 func sliceCProfile(compiled profilefs.CompiledProfile, sourceDigest, bundleDigest string) (orchestration.Profile, error) {
@@ -193,6 +306,10 @@ func onlyContainsStrings(values []string, allowed ...string) bool {
 }
 
 func (host *orchestrationReviewHost) putBinding(command reviewBindingCommand) (store.ReviewBinding, error) {
+	// The route read lock is taken before the host lock, the order a route edit takes
+	// them in, and held from resolving the route to committing the row.
+	host.routes.state.guard.RLock()
+	defer host.routes.state.guard.RUnlock()
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	if host.closing {
@@ -234,10 +351,36 @@ func (host *orchestrationReviewHost) putBinding(command reviewBindingCommand) (s
 	if len(command.RuntimeFilter) > 64 || !validRuntimeName(command.RuntimeFilter) {
 		return store.ReviewBinding{}, errors.New("runtime filter must be a short exact runtime identifier")
 	}
-	path, err := infer.NewLocalOllamaPath(command.Endpoint, command.Model,
+	// Route (plan §5.3, §5.4): the reviewer takes an inference route; the loopback
+	// gate is the request-path constructor's own, now given the resolved route.
+	route, err := host.routes.resolve(command.RouteID, modelroute.FamilyInference)
+	if err != nil {
+		return store.ReviewBinding{}, err
+	}
+	path, err := infer.NewLocalOllamaPath(route.Fields.Endpoint, route.Fields.Model,
 		profile.MaxInputBytes, profile.MaxOutputBytes, profile.MaxTokens)
 	if err != nil {
 		return store.ReviewBinding{}, errors.New("review path must name an explicit literal-loopback Ollama endpoint and model")
+	}
+	locality := detail.Normalized.Requirements.Destination.Locality
+	// No project root is a fact at bind: the reviewer is not bound to a folder.
+	admission, admitErr := host.routes.admit(route, true, locality, "")
+	if refused := admission.Refusal(); refused != nil {
+		return store.ReviewBinding{}, refused
+	}
+	if admitErr != nil {
+		return store.ReviewBinding{}, rulebookUnreadable(admitErr)
+	}
+	var prior *adoptedPlace
+	if current, found, readErr := host.ix.ReviewBinding(); readErr != nil {
+		return store.ReviewBinding{}, readErr
+	} else if found {
+		prior = &adoptedPlace{key: current.AdoptionKey, profileID: current.ProfileID,
+			sourceDigest: current.ProfileSourceDigest, bundleDigest: current.ProfileBundleDigest}
+	}
+	adoptionKey, err := adoptionKeyForWrite(host.adoptions, prior, profile.ID, command.ProfileSourceDigest, command.ProfileBundleDigest)
+	if err != nil {
+		return store.ReviewBinding{}, err
 	}
 	now := time.Now().Unix()
 	binding := store.ReviewBinding{BindingID: store.ReviewBindingID, State: "enabled", Effect: command.Effect,
@@ -248,15 +391,16 @@ func (host *orchestrationReviewHost) putBinding(command reviewBindingCommand) (s
 		TimeoutMS: command.TimeoutMS, ApprovalSubdeadlineMS: command.ApprovalSubdeadlineMS,
 		AnswerChoicePrompts: command.AnswerChoicePrompts, MaxInputBytes: profile.MaxInputBytes,
 		MaxOutputBytes: profile.MaxOutputBytes, MaxTokens: profile.MaxTokens,
-		MaxConcurrency: profile.MaxConcurrency}
+		MaxConcurrency: profile.MaxConcurrency,
+		RouteID:        route.RouteID, RouteRevisionDigest: route.RevisionDigest, AdoptionKey: adoptionKey}
 	binding, err = host.ix.PutReviewBinding(binding, command.ExpectedStateToken, now)
 	if err != nil {
 		return store.ReviewBinding{}, err
 	}
 	profile.Timeout = time.Duration(binding.TimeoutMS) * time.Millisecond
 	profile.DelegatedApproval = binding.Effect == "delegated-first"
-	host.runtimeBinding = &reviewRuntimeBinding{record: binding, profile: profile, path: path}
-	host.startupProblem = ""
+	host.runtimeBinding = &reviewRuntimeBinding{record: binding, profile: profile, path: path, route: &route, locality: locality}
+	host.startupProblem, host.refusal = "", nil
 	return binding, nil
 }
 
@@ -289,6 +433,18 @@ func (host *orchestrationReviewHost) offer(envelope observation.Envelope, receip
 		return
 	}
 	binding := *host.runtimeBinding
+	host.mu.RUnlock()
+	// Run start (plan §9): a held place or a route admission refuses starts no review.
+	if host.startRefusal(binding, envelope.Cwd) != nil {
+		return
+	}
+	host.mu.RLock()
+	// The binding may have been replaced or switched off while the checks ran; a
+	// review is admitted only against the binding that is still current.
+	if host.closing || host.runtimeBinding == nil || host.runtimeBinding.record.StateToken != binding.record.StateToken {
+		host.mu.RUnlock()
+		return
+	}
 	action := actionFromObservation(envelope, receipt)
 	actionDigest, err := orchestration.ActionDigest(action)
 	if err != nil {
@@ -363,6 +519,12 @@ func (host *orchestrationReviewHost) offerApproval(approval Approval, issue func
 	}
 	binding := *host.runtimeBinding
 	host.mu.RUnlock()
+	// Run start (plan §9): a held place or a refused route offers nothing, so the
+	// person answers with the whole window, as with no reviewer.
+	// An approval carries no working directory, so project:root is not a fact here.
+	if host.startRefusal(binding, "") != nil {
+		return
+	}
 	if len(approval.Prompts) != 0 && !binding.record.AnswerChoicePrompts {
 		// This reviewer may not answer questions. Offering it the approval
 		// anyway would spend the subdeadline on a response the owner must

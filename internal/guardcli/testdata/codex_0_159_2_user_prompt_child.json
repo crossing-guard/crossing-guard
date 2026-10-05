@@ -1,0 +1,12 @@
+{
+  "session_id": "abcdef00-aaaa-7bbb-8ccc-00000000000f",
+  "turn_id": "abcdef00-aaaa-7bbb-8ccc-000000000012",
+  "agent_id": "abcdef00-aaaa-7bbb-8ccc-000000000011",
+  "agent_type": "default",
+  "transcript_path": "/Users/example/.codex/sessions/2026/10/03/rollout-2026-10-03T20-10-25-abcdef00-aaaa-7bbb-8ccc-000000000011.jsonl",
+  "cwd": "/tmp/hook-probe/proj",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Do not run any tools. Reply with only every line starting with MARK- that you can see in your context, or NONE."
+}

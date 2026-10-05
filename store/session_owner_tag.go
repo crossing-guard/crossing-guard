@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -248,7 +249,14 @@ func applySessionOwnerTag(tx *sql.Tx, target SessionOwnerTarget, tag SessionOwne
 		tagID, target.Runtime, target.SessionID,
 		tag.Key, tag.Value, keyFold, valueFold, now,
 		target.Title, target.Repository, target.Cwd, target.TouchedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	// Schema 39: every apply appends one journal row in the same transaction.
+	// A re-apply of a tag the session already carries is still an owner act
+	// worth one fact — it refreshes the session snapshot, and the flow
+	// translator deduplicates membership by member row, not by change row.
+	return appendOwnerTagChange(tx, target, tag, "applied", now)
 }
 
 // RetractSessionOwnerTags takes every listed tag off every target. Removing a
@@ -258,11 +266,21 @@ func (ix *Index) RetractSessionOwnerTags(targets []SessionOwnerTarget, tags []Se
 }
 
 func retractSessionOwnerTag(tx *sql.Tx, target SessionOwnerTarget, tag SessionOwnerTagValue, now int64) error {
-	_, err := tx.Exec(`UPDATE session_owner_tag SET retracted_at=?
+	result, err := tx.Exec(`UPDATE session_owner_tag SET retracted_at=?
 		WHERE runtime=? AND session_id=? AND key_fold=? AND value_fold=? AND retracted_at=0`,
 		now, target.Runtime, target.SessionID,
 		FoldSessionOwnerTagPart(tag.Key), FoldSessionOwnerTagPart(tag.Value))
-	return err
+	if err != nil {
+		return err
+	}
+	// Schema 39: a retract that found no live row removed nothing, so it
+	// journals no change fact — the journal records the owner's tag state
+	// transitions, not every no-op request.
+	removed, err := result.RowsAffected()
+	if err != nil || removed == 0 {
+		return err
+	}
+	return appendOwnerTagChange(tx, target, tag, "removed", now)
 }
 
 // RenameSessionOwnerTag changes one tag into another on every session that
@@ -318,18 +336,36 @@ func (ix *Index) RenameSessionOwnerTag(from, to SessionOwnerTagValue, now int64)
 }
 
 // PurgeSessionOwnerTag deletes a tag everywhere, history included. This is the
-// owner's delete for his own content; it is not a retract.
+// owner's delete for his own content; it is not a retract. Schema 39: every
+// live carrier still gets one removal journal row first, in the same
+// transaction, so a purge is observable as a membership exit (pass-2 C3).
 func (ix *Index) PurgeSessionOwnerTag(tag SessionOwnerTagValue) (int, error) {
 	if err := ValidateSessionOwnerTag(tag); err != nil {
 		return 0, err
 	}
-	result, err := ix.db.Exec(`DELETE FROM session_owner_tag WHERE key_fold=? AND value_fold=?`,
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	carriers, err := activeSessionOwnerTagRows(tx, `WHERE key_fold=? AND value_fold=?`,
 		FoldSessionOwnerTagPart(tag.Key), FoldSessionOwnerTagPart(tag.Value))
 	if err != nil {
 		return 0, err
 	}
-	removed, err := result.RowsAffected()
-	return int(removed), err
+	now := time.Now().Unix()
+	for _, row := range carriers {
+		target := SessionOwnerTarget{Runtime: row.Runtime, SessionID: row.SessionID, Title: row.Title,
+			Repository: row.Repository, Cwd: row.Cwd, TouchedAt: row.TouchedAt}
+		if err := appendOwnerTagChange(tx, target, tag, "removed", now); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM session_owner_tag WHERE key_fold=? AND value_fold=?`,
+		FoldSessionOwnerTagPart(tag.Key), FoldSessionOwnerTagPart(tag.Value)); err != nil {
+		return 0, err
+	}
+	return len(carriers), tx.Commit()
 }
 
 type sessionOwnerQuerier interface {
@@ -453,6 +489,14 @@ func (ix *Index) RememberedSessionOwnerTag(runtime, sessionID string) (SessionOw
 		return SessionOwnerTag{}, false, err
 	}
 	return tags[0], true, nil
+}
+
+// SessionOwnerTagsFor lists one session's active owner tags, newest first.
+// A daemon-side read for the flow machinery's query rows (tag VALUES stay
+// daemon-side — invariant 3).
+func (ix *Index) SessionOwnerTagsFor(runtime, sessionID string, limit int) ([]SessionOwnerTag, error) {
+	return activeSessionOwnerTagRows(ix.db, `WHERE runtime=? AND session_id=? AND retracted_at=0
+		ORDER BY applied_at DESC LIMIT ?`, runtime, sessionID, limit)
 }
 
 // SetOwnerKeptSessionsLimit bounds how many owner-tagged sessions the

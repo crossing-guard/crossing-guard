@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:private-ai-control-plane:schema:request-path:0.1-draft",
+  "$id": "urn:crossing-guard:schema:request-path:0.1-draft",
   "title": "Model request path descriptor",
   "type": "object",
   "additionalProperties": false,

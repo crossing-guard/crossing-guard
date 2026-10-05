@@ -17,7 +17,7 @@ func TestSessionLoadingKeepsOneCommittedSelectionAndStableChrome(t *testing.T) {
 
 	view := read("js/views/sessions.js")
 	start := bytes.Index(view, []byte("async function openSession(s)"))
-	end := bytes.Index(view, []byte("export function renderUsageStrip"))
+	end := bytes.Index(view, []byte("function hydrateSessionReferences(")) // the usage strip moved to usage-strip.js
 	if start < 0 || end <= start {
 		t.Fatal("could not isolate openSession")
 	}

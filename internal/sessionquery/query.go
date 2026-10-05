@@ -50,7 +50,12 @@ type Row struct {
 	Status     string // the status decider's execution word; empty means unknown
 	Open       bool
 	TouchedAt  int64
-	Tags       []Tag
+	// Calls is the session's model calls with usage records, the number the
+	// rail shows; Lines is the runtime's own transcript length. Both are zero
+	// for a session whose transcript the scan did not return.
+	Calls int
+	Lines int
+	Tags  []Tag
 }
 
 // field is one name the grammar understands to the left of a colon.
@@ -68,12 +73,15 @@ const (
 	fieldTagged  field = "tagged"
 	fieldStatus  field = "status"
 	fieldOpen    field = "open"
+	fieldCalls   field = "calls"
+	fieldLines   field = "lines"
 )
 
 var fields = map[string]field{
 	"tag": fieldTag, "mine": fieldMine, "repo": fieldRepo, "runtime": fieldRuntime,
 	"branch": fieldBranch, "title": fieldTitle, "note": fieldNote,
 	"touched": fieldTouched, "tagged": fieldTagged, "status": fieldStatus, "open": fieldOpen,
+	"calls": fieldCalls, "lines": fieldLines,
 }
 
 // term is one parsed field:value, as written.
@@ -84,6 +92,7 @@ type term struct {
 	Value   string // folded
 	Key     string // tag terms only, folded; empty for a keyless term
 	Age     ageBound
+	Number  numberBound
 }
 
 // Query is a parsed query. It is inert until bound to the tags of a request.
@@ -111,6 +120,31 @@ func (q Query) Durable() bool {
 		}
 	}
 	return true
+}
+
+// HasNumberTerm reports a query that asks about a session's size (calls: or
+// lines:). A caller that evaluates queries over rows it builds without those
+// numbers must refuse such a query: every row would read zero.
+func (q Query) HasNumberTerm() bool {
+	for _, t := range q.terms {
+		if t.Field == fieldCalls || t.Field == fieldLines {
+			return true
+		}
+	}
+	return false
+}
+
+// TagKeys are the folded keys the query's tag terms name, in order: every
+// tag: or mine: term that has a key, excluded terms included. A keyless term
+// names no key and is not listed.
+func (q Query) TagKeys() []string {
+	var keys []string
+	for _, t := range q.terms {
+		if (t.Field == fieldTag || t.Field == fieldMine) && t.Key != "" {
+			keys = append(keys, t.Key)
+		}
+	}
+	return keys
 }
 
 func fold(text string) string { return strings.ToLower(text) }

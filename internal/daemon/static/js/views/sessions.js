@@ -1,29 +1,81 @@
 import { $, el, cpHeaders, api, fmtTime, escapeHtml, mdInline, mdToHtml, linkify, debounce, fillSelect, mkSelectKV, mkSelect, lblWrap, fmtTok, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults } from "../core.js";
-import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp, authRecovery } from "../ui.js";
+import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp, authRecovery,
+  captureTranscriptPosition, restoreTranscriptPosition } from "../ui.js";
 import { S } from "../state.js";
-import { showPaneHost, beginPaneDeckTransition, endPaneDeckTransition } from "../pane-host.js";
+import { showPaneHost, beginPaneDeckTransition, endPaneDeckTransition, revealPane, canRevealPane } from "../pane-host.js";
 import * as refs from "../refs.js";
 import { loadChatCapabilities, findChatCapability } from "../chat-capabilities.js";
+import { openTurnSettings } from "../task/thinking-effort-history.js";
 import { taskProjectionStore } from "../task/task-projection-store.js";
 import { hasRenderableText } from "../task/task-event-semantics.js";
 import { approvalProjectionStore } from "../approval/approval-projection-store.js";
-import { renderSessionStatus, SessionAttentionStore } from "../task/session-status.js";
+import { renderSessionStatus, SessionAttentionStore, agentNote } from "../task/session-status.js";
 import { mountSessionOrchestration } from "../orchestration/session-orchestration.js";
 import { sessionActivityStore } from "../session/session-activity-store.js";
 import { SessionLiveClient } from "../session/session-live-client.js";
-import { SessionEventStore, describeTurnState, humanDuration } from "../session/session-event-store.js";
+import { SessionEventStore, humanDuration } from "../session/session-event-store.js";
+import { createActivityLine } from "../session/activity-line.js";
+import { changeEvidenceNote } from "../session/change-evidence-note.js";
+import { nativeOpenControl, nativeOpenModel, openNative } from "../session/native-open.js";
+import { ownerMessage } from "../appearance-api.js";
 import { presentTranscriptIndexCoverage } from "../transcript-index-coverage.js";
 import { applyTranscriptDecorators } from "../transcript-decorators.js";
-import { HIDE, COLLAPSE, followingDisplay, selectProfile, rowPeek, rowLength, sizeLabel, hiddenUnits } from "../session/transcript-view.js";
-import { activeQuery } from "../session-organization/organization-state.js";
-import { organizedRailUrl, organizedPageUrl, railStateKey, groupsAreRepositories, groupLabel } from "../session-organization/view-group-source.js";
+import { HIDE, COLLAPSE, followingDisplay, selectProfile, rowPeek, rowLength, sizeLabel,
+  hiddenActivityKind, hiddenActivityLabel, createCallPairing } from "../session/transcript-view.js";
+import { activeQuery, selectedView, selectView } from "../session-organization/organization-state.js";
+import { organizedRailUrl, organizedPageUrl, railStateKey, groupsAreRepositories, groupLabel, FILTER_TYPING_PAUSE_MS } from "../session-organization/view-group-source.js";
 import { appendRowOrganization, repaintRowTags, rowTime } from "../session-organization/tag-chips.js";
 import { mountViewList, configureViewList, refreshViewCounts, ensureViewsReady } from "../session-organization/view-list.js";
-import { handleBarInput, configureQueryBar, loadViewIntoBar, clearBar } from "../session-organization/query-bar.js";
+import { boardConfig, renderBoardNodes, paintBoardAttention, refreshBoard, boardBusy, boardNeedsControl } from "../session-organization/board.js";
+// The board's card click opens the session through the session surface's
+// one opener: sessions.js is the only openSession owner; board.js must not
+// import it (cycle) — the event is the narrow seam (placement rule PO-13).
+document.addEventListener('cg:board-open', e => {
+  const t = e.detail;
+  if (t && t.runtime && t.id) openSession(t);
+});
+// A board move is a tag write: other views' counts may have changed. The
+// board repaints its own columns; the view list beside it is this surface's
+// (board-move-refresh plan §2), as after a rail-side tag write.
+document.addEventListener('cg:board-moved', () => { refreshViewCounts(); });
+// A board is placed by what was observed, and nothing pushes a new
+// observation to it: it reads again when the owner comes back to the page
+// (board-observed-columns plan §2.3). No timer.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  for (const board of document.querySelectorAll('#main .board')) refreshBoard(board);
+});
+// boardFits reports a centre wide enough for a board: two columns side by
+// side. The column's width is the style's (--board-column-min), never a
+// number here. Below it a board view is its grouped list in the rail. The
+// room is measured from the centre's left edge to the window's right: a
+// board takes the whole centre, and the panel a just-closed session left
+// open beside it is about to go.
+function boardFits() {
+  const column = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--board-column-min'));
+  const room = document.documentElement.clientWidth - $('#main').getBoundingClientRect().left;
+  return !(column > 0) || room >= 2 * column;
+}
+let boardFitted = null;
+window.addEventListener('resize', () => {
+  const fits = boardFits();
+  const crossed = boardFitted !== null && fits !== boardFitted;
+  boardFitted = fits;
+  // Only a board view with no session open changes with the width, and a
+  // card in hand is never redrawn from under the pointer.
+  if (!crossed || S.view !== 'sessions' || S.sel || boardBusy() || !boardConfig(selectedView())) return;
+  renderSessionList();
+});
+import { handleBarInput, configureQueryBar, loadViewIntoBar, clearBar, queryNotesNode } from "../session-organization/query-bar.js";
 import { handleRowSelectClick, rowSessionsForTagging, configureRailSelection, clearRailSelection } from "../session-organization/rail-selection.js";
 import { openTagPopover } from "../session-organization/tag-popover.js";
-import { mountHeaderTags, configureHeaderTags } from "../session-organization/header-tags.js";
+import { mountHeaderTags, configureHeaderTags, openHeaderNote } from "../session-organization/header-tags.js";
 import "../session-organization/tag-shortcut.js";
+import { handOffSession } from "../handoff/handoff-view.js";
+import { liveTurnsOf } from "../handoff/live-turns.js";
+import { mountHandoffRail, configureHandoffRail } from "../handoff/handoff-rail.js";
+import { mountContinues } from "../handoff/handoff-session.js";
+import { contextRowName } from "../handoff/handoff-model.js";
 
 let sessions = [], currentSession = null, sessionOpenGeneration = 0, sessionRailRenderGeneration = 0;
 
@@ -40,6 +92,15 @@ document.addEventListener('cg:drawn-live', event => {
   const d = event.detail || {};
   if (d.anchor) sessionEventStore.markRenderedLive(d.anchor);
   if (d.prompt) sessionEventStore.markPromptRenderedLive(d.prompt);
+  if (d.row) sessionEventStore.markLiveRow(d.row);
+});
+// The selected session installs these DOM integrations. Store state remains
+// generation-scoped, so late events from a detached composer are inert.
+let placeOwnedTurnBoundary = () => {}, applySessionEventEffect = () => {};
+document.addEventListener('cg:owned-turn', event => {
+  const d = event.detail || {};
+  if (d.state === 'start') placeOwnedTurnBoundary(d.id, sessionEventStore.beginOwnedTurn(d.id));
+  else if (d.state === 'end') applySessionEventEffect(sessionEventStore.endOwnedTurn(d.id));
 });
 let selectedTaskRefresh = () => {}, selectedStatusRefresh = () => {}, selectedAttentionCleanup = () => {};
 let revealRailSelection = () => {};
@@ -53,6 +114,12 @@ const sessionAttentionStore = new SessionAttentionStore();
 // client-side fact applied on top is this reader's acknowledgement ledger.
 function statusForSession(runtime, catalogID, _nativeID) {
   return renderSessionStatus(sessionActivityStore.activity(runtime, catalogID), sessionAttentionStore);
+}
+
+// draftWords is the rail's phrasing of the quiet agent note.
+function draftWords(ask) {
+  const note = agentNote(ask);
+  return note.charAt(0).toUpperCase() + note.slice(1);
 }
 
 function makeStatusDot(status) {
@@ -99,9 +166,12 @@ function paintSessionStatus(row) {
   slot.replaceChildren();
   const dot = makeStatusDot(status);
   if (dot) slot.appendChild(dot);
-  slot.title = dot?.title || '';
+  // A reply an agent proposed but did not send is a quiet fact: no dot, but
+  // the row says so to a pointer and to a screen reader.
+  const draft = !dot ? draftWords(status.ask) : '';
+  slot.title = dot?.title || draft;
   const statusText = status.indicator.label || (status.execution !== 'idle' ? status.label : '');
-  const label = statusText ? baseLabel + ' · ' + statusText : baseLabel;
+  const label = [baseLabel, statusText, draft].filter(Boolean).join(' · ');
   row.setAttribute('aria-label', row.classList.contains('pending') ? label + ' · Opening' : label);
 }
 
@@ -161,6 +231,7 @@ function showSessionOpenFailure(target, error, transition) {
 function refreshSessionStatuses() {
   sessionAttentionStore.establishBaseline(taskProjectionStore.all(), taskProjectionStore.cursor());
   for (const row of document.querySelectorAll('#sidebody .sess[data-runtime][data-session-id]')) paintSessionStatus(row);
+  for (const board of document.querySelectorAll('#main .board')) paintBoardAttention(board);
   selectedTaskRefresh();
   selectedStatusRefresh();
 }
@@ -284,6 +355,29 @@ function buildAgentFold(parent, fold) {
   return host;
 }
 
+// buildNativeFold renders the compact collapsed "⧉ n native subagents" line a
+// parent session may carry for vendor-observed subagent children (guardian,
+// thread_spawn). Provenance is separate from buildAgentFold (caused); the child
+// rows reuse buildSessionRow so selection/status painting stays one-owner.
+function buildNativeFold(parent, fold) {
+  const host = el('div', 'agent-fold native-fold');
+  const rows = el('div', 'agent-fold-rows');
+  const toggle = el('button', 'agent-fold-toggle', '⧉ ' + fold.length + ' native subagent' + (fold.length === 1 ? '' : 's'));
+  toggle.type = 'button';
+  toggle.title = 'Native subagent sessions this runtime reported under this parent. They are not peer work sessions; full detail lives in the session’s related-sessions strip.';
+  const startOpen = Boolean(currentSession)
+    && fold.some(child => child.runtime === currentSession.runtime && child.id === currentSession.id);
+  const paint = open => {
+    toggle.setAttribute('aria-expanded', String(open));
+    rows.classList.toggle('hidden', !open);
+  };
+  toggle.onclick = () => paint(rows.classList.contains('hidden'));
+  for (const child of fold) rows.appendChild(buildSessionRow(child, false));
+  paint(startOpen);
+  host.append(toggle, rows);
+  return host;
+}
+
 function buildSessionRow(s, showProject) {
   const d = createSessionRowShell(s);
   // INV-22: render from the honesty label. A `prompt` title is NOT a title — it is
@@ -299,15 +393,20 @@ function buildSessionRow(s, showProject) {
   d.appendChild(t);
   const m = el('div', 'm');
   m.appendChild(el('span', 'chip ' + s.runtime, s.runtime));
+  const native = nativeOpenControl(s);
+  if (native) m.appendChild(native);
   // agent_role is set only on fold children (G-5): agent sessions never
   // render as flat rail rows, so this label appears inside a parent's
   // expanded "\u2696 agents (n)" fold, naming the child's role.
   if (s.agent_role) m.appendChild(el('span', 'modeltag agent-session-tag', '\u2696 agent \u00b7 ' + s.agent_role));
-  if (showProject) m.appendChild(el('span', '', s.project.split('/').slice(-2).join('/')));
+  // native_role/native_kind mark native subagent children; distinct glyph so
+  // the observed class is not mistaken for a caused agent.
+  if (s.native_role) m.appendChild(el('span', 'modeltag agent-session-tag native-session-tag', '\u29c9 subagent \u00b7 ' + s.native_role));
+  if (showProject) m.appendChild(el('span', '', projectLabel(s)));
   m.appendChild(el('span', '', fmtTime(rowTime(s))));
   if (s.model) {
-    const mm = el('span', 'modeltag', s.model.replace(/^claude-/, ''));
-    mm.title = s.model + (s.turns ? ' · ' + s.turns + ' turns' : '');
+    const mm = el('span', 'modeltag', s.model);
+    mm.title = s.model + (s.turns ? ' · ' + s.turns + ' calls' : '');
     m.appendChild(mm);
   }
   if (s.activity_status === 'unknown') {
@@ -315,7 +414,7 @@ function buildSessionRow(s, showProject) {
     activity.title = 'This runtime does not expose exact per-session liveness evidence; unknown does not mean closed.';
     m.appendChild(activity);
   }
-  // governor tags (cpmem engine index): branch, commits, PRs, memory writes
+  // branch, commits, PRs: legacy summary fields with no writer since 2026-07-20
   if (s.branch) {
     const bt = el('span', 'modeltag', '⎇ ' + s.branch + (s.commits ? ' +' + s.commits : ''));
     bt.title = 'git branch' + (s.commits ? ' · ' + s.commits + ' commit(s) this session' : '');
@@ -325,11 +424,6 @@ function buildSessionRow(s, showProject) {
     const pt = el('span', 'prtag', pr);
     pt.title = 'issue/PR referenced in this session';
     m.appendChild(pt);
-  }
-  if (s.mem_writes > 0) {
-    const mw = el('span', 'modeltag', '☰' + s.mem_writes);
-    mw.title = s.mem_writes + ' memory write(s) from this session';
-    m.appendChild(mw);
   }
   if (s.context > 0) {
     const cb = el('span', 'ctxbadge', fmtTok(s.context));
@@ -349,10 +443,12 @@ function buildSearchSessionRow(s) {
   d.appendChild(el('div', 't', s.title || ('Untitled · ' + shortID)));
   const meta = el('div', 'm');
   meta.appendChild(el('span', 'chip ' + s.runtime, s.runtime));
+  const native = nativeOpenControl(s);
+  if (native) meta.appendChild(native);
   const matchKind = el('span', 'modeltag search-hit-kind', s.kind === 'title' ? 'Title match' : 'Transcript match');
   matchKind.dataset.kind = s.kind || 'transcript';
   meta.appendChild(matchKind);
-  if (s.project) meta.appendChild(el('span', '', s.project.split('/').slice(-2).join('/')));
+  if (s.project || s.cwd) meta.appendChild(el('span', '', projectLabel(s)));
   d.appendChild(meta);
   d.appendChild(el('div', 'search-snippet', String(s.snippet || '').trim()));
   return d;
@@ -394,8 +490,13 @@ async function renderRail(options = {}) {
   await ensureViewsReady();
   if (railGeneration !== sessionRailRenderGeneration) return;
   const active = activeQuery();
+  // board_view only rides the fetch when the ACTIVE query is the selected
+  // view's own (not a bar filter): the board's placement is the board's
+  // rendering, not a rail-wide behavior (the filter-bar interaction fix).
+  const viewScoped = active && active.scope === 'view:' + (selectedView()?.id || '');
+  const boardView = viewScoped && boardConfig(selectedView()) ? selectedView().id : '';
   const fetchRail = () => options.prefetched ? Promise.resolve(options.prefetched)
-    : api(organizedRailUrl(active, 500) || '/api/sessions?view=rail&repository_limit=500');
+    : api(organizedRailUrl(active, 500, boardView) || '/api/sessions?view=rail&repository_limit=500');
   const skel = el('div'); skel.appendChild(mkSkeletons(10));
   await withState($('#sidebody'), skel, fetchRail, data => {
     sessions = [];
@@ -416,10 +517,30 @@ async function renderRail(options = {}) {
     usagePin.innerHTML = '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V8.5M7 13V3.5M11 13V6"/></svg><span>Usage</span>';
     usagePin.onclick = () => document.dispatchEvent(new CustomEvent('cg:center', { detail: { view: 'usage' } }));
     side.appendChild(usagePin);
+    // Handoffs: Received and Sent as rail rows (team rest-of-release plan §8.2).
+    mountHandoffRail(side);
     const repositories = data.repositories || [];
+    // The board (sessions-board plan; placement rule PO-13): a board view
+    // with NO session open renders the board IN #main — the wide center
+    // surface, full width (no split, no right panel for now). With a session
+    // open, the session keeps the center and the rail renders its grouped
+    // list. A bar filter takes you to the rail (scope rule PO-11): the board
+    // is the view's rendering, only when the active query IS that view.
+    const view = selectedView();
+    const board = boardConfig(view);
+    boardFitted = boardFits();
+    if (board && active && active.scope === 'view:' + view.id && !S.sel && boardFitted) {
+      renderBoardCenter(view, board, data);
+      // The board holds the centre only while no session does: opening one
+      // hands the centre over, and the rail then lists the view's groups.
+      revealRailSelection = () => { renderRail(); };
+      return;
+    }
     if (!repositories.length) {
-      side.appendChild(el('div', 'empty', active ? 'No sessions match.'
-        : 'No sessions found. Sessions appear here after you use Claude Code or Codex on this machine.'));
+      side.appendChild(railEmptyState(active, viewScoped ? data.query_notes : null));
+      // An empty list is not the whole story when the store could not be read.
+      const evidenceNote = changeEvidenceNote(data.change_evidence_problem);
+      if (evidenceNote) side.appendChild(el('div', 'empty', evidenceNote));
       return;
     }
     // Repository identity, worktree folding, and /private normalization now come from
@@ -454,9 +575,15 @@ async function renderRail(options = {}) {
       const stateKey = railStateKey(active, key);
       if (!railState[stateKey] || typeof railState[stateKey] !== 'object' || Array.isArray(railState[stateKey])) {
         const legacyOpen = legacyCollapsed && !legacyCollapsed.has(key);
-        const firstUseful = index === 0 && (data.activity?.status === 'available' ? group.open_total > 0 : true);
+        // Plan D3: a repository containing presence-unknown sessions defaults
+        // to All on first use, because Open would hide them silently. The first
+        // useful group opens in All; other such groups remain collapsed but use
+        // All when expanded. Repositories whose sessions all participate in
+        // exact presence keep the existing default.
+        const hasUnknown = group.presence_unknown_total > 0;
+        const firstUseful = index === 0 && (data.activity?.status === 'available' ? group.open_total > 0 || hasUnknown : true);
         railState[stateKey] = active ? { mode: 'all', offset: 0 }
-          : { mode: legacyOpen || firstUseful ? (group.open_total > 0 ? 'open' : 'all') : 'closed', offset: 0 };
+          : { mode: legacyOpen || firstUseful ? (hasUnknown ? 'all' : (group.open_total > 0 ? 'open' : 'all')) : 'closed', offset: 0 };
       }
       const pref = railState[stateKey];
       if (!RAIL_MODES.includes(pref.mode)) pref.mode = 'closed';
@@ -522,11 +649,15 @@ async function renderRail(options = {}) {
           body.appendChild(buildSessionRow(s, false));
           const fold = page.agent_children?.[s.id] || [];
           if (fold.length) body.appendChild(buildAgentFold(s, fold));
+          const nativeFold = page.native_children?.[s.id] || [];
+          if (nativeFold.length) body.appendChild(buildNativeFold(s, nativeFold));
         }
-        // The current selection may live inside a fold (an agent session
-        // opened from the strip) — that is on this page, not outside it.
-        const selectionInFold = currentSession && Object.values(page.agent_children || {})
-          .some(fold => fold.some(child => child.runtime === currentSession.runtime && child.id === currentSession.id));
+        // The current selection may live inside a fold (an agent or native
+        // subagent session opened from the strip) — that is on this page.
+        const selectionInFold = currentSession && (
+          Object.values(page.agent_children || {}).concat(Object.values(page.native_children || {}))
+            .some(fold => fold.some(child => child.runtime === currentSession.runtime && child.id === currentSession.id))
+        );
         const selectedOutside = !active && currentSession && currentSession.repository_key === key
           && !selectionInFold
           && !(page.sessions || []).some(s => s.runtime === currentSession.runtime && s.id === currentSession.id);
@@ -538,15 +669,36 @@ async function renderRail(options = {}) {
           if (currentSession.orchestration_role) {
             body.appendChild(el('div', 'selected-outside-label',
               'Selected agent session · folded under its parent on another page'));
+          } else if (currentSession.lineage_kind) {
+            body.appendChild(el('div', 'selected-outside-label',
+              'Selected native subagent · folded under its parent on another page'));
           } else {
             body.appendChild(el('div', 'selected-outside-label', 'Selected session · outside this page'));
             body.appendChild(buildSessionRow(currentSession, false));
           }
         }
         if (!page.total) {
-          body.appendChild(el('div', 'empty', pref.mode === 'open'
-            ? 'No session in this repository is open right now.'
-            : (active ? 'No sessions match.' : 'No sessions in this repository.')));
+          if (pref.mode === 'open' && group.presence_unknown_total > 0) {
+            const notice = el('div', 'empty open-unavailable',
+              group.presence_unknown_total + ' session' + (group.presence_unknown_total === 1 ? '' : 's') +
+              ' in this repository may be active but cannot be proved open (shared runtime store).');
+            const showAll = el('button', 'btn', 'Show all sessions');
+            showAll.onclick = () => setMode('all', disclosure);
+            notice.append(document.createElement('br'), showAll);
+            body.appendChild(notice);
+          } else {
+            body.appendChild(el('div', 'empty', pref.mode === 'open'
+              ? 'No session in this repository is open right now.'
+              : (active ? 'No sessions match.' : 'No sessions in this repository.')));
+          }
+        } else if (pref.mode === 'open' && group.presence_unknown_total > 0) {
+          // Even with open results, show the exclusion count and Show All.
+          const notice = el('div', 'rail-exclusion-note',
+            '+ ' + group.presence_unknown_total + ' may be active (not shown in Open)');
+          const showAll = el('button', 'btn btn-small', 'Show all');
+          showAll.onclick = () => setMode('all', disclosure);
+          notice.append(' ', showAll);
+          body.appendChild(notice);
         }
         const pager = el('div', 'session-pager');
         const previous = el('button', 'btn', 'Previous');
@@ -567,7 +719,7 @@ async function renderRail(options = {}) {
       const loadPage = async (focusNode, selected = null, persist = true) => {
         if (pref.mode === 'closed') return;
         const generation = ++loadGeneration;
-        const url = organizedPageUrl(active, { key, mode: pref.mode, offset: pref.offset, limit: SESSION_PAGE_SIZE, selected })
+        const url = organizedPageUrl(active, { key, mode: pref.mode, offset: pref.offset, limit: SESSION_PAGE_SIZE, selected, boardView })
           || '/api/sessions?view=repository&repository=' + encodeURIComponent(key)
           + '&mode=' + pref.mode + '&offset=' + pref.offset + '&limit=' + SESSION_PAGE_SIZE
           + (selected ? '&selected_runtime=' + encodeURIComponent(selected.runtime)
@@ -682,7 +834,40 @@ async function renderRail(options = {}) {
     if (options.landing) $('#main').innerHTML = '<h2>Sessions</h2><div class="sub">' + totalSessions +
       ' sessions.' + repositoryNote + ' From attached local runtime session stores. Select one to review, or search.' + activityNote +
       ' OpenCode session activity is reported as unknown because its sessions share one database.</div>';
+    // The reason names a store path: text, never markup.
+    const evidenceNote = changeEvidenceNote(data.change_evidence_problem);
+    if (options.landing && evidenceNote) $('#main').appendChild(el('div', 'sub', evidenceNote));
   }, () => railGeneration === sessionRailRenderGeneration && S.view === 'sessions');
+}
+
+// renderBoardCenter draws a board view in the centre: its name, the notes on
+// its query (board-view-query-correctness plan), and the board itself.
+function renderBoardCenter(view, board, data) {
+  const center = $('#main');
+  center.replaceChildren();
+  center.classList.remove('split');
+  const head = center.appendChild(el('div', 'board-headrow'));
+  head.appendChild(el('h2', 'board-heading', view.name || 'Board'));
+  const notes = queryNotesNode(data.query_notes);
+  if (notes) center.appendChild(notes);
+  const host = center.appendChild(renderBoardNodes(view, board, data.repositories || [], { status: statusForSession, statusDot: makeStatusDot }));
+  head.appendChild(boardNeedsControl(host));
+  const refresh = head.appendChild(el('button', 'board-refresh', 'Refresh'));
+  refresh.type = 'button';
+  refresh.title = 'Read the board again';
+  refresh.onclick = () => refreshBoard(host);
+  const boardNote = changeEvidenceNote(data.change_evidence_problem);
+  if (boardNote) center.appendChild(el('div', 'sub', boardNote));
+}
+
+// railEmptyState is the rail with nothing to list. A view's query that can
+// select nothing says why, under the line.
+function railEmptyState(active, notes) {
+  const empty = el('div', 'empty', active ? 'No sessions match.'
+    : 'No sessions found. Sessions appear here after you use Claude Code or Codex on this machine.');
+  const noted = queryNotesNode(notes);
+  if (noted) empty.appendChild(noted);
+  return empty;
 }
 
 $('#search').oninput = debounce(async e => {
@@ -710,7 +895,7 @@ $('#search').oninput = debounce(async e => {
         side.appendChild(buildSearchSessionRow(h));
       }
     }, () => railGeneration === sessionRailRenderGeneration && S.view === 'sessions');
-}, 350);
+}, FILTER_TYPING_PAUSE_MS);
 
 async function openSession(s) {
   const generation = ++sessionOpenGeneration;
@@ -754,34 +939,6 @@ async function openSession(s) {
   }
 }
 
-export function renderUsageStrip(u) {
-  const strip = el('div', 'usage');
-  const cell = (v, k, title) => {
-    const c = el('div', 'u'); if (title) c.title = title;
-    c.append(el('div', 'v', v), el('div', 'k', k));
-    return c;
-  };
-  if (u.model) strip.appendChild(cell(u.model.replace(/^claude-/, ''), 'model'));
-  strip.appendChild(cell(fmtTok(u.input_tokens + u.cache_read + u.cache_create), 'input', 'cumulative input incl. cache'));
-  strip.appendChild(cell(fmtTok(u.output_tokens), 'output'));
-  if (u.cache_hit_rate > 0) strip.appendChild(cell(Math.round(u.cache_hit_rate * 100) + '%', 'cache hit', 'cache_read / all input — the efficiency-parity number'));
-  strip.appendChild(cell(String(u.turns), u.turns === 1 ? 'turn' : 'turns'));
-  // context occupancy — bar only when the vendor states the window
-  const ctx = el('div', 'u ctxbar');
-  if (u.context_window > 0) {
-    const pct = Math.min(100, Math.round(u.context / u.context_window * 100));
-    ctx.append(el('div', 'v', fmtTok(u.context) + ' / ' + fmtTok(u.context_window) + ' (' + pct + '%)'), el('div', 'k', 'context window'));
-    const track = el('div', 'track');
-    const fill = el('div', 'fill');
-    fill.style.width = pct + '%';
-    track.appendChild(fill); ctx.appendChild(track);
-  } else {
-    ctx.append(el('div', 'v', fmtTok(u.context)), el('div', 'k', 'context at last turn · window not stated by vendor'));
-  }
-  strip.appendChild(ctx);
-  return strip;
-}
-
 function hydrateSessionReferences(host, statusHost, scope, loadPromise, generation) {
   const apply = () => {
     if (generation !== sessionOpenGeneration || !host.isConnected) return;
@@ -811,16 +968,98 @@ function hydrateSessionReferences(host, statusHost, scope, loadPromise, generati
 async function loadTranscriptView() {
   try {
     const [config, modules] = await Promise.all([api('/api/console/config'), api('/api/console/view-profiles')]);
-    return { selection: config?.config?.transcript || {}, profiles: modules?.profiles || [] };
+    return { selection: config?.config?.transcript || {}, profiles: modules?.profiles || [], stateToken: config?.state_token || '' };
   } catch {
     return { selection: {}, profiles: [] };
   }
 }
 
-// mountTranscriptViewSwitch lists every module; a choice applies to this view
-// only and is not saved (transcript-view-profiles plan D-1).
-function mountTranscriptViewSwitch(host, view, current, onChange) {
-  if (!view.profiles.length) return;
+// projectLabel is a row's short place: the last two folders of the working
+// directory, or the unresolved project label as-is (never split as a path).
+function projectLabel(s) {
+  return s.cwd ? String(s.cwd).split('/').slice(-2).join('/') : String(s.project || '');
+}
+
+// displayPath shows a working directory with the home folder as ~. An
+// unresolved project (no cwd) is a label, shown as-is and never used as a path.
+function displayPath(d) {
+  if (d.cwd) return String(d.cwd).replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, '~');
+  return String(d.project || '');
+}
+
+// mountSessionMenu is the header's ⋯ menu: actions that are one click away but
+// never take header space.
+function mountSessionMenu(host, items) {
+  const wrap = el('div', 'session-menu');
+  const button = el('button', 'btn ghost session-menu-button', '⋯');
+  button.type = 'button';
+  button.setAttribute('aria-label', 'Session actions');
+  button.setAttribute('aria-haspopup', 'menu');
+  const menu = el('div', 'session-menu-list hidden');
+  menu.setAttribute('role', 'menu');
+  const close = () => { menu.classList.add('hidden'); document.removeEventListener('click', outside, true); };
+  const outside = event => { if (!wrap.contains(event.target)) close(); };
+  // Items are built when the menu opens, so one that cannot act right now
+  // (no workspace to reveal, no session record to note) is simply not offered.
+  const fill = () => {
+    menu.replaceChildren();
+    for (const item of items.filter(candidate => !candidate.available || candidate.available())) {
+      const entry = el('button', 'session-menu-item', item.label);
+      entry.type = 'button';
+      entry.setAttribute('role', 'menuitem');
+      entry.onclick = () => { close(); item.run(); };
+      menu.appendChild(entry);
+    }
+  };
+  button.onclick = () => {
+    const opening = menu.classList.contains('hidden');
+    if (opening) fill();
+    menu.classList.toggle('hidden', !opening);
+    if (opening) document.addEventListener('click', outside, true);
+  };
+  wrap.append(button, menu);
+  host.appendChild(wrap);
+}
+
+// mountPinnedNotes keeps the pinned notes (/api/notes) one menu click away:
+// never as banners in the conversation (owner decision O-3a).
+function mountPinnedNotes(head, d, notes) {
+  const box = el('div', 'pinned-notes hidden');
+  const paint = () => paintPinnedNotes(box, d, notes, paint);
+  paint();
+  head.appendChild(box);
+  return () => { box.classList.toggle('hidden'); box.querySelector('input')?.focus(); };
+}
+
+function paintPinnedNotes(box, d, notes, repaint) {
+  box.replaceChildren();
+  for (const note of notes) box.appendChild(el('div', 'pinned-note', note.text + ' · ' + fmtTime(note.created_at)));
+  const row = el('div', 'row');
+  const input = el('input'); input.placeholder = 'Pin a note to this session…'; input.style.flex = '1';
+  const pin = el('button', 'btn', 'Pin');
+  const save = () => pinNote(d, input.value, notes).then(saved => { if (saved) repaint(); });
+  pin.onclick = save;
+  input.onkeydown = event => { if (event.key === 'Enter') save(); };
+  row.append(input, pin);
+  box.appendChild(row);
+}
+
+async function pinNote(d, text, notes) {
+  if (!text.trim()) return false;
+  await api('/api/notes', { method: 'POST', body: JSON.stringify({ target: d.runtime + '/' + d.id, text }) });
+  notes.push({ text, created_at: new Date().toISOString() });
+  return true;
+}
+
+// mountTranscriptToolbar holds the view switch, its "Make default" action and
+// the count of rows the view hides. A choice applies to this view only
+// (transcript-view-profiles plan D-1); "Make default" is the explicit save.
+function mountTranscriptToolbar(host, view, d, current, onChange) {
+  const bar = el('div', 'transcript-toolbar');
+  const hiddenTotal = el('span', 'transcript-hidden-total');
+  bar.appendChild(hiddenTotal);
+  host.appendChild(bar);
+  if (!view.profiles.length) return { setHidden() {} };
   const select = el('select', 'transcript-view-switch');
   select.setAttribute('aria-label', 'Transcript view');
   for (const profile of view.profiles) {
@@ -830,8 +1069,35 @@ function mountTranscriptViewSwitch(host, view, current, onChange) {
     select.appendChild(option);
   }
   select.value = current?.id || '';
-  select.onchange = () => onChange(view.profiles.find(profile => profile.id === select.value) || null);
-  host.appendChild(select);
+  const role = d.orchestration_role || '';
+  const opensWith = () => (role && view.selection.role_profiles?.[role]) || view.selection.default_profile || '';
+  const makeDefault = el('button', 'btn ghost transcript-make-default', 'Make default');
+  makeDefault.type = 'button';
+  makeDefault.title = role ? 'Open ' + role + ' sessions with this view' : 'Open sessions with this view';
+  const syncDefault = () => { makeDefault.hidden = !select.value || select.value === opensWith(); };
+  makeDefault.onclick = async () => {
+    const body = { state_token: view.stateToken || '' };
+    if (role) body.role_profiles = { [role]: select.value }; else body.default_profile = select.value;
+    makeDefault.disabled = true;
+    try {
+      const saved = await api('/api/console/config/transcript', { method: 'PUT', body: JSON.stringify(body) });
+      view.selection = saved?.config?.transcript || view.selection;
+      view.stateToken = saved?.state_token || '';
+    } catch (error) {
+      hiddenTotal.textContent = ownerMessage(error);
+    } finally { makeDefault.disabled = false; syncDefault(); }
+  };
+  select.onchange = () => { syncDefault(); onChange(view.profiles.find(profile => profile.id === select.value) || null); };
+  syncDefault();
+  bar.append(select, makeDefault);
+  return {
+    setHidden(count) { hiddenTotal.textContent = count ? count + ' hidden' : ''; },
+  };
+}
+
+function countHiddenRows(log) {
+  return (transcriptRenderStates.get(log)?.groups || []).reduce((total, group) =>
+    total + (group.details.open ? 0 : group.items.length), 0);
 }
 
 function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd || ''), referenceLoad = null,
@@ -842,176 +1108,169 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
   main.innerHTML = '';
   main.classList.add('split'); // header + inner scroller; render() resets this
   const pane = el('div', 'detailscroll'); // everything below the header scrolls in here
-  // pinned header: title + actions stay put while the transcript scrolls
+  // The header is two lines (session-view plan §A1): who this session is, and
+  // where it is. Everything else is one click away, in the ⋯ menu or the
+  // workspace panel; what the session is doing lives above the reply box.
   const head = el('div', 'stickyhead');
-  const trow = el('div', 'trow');
+  const line1 = el('div', 'session-line1');
   const h2 = el('h2', '', d.title || d.id);
   h2.title = d.title || d.id;
-  trow.appendChild(h2);
-  head.appendChild(trow);
-  const statusSummary = el('div', 'session-status-summary');
-  statusSummary.setAttribute('role', 'status');
-  statusSummary.setAttribute('aria-live', 'polite');
-  head.appendChild(statusSummary);
-  main.appendChild(head);
-  const sub = el('div', 'sub');
-  sub.append(el('span', 'chip ' + d.runtime, d.runtime), ' ', d.project + ' · ' + d.events.length + ' events · ' + fmtTime(d.modified), ' ');
+  const facts = el('div', 'session-facts');
+  facts.appendChild(el('span', 'chip ' + d.runtime, d.runtime));
   if (d.usage?.model) {
-    const mt = el('span', 'modeltag', d.usage.model.replace(/^claude-/, ''));
-    mt.title = d.usage.model + ' · ' + d.usage.turns + ' turns · ' + Math.round((d.usage.cache_hit_rate || 0) * 100) + '% cache hit';
-    sub.appendChild(mt);
+    const model = el('span', 'modeltag', d.usage.model);
+    model.title = d.usage.model + ' · ' + d.usage.turns + ' calls · ' + Math.round((d.usage.cache_hit_rate || 0) * 100) + '% cache hit';
+    facts.appendChild(model);
   }
-  if (d.branch) {
-    const bt = el('span', 'modeltag', '⎇ ' + d.branch + (d.commits ? ' +' + d.commits : ''));
-    bt.title = 'git branch' + (d.commits ? ' · ' + d.commits + ' commit(s)' : '');
-    sub.appendChild(bt);
-  }
-  for (const pr of (d.prs || []).slice(0, 3)) sub.appendChild(el('span', 'prtag', pr));
-  if (d.mem_writes > 0) {
-    const mw = el('span', 'modeltag', '☰ ' + d.mem_writes + ' mem');
-    mw.title = d.mem_writes + ' memory write(s) recorded by the governor';
-    sub.appendChild(mw);
-  }
-  // exposure badge — pinned in the always-visible header (loadExposure fills it),
-  // so the audit result is seen even above a long transcript
-  const expoBadge = el('span', 'modeltag', '⋯ exposure');
-  expoBadge.title = 'data exposure (audit water mark for this session)';
-  sub.appendChild(expoBadge);
+  if (d.branch) facts.appendChild(el('span', 'modeltag', '⎇ ' + d.branch));
+  for (const pr of (d.prs || []).slice(0, 3)) facts.appendChild(el('span', 'prtag', pr));
   if (d.usage?.context > 0) {
-    const cb = el('span', 'ctxbadge', fmtTok(d.usage.context) + ' ctx');
-    cb.title = 'context at last turn: ' + d.usage.context.toLocaleString() + ' tokens';
-    sub.appendChild(cb);
+    const context = el('span', 'ctxbadge', fmtTok(d.usage.context) + ' ctx');
+    context.title = d.usage.context.toLocaleString() + ' tokens at the last turn';
+    facts.appendChild(context);
   }
-  // No Continue button: the session view IS the live view (console-design §6).
-  // The composer renders inline under the transcript, so you reply where you read.
-  head.appendChild(sub);
-  mountHeaderTags(head, d);
-  main.appendChild(pane);
-  // Exposure card + usage now render in the right reference panel (session.exposure
-  // / session.usage providers, below); the header keeps the pinned water-mark badge
-  // as an always-visible summary.
-  loadExposure(null, expoBadge, d.runtime, d.id);
-  if (d.unparsed > 0) {
-    pane.appendChild(el('div', 'banner',
-      `Honest coverage: ${d.unparsed} lines could not be normalized and are not shown. The canonical-store version must close or declare this gap.`));
-  }
-  // note composer lives in the STICKY header as a text toggle — reachable from
-  // anywhere in a long transcript, collapsed so the header stays lean. Text, not
-  // an icon: a lone glyph makes the reader guess (icons carry labels here).
+  // A data-exposure finding earns one chip; a weak negative shows nothing here.
+  const exposure = el('button', 'chip st-disputed session-exposure');
+  exposure.type = 'button';
+  exposure.hidden = true;
+  exposure.onclick = () => { if (!revealPane('session.impact')) exposure.hidden = true; };
+  facts.appendChild(exposure);
+  line1.append(h2, facts, el('span', 'session-line-spacer'));
+  head.appendChild(line1);
+  const line2 = el('div', 'session-line2');
+  const place = el('span', 'session-path', displayPath(d));
+  place.title = d.cwd || d.project || '';
+  line2.appendChild(place);
+  const tagHost = mountHeaderTags(head, d);
+  line2.appendChild(tagHost);
+  head.appendChild(line2);
+  const details = el('button', 'btn ghost session-details', 'details ›');
+  details.type = 'button';
+  details.onclick = () => revealPane('session.change');
+  // "details ›" shows only while the workspace can show the session's evidence.
+  const syncDetails = () => {
+    if (!details.isConnected && details.dataset.mounted) { document.removeEventListener('cg:module-state', syncDetails); return; }
+    details.hidden = !canRevealPane('session.change');
+  };
+  details.dataset.mounted = '1';
+  document.addEventListener('cg:module-state', syncDetails);
+  syncDetails();
+  line2.appendChild(details);
+  // A session opened for a handoff says what it continues (plan §6.2, §14 Q22).
+  void mountContinues(line2, d, tagHost);
   const notes = allNotes.filter(n => n.target.startsWith(d.runtime + '/' + d.id));
-  const noteToggle = el('button', 'btn', notes.length ? 'Notes · ' + notes.length : 'Add note');
-  noteToggle.title = notes.length ? notes.length + ' note(s) pinned — click to add another' : 'Pin a note to this session';
-  const noteRow = el('div', 'row hidden');
-  noteRow.style.marginTop = '8px';
-  const noteInput = el('input'); noteInput.placeholder = 'Add a note to this session…'; noteInput.style.flex = '1';
-  const noteBtn = el('button', 'btn', 'Pin note');
-  const pinIt = async () => {
-    if (!noteInput.value.trim()) return;
-    await api('/api/notes', { method: 'POST', body: JSON.stringify({ target: d.runtime + '/' + d.id, text: noteInput.value }) });
-    noteInput.value = ''; noteBtn.textContent = 'Pinned ✓';
-    noteToggle.textContent = 'Notes · ' + (notes.length + 1);
-    setTimeout(() => { noteBtn.textContent = 'Pin note'; noteRow.classList.add('hidden'); }, 900);
-  };
-  noteBtn.onclick = pinIt;
-  noteInput.onkeydown = e => { if (e.key === 'Enter') pinIt(); };
-  noteRow.append(noteInput, noteBtn);
-  noteToggle.onclick = () => {
-    noteRow.classList.toggle('hidden');
-    if (!noteRow.classList.contains('hidden')) noteInput.focus();
-  };
-  // Notes is now the only header action — the Continue buttons it used to be
-  // inserted before are gone (console-design §6.2 rev. 3).
-  trow.appendChild(noteToggle);
-  // meta_id / thread_id ride along so the header's projection reads cover
-  // every exact identity the runs may be recorded under (g4 plan §3).
-  mountSessionOrchestration(trow, String(d.runtime || ''), String(d.id || ''),
-    { cwd: String(d.cwd || ''), repository: String(d.repository_key || ''),
-      meta_id: String(d.meta_id || ''), thread_id: String(d.thread_id || '') });
-  head.appendChild(noteRow);
-
-  // Session facts now render as the compact preface of the one Change Map owner;
-  // the transcript center does not maintain a second footprint toggle or list.
-  for (const n of notes) {
-    const nd = el('div', 'banner', 'Note — ' + n.text + '  · ' + fmtTime(n.createdAt || n.created_at));
-    nd.style.borderLeftColor = 'var(--accent2)';
-    pane.appendChild(nd);
-  }
-  if (d.transcript_note) pane.appendChild(el('div', 'banner', d.transcript_note));
-  // Agent findings are NOT rendered here. Independent-review output is the
-  // reviewer's work, not this conversation's content, and as full cards under
-  // the transcript it read as a wall of model prose the reader never asked
-  // for. It lives on the surfaces about agents (Settings › Agents), where the
-  // helper/follower work already is.
+  const togglePinned = mountPinnedNotes(head, d, notes);
+  mountSessionMenu(line1, [
+    { label: 'Note…', run: openHeaderNote, available: () => tagHost.dataset.placeable !== 'false' },
+    { label: notes.length ? 'Pinned notes · ' + notes.length : 'Pin a note…', run: togglePinned },
+    { label: 'Session details', run: () => revealPane('session.change'), available: () => canRevealPane('session.change') },
+    { label: 'Turn settings', run: () => openTurnSettings(d) },
+    { label: 'Hand off…', run: () => handOffSession(d, liveTurnsOf(d)) },
+    { label: 'Copy session id', run: () => navigator.clipboard?.writeText(String(d.id || '')) },
+    { label: nativeOpenModel(d)?.label || '', run: () => openNative(d), available: () => nativeOpenModel(d) !== null },
+  ]);
+  main.appendChild(head);
+  main.appendChild(pane);
+  loadExposure(null, exposure, d.runtime, d.id);
   const reviewGeneration = sessionOpenGeneration;
   const referenceStatus = el('div', 'session-reference-status sub', 'Indexing project references…');
   referenceStatus.setAttribute('role', 'status');
+  const log = el('div', 'translog');
+  log.effortSession = { runtime: d.runtime, id: d.id, resume_id: d.resume_id || d.id };
+  const transcriptKeyPrefix = 'session:' + sessionOpenGeneration + ':';
+  sessionEventStore.reset(d.events || []);
+  // The events drawn so far, live deltas included, so a view switch redraws
+  // the same conversation under another module.
+  const transcript = { events: [...sessionEventStore.events],
+    profile: selectProfile(transcriptView.profiles, transcriptView.selection, d.orchestration_role) };
+  // The view switch rides header line 2, so it is reachable at any scroll depth.
+  const toolbar = mountTranscriptToolbar(line2, transcriptView, d, transcript.profile, profile => {
+    transcript.profile = profile;
+    renderTranscript(log, transcript.events, referenceScope.resolve, referenceScope.root,
+      { profile, keyPrefix: transcriptKeyPrefix });
+    toolbar.setHidden(countHiddenRows(log));
+  });
+  line2.appendChild(details);
   pane.appendChild(referenceStatus);
   // transcript — SAME renderer family as the chat tab (one conversation
   // language everywhere), and opens at the END like every chat you've ever
   // used: the most recent exchange is why you opened it.
-  const log = el('div', 'translog');
-  // The events drawn so far, live deltas included, so a view switch redraws
-  // the same conversation under another module.
-  const transcript = { events: [...(d.events || [])],
-    profile: selectProfile(transcriptView.profiles, transcriptView.selection, d.orchestration_role) };
-  renderTranscript(log, transcript.events, referenceScope.resolve, referenceScope.root, { profile: transcript.profile });
-  mountTranscriptViewSwitch(trow, transcriptView, transcript.profile, profile => {
-    transcript.profile = profile;
-    renderTranscript(log, transcript.events, referenceScope.resolve, referenceScope.root, { profile });
-  });
+  renderTranscript(log, transcript.events, referenceScope.resolve, referenceScope.root,
+    { profile: transcript.profile, keyPrefix: transcriptKeyPrefix });
+  toolbar.setHidden(countHiddenRows(log));
+  const onHiddenChanged = () => { if (log.isConnected) toolbar.setHidden(countHiddenRows(log)); else document.removeEventListener('cg:transcript-hidden-changed', onHiddenChanged); };
+  document.addEventListener('cg:transcript-hidden-changed', onHiddenChanged);
   pane.appendChild(log);
   hydrateSessionReferences(pane, referenceStatus, referenceScope,
     referenceLoad || referenceScope.start(), reviewGeneration);
+  // The foot is pinned to the bottom of the scroller in every state — resume
+  // pending, composer mounted, or read-only — and the activity line is always
+  // its first row (session-view plan §A2).
+  const foot = el('div', 'session-foot');
+  const activity = createActivityLine({ ledger: sessionAttentionStore, ageTickSeconds: sessionEventStore.ageTickSeconds || 15 });
+  foot.appendChild(activity.root);
+  pane.appendChild(foot);
+  mountSessionOrchestration(activity.linkHost, String(d.runtime || ''), String(d.id || ''),
+    { cwd: String(d.cwd || ''), cwd_key: String(d.cwd_key || ''), repository: String(d.repository_key || ''),
+      meta_id: String(d.meta_id || ''), thread_id: String(d.thread_id || ''), identities: d.identities });
   // Natural-session live stream (plan B-GUI): ONE stream for the selected
   // session; deltas append through the SAME transcript renderer so rows are
   // identical to the static view.
-  //
-  // There is no second block under the transcript any more. A task's output
-  // belongs in the conversation at its own moment or on the surfaces about
-  // tasks — never pinned beneath the conversation as a parallel record with a
-  // caption explaining our bookkeeping.
-  sessionEventStore.reset();
-  // What the reader actually wants to know: is it working, or is it my turn?
-  const liveStatus = el('span', 'chip', '');
-  trow.appendChild(liveStatus);
-  let liveUnavailable = false;
-  const paintTurnState = () => {
-    if (!liveStatus.isConnected) return;
-    if (liveUnavailable) {
-      liveStatus.textContent = 'live updates unavailable · snapshot';
-      liveStatus.className = 'chip st-disputed';
-      liveStatus.title = 'The console cannot reach the live feed; the transcript below is the last snapshot it received.';
-      return;
-    }
-    const rendered = renderSessionStatus(sessionEventStore.turnState, sessionAttentionStore);
-    const shown = describeTurnState(sessionEventStore.turnState, Date.now(), rendered.seen);
-    liveStatus.textContent = shown.age ? shown.text + ' · ' + shown.age : shown.text;
-    liveStatus.className = 'chip';
-    liveStatus.title = 'What this session is doing right now, and when it last did anything.';
+  let tailBoundary = null, updateTranscriptPill = () => {}, recoveryPending = false;
+  placeOwnedTurnBoundary = (_id, effect) => {
+    if (!log.isConnected || currentSession !== d || effect?.type !== 'boundary' || tailBoundary) return;
+    tailBoundary = document.createComment('owned-turn-tail');
+    log.appendChild(tailBoundary);
   };
-  paintTurnState();
-  // The age keeps aging while nothing arrives, so re-render it on the cadence
-  // the daemon published rather than leaving a frozen number on screen.
-  const ageTick = setInterval(() => {
-    if (!liveStatus.isConnected) { clearInterval(ageTick); return; }
-    paintTurnState();
-  }, (sessionEventStore.ageTickSeconds || 15) * 1000);
+  const recoverCanonicalTail = async () => {
+    if (recoveryPending || !log.isConnected || currentSession !== d) return;
+    recoveryPending = true;
+    try {
+      const snapshot = await api(`/api/session?runtime=${d.runtime}&id=${encodeURIComponent(d.id)}`);
+      if (log.isConnected && currentSession === d) {
+        const effect = sessionEventStore.acceptSnapshot(snapshot.events || []);
+        if (effect.type === 'pending') activity.setLiveUnavailable(true);
+        applySessionEventEffect(effect);
+      }
+    } catch {
+      activity.setLiveUnavailable(true);
+    } finally { recoveryPending = false; }
+  };
+  applySessionEventEffect = effect => {
+    if (!log.isConnected || currentSession !== d || !effect || ['noop', 'pending', 'boundary'].includes(effect.type)) return;
+    if (effect.type === 'refresh') { void recoverCanonicalTail(); return; }
+    const scroller = log.closest('.detailscroll');
+    const position = captureTranscriptPosition(scroller, log);
+    if (effect.type === 'append') {
+      transcript.events.push(...effect.events);
+      appendTranscriptEvents(log, effect.events, referenceScope.resolve, referenceScope.root,
+        transcript.profile, transcriptKeyPrefix, true);
+    } else if (effect.type === 'replace-tail') {
+      transcript.events.splice(effect.boundary, transcript.events.length - effect.boundary, ...effect.events);
+      if (tailBoundary?.parentNode === log) {
+        let node = tailBoundary.nextSibling;
+        while (node) { const next = node.nextSibling; node.remove(); node = next; }
+        tailBoundary.remove();
+      }
+      tailBoundary = null;
+      pruneTranscriptRenderState(log);
+      appendTranscriptEvents(log, effect.events, referenceScope.resolve, referenceScope.root,
+        transcript.profile, transcriptKeyPrefix, true);
+    }
+    toolbar.setHidden(countHiddenRows(log));
+    restoreTranscriptPosition(scroller, log, position);
+    updateTranscriptPill();
+  };
   sessionLiveClient.subscribe(String(d.runtime || ''), String(d.id || ''), {
     onEvents: events => {
       if (!log.isConnected || currentSession !== d) return;
-      const fresh = sessionEventStore.accept(events);
-      if (fresh.length) {
-        transcript.events.push(...fresh);
-        appendTranscriptEvents(log, fresh, referenceScope.resolve, referenceScope.root, transcript.profile);
-      }
-      const scroller = log.closest('.detailscroll');
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      applySessionEventEffect(sessionEventStore.accept(events));
     },
     onTurnState: state => {
-      if (!liveStatus.isConnected || currentSession !== d) return;
+      if (!log.isConnected || currentSession !== d) return;
       const wasRunning = sessionEventStore.turnState?.execution === 'running';
       sessionEventStore.setTurnState(state);
-      paintTurnState();
+      activity.setLive(state);
       selectedStatusRefresh();
       // A turn boundary is the Diff pane's refresh trigger (design §3.4, R14):
       // the session stopped running, so its edits and the checkout may have moved.
@@ -1020,12 +1279,8 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
       }
     },
     onIdentity: payload => {
-      if (!liveStatus.isConnected || currentSession !== d) return;
-      if (payload && payload.following === false) {
-        liveStatus.textContent = 'no longer following this session';
-        liveStatus.className = 'chip st-disputed';
-        liveStatus.title = 'This session is no longer resolvable, so the console stopped following it. That is not a claim that it ended.';
-      }
+      if (!log.isConnected || currentSession !== d) return;
+      if (payload && payload.following === false) activity.setFollowing(false);
     },
     onGovernance: () => {
       // The strip and action surfaces refresh off the same channel; the
@@ -1033,47 +1288,59 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
       document.dispatchEvent(new CustomEvent('cg:session-activity-delta'));
     },
     onStatus: (status, detail) => {
-      if (!liveStatus.isConnected || currentSession !== d) return;
-      liveUnavailable = status !== 'live';
+      if (!log.isConnected || currentSession !== d) return;
+      activity.setLiveUnavailable(status !== 'live');
       if (status === 'live' && detail && typeof detail.age_tick_seconds === 'number') {
         sessionEventStore.ageTickSeconds = detail.age_tick_seconds;
+        activity.setAgeTick(detail.age_tick_seconds);
       }
-      paintTurnState();
     },
   });
   // A task's output belongs in the conversation at its own moment, or on the
   // surfaces about tasks — never pinned beneath the conversation as a second
-  // record with a caption explaining why we could not join the two. That block
-  // was the last thing visible on every visit, so a session whose newest task
-  // died days ago read as a transcript that had stopped updating.
+  // record with a caption explaining why we could not join the two.
   selectedTaskRefresh = () => {};
   let maybeAcknowledge = () => {};
+  // The rail item feeds the line before the first live frame and while live is
+  // unavailable, and is its only source of presence and freshness.
   selectedStatusRefresh = () => {
-    if (!statusSummary.isConnected) return;
-    const status = statusForSession(d.runtime, d.id, d.resume_id || d.id);
-    statusSummary.replaceChildren();
-    const dot = makeStatusDot(status);
-    if (dot) statusSummary.appendChild(dot);
-    const copy = el('span', 'session-status-copy');
-    const heading = status.label;
-    copy.appendChild(el('strong', '', heading));
-    const explanation = status.indicator.detail || status.detail;
-    if (explanation) copy.appendChild(el('span', 'session-status-detail', explanation));
-    statusSummary.appendChild(copy);
-    statusSummary.dataset.status = status.indicator.kind;
+    if (!foot.isConnected) return;
+    activity.setRail(sessionActivityStore.activity(d.runtime, d.id));
     requestAnimationFrame(() => maybeAcknowledge());
   };
   const latestEdgeVisible = () => pane.isConnected
     && document.visibilityState === 'visible' && document.hasFocus()
     && pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 60;
+  // The ask the line is showing (id, since when) and the reader's last
+  // pointer or key press in the console.
+  let askShown = { id: 0, at: 0 };
+  let lastInteraction = 0;
+  // Acknowledge exactly what the line is showing: its attention id and source.
   maybeAcknowledge = () => {
     if (!latestEdgeVisible()) return;
-    const status = statusForSession(d.runtime, d.id, d.resume_id || d.id);
+    const current = activity.current();
+    const status = current.source;
+    if (!status) return;
+    // The line showed an agent's ask: acknowledging it acknowledges every
+    // ask up to that id, and the marker beneath shows next (plan §6.2). An
+    // ask is acknowledged only after the reader acted in the console while
+    // it was showing — a pointer or key press — never by merely rendering
+    // in a focused window (independent red-team J5).
+    if (current.kind === 'ask') {
+      if (askShown.id !== status.ask.id) askShown = { id: status.ask.id, at: Date.now() };
+      if (lastInteraction <= askShown.at) return;
+      sessionAttentionStore.acknowledge(d.runtime, d.id, d.resume_id || d.id, 'agent', status.ask.id);
+      return;
+    }
     if (!['new_result', 'new_failure', 'interrupted'].includes(status.attention)) return;
     sessionAttentionStore.acknowledge(d.runtime, d.id, d.resume_id || d.id,
       status.attention_source, status.attention_id);
   };
   const onAttentionOpportunity = () => requestAnimationFrame(maybeAcknowledge);
+  const onInteraction = () => { lastInteraction = Date.now(); onAttentionOpportunity(); };
+  document.addEventListener('pointerdown', onInteraction, true);
+  document.addEventListener('keydown', onInteraction, true);
+  const stopAttention = sessionAttentionStore.subscribe?.(() => activity.setRail(sessionActivityStore.activity(d.runtime, d.id)));
   pane.addEventListener('scroll', onAttentionOpportunity, { passive: true });
   window.addEventListener('focus', onAttentionOpportunity);
   document.addEventListener('visibilitychange', onAttentionOpportunity);
@@ -1081,15 +1348,18 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
     pane.removeEventListener('scroll', onAttentionOpportunity);
     window.removeEventListener('focus', onAttentionOpportunity);
     document.removeEventListener('visibilitychange', onAttentionOpportunity);
+    document.removeEventListener('pointerdown', onInteraction, true);
+    document.removeEventListener('keydown', onInteraction, true);
+    if (typeof stopAttention === 'function') stopAttention();
+    activity.dispose();
   };
   selectedTaskRefresh();
   selectedStatusRefresh();
-  attachBottomPill(pane, 'pill-session'); // item 3 — pill tracks the inner scroller
+  updateTranscriptPill = attachBottomPill(pane, 'pill-session'); // item 3 — pill tracks the inner scroller
   // Capability discovery and command dispatch come from the same registered
   // adapter. Session presentation never owns a runtime allowlist or ID parser.
-  const composerHost = log.parentNode || main;
   const capabilityPending = el('div', 'sub', 'Checking whether this harness can resume…');
-  composerHost.appendChild(capabilityPending);
+  foot.appendChild(capabilityPending);
   const renderReadOnly = reason => {
     if (!log.isConnected) return;
     capabilityPending.remove();
@@ -1098,7 +1368,7 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
     ta.placeholder = 'Read-only — no resume path for runtime "' + d.runtime + '"';
     ta.disabled = true; ta.rows = 1;
     dead.append(ta, el('div', 'sub', reason));
-    composerHost.appendChild(dead);
+    foot.appendChild(dead);
   };
   loadChatCapabilities().then(capabilities => {
     if (!log.isConnected) return;
@@ -1115,7 +1385,7 @@ function renderSessionDetail(d, allNotes, referenceScope = refs.forProject(d.cwd
     };
     try {
       document.dispatchEvent(new CustomEvent('cg:mount-chat', {
-        detail: { container: composerHost, inline: true, log },
+        detail: { container: foot, inline: true, log, activity },
       }));
     } finally { S.chatPreload = null; }
   }).catch(error => renderReadOnly('Resume capability could not be loaded: ' + (error.message || error)));
@@ -1285,8 +1555,7 @@ async function paintBody(body) {
   const d = currentSession;
   if (!d) return;
   try {
-    const full = await api('/api/session/event?runtime=' + encodeURIComponent(d.runtime) +
-      '&id=' + encodeURIComponent(d.id) + '&seq=' + encodeURIComponent(body.dataset.seq));
+    const full = await fullTranscriptEvent(d, body.dataset.seq);
     if (full.available && full.text) {
       // Replace ONLY the arguments half. The fetch returns this one event — the
       // tool_call's arguments — but the paired tool_result was appended
@@ -1310,6 +1579,11 @@ async function paintBody(body) {
   }
 }
 
+function fullTranscriptEvent(session, seq) {
+  return api('/api/session/event?runtime=' + encodeURIComponent(session.runtime) +
+    '&id=' + encodeURIComponent(session.id) + '&seq=' + encodeURIComponent(seq));
+}
+
 // One delegated listener rather than one per chip: a session can hold hundreds.
 document.addEventListener('toggle', e => {
   const det = e.target;
@@ -1319,6 +1593,32 @@ document.addEventListener('toggle', e => {
 }, true);
 
 const TRANSCRIPT_WINDOW_EVENTS = 500;
+const transcriptRenderStates = new WeakMap();
+
+function resetTranscriptRenderState(log) {
+  const state = { groups: [], currentGroup: null, calls: createCallPairing() };
+  transcriptRenderStates.set(log, state);
+  return state;
+}
+
+// A replaced tail removes rows from the log; the state must stop counting their
+// groups, appending into them, or pairing a re-delivered result with their calls.
+function pruneTranscriptRenderState(log) {
+  const state = transcriptRenderStates.get(log);
+  if (!state) return;
+  state.groups = state.groups.filter(group => group.details.parentNode === log);
+  if (!state.groups.includes(state.currentGroup)) state.currentGroup = null;
+  state.calls.close();
+}
+
+// A spoken turn ends the wait for a result: an interrupted call is not running.
+function closeWaitingCalls(state) {
+  for (const call of state.calls.close()) {
+    if (!call.item?.awaiting) continue;
+    call.item.awaiting = false;
+    labelHiddenGroup(call.item.group);
+  }
+}
 
 function transcriptWindowStart(events, target) {
   let start = Math.max(0, target);
@@ -1337,7 +1637,8 @@ function renderTranscript(log, events, resolveReference = refs.resolve,
   const profile = options.profile || null;
   if (options.windowed === false || source.length <= TRANSCRIPT_WINDOW_EVENTS) {
     log.replaceChildren();
-    appendTranscriptEvents(log, source, resolveReference, projectRoot, profile);
+    resetTranscriptRenderState(log);
+    appendTranscriptEvents(log, source, resolveReference, projectRoot, profile, options.keyPrefix || '');
     return;
   }
   const paint = (start, preserveAnchor = false) => {
@@ -1345,6 +1646,7 @@ function renderTranscript(log, events, resolveReference = refs.resolve,
     const beforeHeight = preserveAnchor ? log.scrollHeight : 0;
     const beforeTop = preserveAnchor && scroller ? scroller.scrollTop : 0;
     log.replaceChildren();
+    resetTranscriptRenderState(log);
     if (start > 0) {
       const control = el('div', 'transcript-window-control');
       const loadOlder = el('button', 'btn', 'Load older · ' + start + ' events hidden');
@@ -1355,7 +1657,8 @@ function renderTranscript(log, events, resolveReference = refs.resolve,
       control.appendChild(loadOlder);
       log.appendChild(control);
     }
-    appendTranscriptEvents(log, source.slice(start), resolveReference, projectRoot, profile);
+    appendTranscriptEvents(log, source.slice(start), resolveReference, projectRoot, profile, options.keyPrefix || '');
+    document.dispatchEvent(new CustomEvent('cg:transcript-hidden-changed'));
     if (preserveAnchor && scroller) {
       const delta = log.scrollHeight - beforeHeight;
       scroller.scrollTop = beforeTop + delta;
@@ -1372,7 +1675,7 @@ const ROW_CHIP_LABELS = {
   assistant: () => 'Agent',
   summary: () => 'summary',
   system: ev => 'system · ' + (ev.name || ''),
-  context: ev => 'context · ' + (ev.name || ''),
+  context: ev => 'context · ' + contextRowName(ev),
   other: ev => ev.name || 'other',
 };
 
@@ -1390,76 +1693,202 @@ function rowChip(ev) {
   return det;
 }
 
-// A hidden row is never silent: consecutive hidden rows share one count that
-// draws them in place when pressed.
-const hiddenRuns = new WeakMap();
+// The first disclosure is a lightweight list of activity; payloads stay lazy
+// until a reader opens an individual item. It never evaluates profile rules.
+function labelHiddenGroup(group) {
+  const pending = group.items.some(item => item.awaiting);
+  group.summary.textContent = hiddenActivityLabel(group.kind, group.items.length, pending);
+}
 
-function appendHiddenRow(log, ev, resolveReference, projectRoot) {
-  let control = log.lastElementChild;
-  if (!control || !hiddenRuns.has(control)) {
-    control = el('button', 'btn transcript-hidden');
-    hiddenRuns.set(control, []);
-    const run = hiddenRuns.get(control);
-    control.onclick = () => {
-      const drawn = el('div');
-      appendTranscriptEvents(drawn, run, resolveReference, projectRoot, null);
-      control.replaceWith(...drawn.childNodes);
-    };
-    log.appendChild(control);
+function appendHiddenPart(item, event, label, resolveReference) {
+  const part = el('div', 'transcript-activity-part');
+  part.appendChild(el('div', 'transcript-activity-part-label', label));
+  const body = lazyBody(event.text || '', event);
+  part.appendChild(body);
+  item.parts.appendChild(part);
+  paintHiddenPart(body, event, label.toLowerCase(), resolveReference, item.session);
+}
+
+async function paintHiddenPart(body, event, label, resolveReference, session) {
+  if (body.dataset.fetched === '1') return;
+  body.dataset.fetched = '1';
+  const render = value => { body.innerHTML = linkify(event.kind === 'tool_call' ? decodePayload(value) : value, resolveReference); };
+  render(event.text || '');
+  if (!event.full_len || event.full_len <= (event.text || '').length) return;
+  try {
+    if (!session) throw new Error('session is no longer open');
+    const full = await fullTranscriptEvent(session, event.seq);
+    if (full.available) { render(full.text || ''); return; }
+    body.appendChild(el('div', 'sub', full.note || 'Full ' + label + ' text is unavailable'));
+  } catch (error) {
+    body.appendChild(el('div', 'sub', 'Showing clipped ' + label + ': ' + (error.message || error)));
   }
-  const run = hiddenRuns.get(control);
-  run.push(ev);
-  control.textContent = hiddenUnits(run) + ' hidden';
+}
+
+function mountHiddenItem(group, item, resolveReference, projectRoot) {
+  const details = document.createElement('details');
+  details.className = 'transcript-activity-item';
+  const summary = el('summary');
+  const ev = item.event;
+  if (ev.kind === 'tool_call') {
+    summary.appendChild(el('span', 'tname', ev.name || 'tool'));
+    const peek = el('span', 'tpeek');
+    peek.innerHTML = linkify(toolPeek(ev.text, projectRoot), resolveReference);
+    summary.appendChild(peek);
+  } else {
+    // A context row is named by what it is (the handoff, or the hook event that added it).
+    summary.appendChild(el('span', 'tname', ev.kind === 'tool_result' ? 'Result' : (ev.kind === 'context' ? 'context · ' + contextRowName(ev) : ev.name || ev.kind)));
+    summary.appendChild(el('span', 'tpeek', rowPeek(ev.text)));
+  }
+  item.parts = el('div', 'transcript-activity-parts');
+  details.append(summary, item.parts);
+  item.node = details;
+  item.session = group.session;
+  const identity = ev.turn_anchor ? 'anchor:' + ev.turn_anchor
+    : (Number(ev.seq) ? group.keyPrefix + 'seq:' + Number(ev.seq) : '');
+  if (identity) details.dataset.transcriptKey = identity;
+  applyTranscriptDecorators(ev, details, { kind: ev.kind, projectRoot, resolveReference, session: group.session });
+  details.addEventListener('toggle', () => paintHiddenItem(item, resolveReference));
+  group.list.appendChild(details);
+}
+
+// A result may arrive after this item was opened and closed. Mount each part
+// independently so reopening catches up and a queued toggle never duplicates it.
+function paintHiddenItem(item, resolveReference) {
+  if (!item.node?.open) return;
+  if (!item.drawn) {
+    item.drawn = true;
+    appendThoughtDuration(item.parts, item.event);
+    appendHiddenPart(item, item.event, item.event.kind === 'tool_call' ? 'Call' : 'Transcript', resolveReference);
+  }
+  if (item.result && !item.resultDrawn) {
+    item.resultDrawn = true;
+    appendHiddenPart(item, item.result, 'Result', resolveReference);
+  }
+}
+
+// call is the hidden call this result answers, when there is one. A call is
+// labelled as running only when it arrived live and its result has not.
+function appendHiddenRow(log, ev, state, call, live, resolveReference, projectRoot, keyPrefix) {
+  if (call?.item) {
+    const item = call.item;
+    item.result = ev;
+    item.awaiting = false;
+    labelHiddenGroup(item.group);
+    paintHiddenItem(item, resolveReference);
+    return;
+  }
+  const kind = hiddenActivityKind(ev);
+  let group = state.currentGroup;
+  if (!group || group.kind !== kind) {
+    const details = document.createElement('details');
+    details.className = 'transcript-activity-group';
+    const summary = el('summary');
+    const list = el('div', 'transcript-activity-list');
+    details.append(summary, list);
+    group = { kind, details, summary, list, items: [], mounted: false, keyPrefix,
+      session: log.effortSession || currentSession };
+    details.addEventListener('toggle', () => {
+      if (details.open && !group.mounted) {
+        group.mounted = true;
+        group.items.forEach(item => mountHiddenItem(group, item, resolveReference, projectRoot));
+      }
+      document.dispatchEvent(new CustomEvent('cg:transcript-hidden-changed'));
+    });
+    log.appendChild(details);
+    state.groups.push(group);
+    state.currentGroup = group;
+  }
+  const item = { event: ev, group, result: null, awaiting: false, node: null, drawn: false, resultDrawn: false, parts: null };
+  if (ev.kind === 'tool_call') {
+    item.awaiting = live;
+    state.calls.call({ display: 'hidden', item });
+  }
+  group.items.push(item);
+  labelHiddenGroup(group);
+  if (group.mounted) mountHiddenItem(group, item, resolveReference, projectRoot);
+}
+
+function appendConversationMessage(log, ev, resolveReference) {
+  if (ev.kind === 'user') {
+    const m = el('div', 'msg user');
+    if (ev.ts) m.appendChild(el('div', 'hd', 'You · ' + fmtTime(ev.ts)));
+    // linkify escapes human text before inserting markup (impl-plan R1).
+    const bubble = el('div', 'bubble');
+    bubble.innerHTML = linkify(ev.text || '', resolveReference);
+    m.appendChild(bubble);
+    log.appendChild(m);
+    return;
+  }
+  const m = el('div', 'msg agent');
+  m.appendChild(mkMark());
+  const md = el('div', 'md');
+  md.innerHTML = mdToHtml(ev.text || '', resolveReference);
+  m.appendChild(md);
+  log.appendChild(m);
+}
+
+function appendToolTranscriptRow(log, ev, state, call, resolveReference, projectRoot) {
+  if (ev.kind === 'tool_call') {
+    const det = document.createElement('details'); det.className = 'toolchip';
+    const sum = el('summary');
+    sum.append('⚙ ');
+    sum.appendChild(el('span', 'tname', ev.name || 'tool'));
+    const peek = el('span', 'tpeek');
+    peek.innerHTML = ' ' + linkify(toolPeek(ev.text, projectRoot), resolveReference);
+    sum.appendChild(peek);
+    det.append(sum, lazyBody(ev.text || '', ev));
+    log.appendChild(det);
+    state.calls.call({ display: 'shown', chip: det });
+    return;
+  }
+  if (call?.chip) {
+    const body = call.chip.querySelector('.tbody');
+    body.dataset.raw = (body.dataset.raw || '') + RESULT_SEP + (ev.text || '');
+    // A clipped Write argument may lose its path; recover the peek from the result.
+    relabelPeekFromResult(call.chip, ev.text || '', projectRoot, resolveReference);
+    paintBody(body);
+    return;
+  }
+  const line = el('div', 'sysline');
+  line.innerHTML = '⚙ result: ' + linkify((ev.text || '').slice(0, 200), resolveReference);
+  log.appendChild(line);
+}
+
+function appendThoughtDuration(log, ev) {
+  // Duration sits immediately before the row it describes.
+  if (Number(ev.thought_ms) > 0) {
+    log.appendChild(el('div', 'thought-line', 'thought for ' + humanDuration(Math.round(Number(ev.thought_ms) / 1000))));
+  }
 }
 
 // appendTranscriptEvents maps canonical events to chat-style DOM: agent prose
 // is the page's primary text (no box), user turns keep the composer bubble,
 // tools/thinking collapse to chips, and system lines stay quiet. A view profile
 // may fold or hide rows; with none, every row is drawn.
-function appendTranscriptEvents(log, events, resolveReference, projectRoot, profile = null) {
-  let lastTool = null, previousTool = '';
+// live marks events that arrived while this view was open.
+function appendTranscriptEvents(log, events, resolveReference, projectRoot, profile = null, keyPrefix = '', live = false) {
+  const state = transcriptRenderStates.get(log) || resetTranscriptRenderState(log);
   for (const ev of events) {
-    const display = followingDisplay(ev, profile, previousTool);
+    if (ev.kind === 'user' || ev.kind === 'assistant') closeWaitingCalls(state);
+    // Results answer calls in arrival order, so calls fired together keep their own.
+    const answers = ev.kind === 'tool_result';
+    const display = followingDisplay(ev, profile, answers ? state.calls.peek()?.display || '' : '');
+    const call = answers ? state.calls.result() : null;
     if (display === HIDE) {
-      appendHiddenRow(log, ev, resolveReference, projectRoot);
-      if (ev.kind === 'tool_call') { lastTool = null; previousTool = 'hidden'; }
-      if (ev.kind === 'tool_result') previousTool = '';
+      appendHiddenRow(log, ev, state, call, live, resolveReference, projectRoot, keyPrefix);
       continue;
     }
-    previousTool = ev.kind === 'tool_call' ? 'shown' : '';
-    // A thought's duration renders where the thought sat: on the block that
-    // followed a signature-only thought, or on the thought itself when the
-    // vendor supplied its summary. The daemon omits durations under the
-    // configured minimum, so anything present is worth a line. Appended before
-    // priorRow is captured so the decorator seam still keys on the row itself.
-    if (Number(ev.thought_ms) > 0) {
-      log.appendChild(el('div', 'thought-line', 'thought for ' + humanDuration(Math.round(Number(ev.thought_ms) / 1000))));
-    }
+    state.currentGroup = null;
+    appendThoughtDuration(log, ev);
     const priorRow = log.lastElementChild;
     if (display === COLLAPSE && ROW_CHIP_LABELS[ev.kind]) {
       log.appendChild(rowChip(ev));
     } else switch (ev.kind) {
-      case 'user': {
-        const m = el('div', 'msg user');
-        if (ev.ts) m.appendChild(el('div', 'hd', 'You · ' + fmtTime(ev.ts)));
-        // A reference a HUMAN typed is a reference too (§3), so user turns are
-        // linkified as well. linkify escapes before it injects anything — this
-        // must never become a bare innerHTML of transcript text (impl-plan R1).
-        const bubble = el('div', 'bubble');
-        bubble.innerHTML = linkify(ev.text || '', resolveReference);
-        m.appendChild(bubble);
-        log.appendChild(m);
+      case 'user':
+      case 'assistant':
+        appendConversationMessage(log, ev, resolveReference);
         break;
-      }
-      case 'assistant': {
-        const m = el('div', 'msg agent');
-        m.appendChild(mkMark()); // our checkpoint mark — never a vendor glyph (chat.js does the same)
-        const md = el('div', 'md');
-        md.innerHTML = mdToHtml(ev.text || '', resolveReference);
-        m.appendChild(md);
-        log.appendChild(m);
-        break;
-      }
       case 'thinking': {
         if (!hasRenderableText(ev.text)) break;
         const det = document.createElement('details'); det.className = 'thinkchip';
@@ -1468,48 +1897,16 @@ function appendTranscriptEvents(log, events, resolveReference, projectRoot, prof
         log.appendChild(det);
         break;
       }
-      case 'tool_call': {
-        const det = document.createElement('details'); det.className = 'toolchip';
-        const sum = el('summary');
-        sum.append('⚙ ');
-        sum.appendChild(el('span', 'tname', ev.name || 'tool'));
-        // The collapsed summary is what you SEE without expanding, and in an
-        // agent transcript it is usually the file being read or written — so it
-        // has to be linkified too, not just the body.
-        const peek = el('span', 'tpeek');
-        peek.innerHTML = ' ' + linkify(toolPeek(ev.text, projectRoot), resolveReference);
-        sum.appendChild(peek);
-        det.appendChild(sum);
-        det.appendChild(lazyBody(ev.text || '', ev));
-        log.appendChild(det);
-        lastTool = det;
+      case 'tool_call':
+      case 'tool_result':
+        appendToolTranscriptRow(log, ev, state, call, resolveReference, projectRoot);
         break;
-      }
-      case 'tool_result': {
-        if (lastTool) {
-          const body = lastTool.querySelector('.tbody');
-          body.dataset.raw = (body.dataset.raw || '') + RESULT_SEP + (ev.text || '');
-          // Last resort for the peek: a Write whose `content` precedes
-          // `file_path` in the JSON has its path clipped away entirely, so the
-          // arguments genuinely do not contain it — but the RESULT names the
-          // file it wrote. Recover the label from there rather than leaving the
-          // chip showing a JSON brace.
-          relabelPeekFromResult(lastTool, ev.text || '', projectRoot, resolveReference);
-          paintBody(body); // no-op while collapsed; refreshes if already open
-          lastTool = null;
-        } else {
-          const line = el('div', 'sysline');
-          line.innerHTML = '⚙ result: ' + linkify((ev.text || '').slice(0, 200), resolveReference);
-          log.appendChild(line);
-        }
-        break;
-      }
       case 'summary':
         log.appendChild(el('div', 'sysline', '§ ' + (ev.text || '')));
         break;
       case 'context': {
         const line = el('div', 'sysline context-line');
-        line.append(el('span', 'rowchip-label', 'context · ' + (ev.name || '') + ' '), ev.text || '');
+        line.append(el('span', 'rowchip-label', 'context · ' + contextRowName(ev) + ' '), ev.text || '');
         log.appendChild(line);
         break;
       }
@@ -1525,7 +1922,10 @@ function appendTranscriptEvents(log, events, resolveReference, projectRoot, prof
     // appended row; a merged tool_result adds no row, so nothing re-fires.
     const rowEl = log.lastElementChild;
     if (rowEl && rowEl !== priorRow) {
-      applyTranscriptDecorators(ev, rowEl, { kind: ev.kind, projectRoot, resolveReference });
+      const identity = ev.turn_anchor ? 'anchor:' + ev.turn_anchor
+        : (Number(ev.seq) ? keyPrefix + 'seq:' + Number(ev.seq) : '');
+      if (identity) rowEl.dataset.transcriptKey = identity;
+      applyTranscriptDecorators(ev, rowEl, { kind: ev.kind, projectRoot, resolveReference, session: log.effortSession });
     }
   }
 }
@@ -1547,111 +1947,6 @@ function renderEvent(ev) {
   return wrap;
 }
 
-/* ---------- handoff composer (the product verb) ----------
-   `d` needs only { runtime, id }; pass the HARVEST id rather than a resume handle
-   (LoadSession accepts either today, but only the harvest id is guaranteed to
-   address the record). `liveTurns` is how many turns the caller
-   sent in this console since the session was opened; they are not in the harvest
-   the extract is generated from, so they are declared rather than dropped
-   silently (INV-21). */
-async function renderHandoffComposer(d, liveTurns, target) {
-  const main = $('#main');
-  await withState(main, mkLoader('Generating handoff from ' + d.runtime + ' session…'),
-    () => api(`/api/handoff/generate?runtime=${d.runtime}&id=${encodeURIComponent(d.id)}`),
-    draft => {
-      main.innerHTML = '';
-      main.appendChild(el('h2', '', 'Continue in… — handoff composer'));
-      const sub = el('div', 'sub');
-      sub.append('Source: ', el('span', 'chip ' + d.runtime, d.runtime), ' ' + draft.session_ref +
-        ' — mechanical extract with [runtime/session#seq] anchors. Edit before publishing; the human edit IS the quality gate.');
-      main.appendChild(sub);
-
-      // Coverage: state the boundary of what the extract can contain. The
-      // generator reads the harvested record, so turns sent in this console
-      // since the session was opened are not in it.
-      const cov = el('div', 'banner');
-      if (liveTurns > 0) {
-        cov.style.borderLeftColor = 'var(--warn)';
-        cov.textContent = 'Coverage: generated from the harvested session record. '
-          + liveTurns + ' turn(s) you sent in this console are not yet harvested and are NOT included below — '
-          + 'paste anything you still need before publishing.';
-      } else {
-        cov.textContent = 'Coverage: generated from the harvested session record.';
-      }
-      main.appendChild(cov);
-
-      const back = el('button', 'btn', '◂ Back to session');
-      back.onclick = () => openSession(d, null);
-      main.appendChild(back);
-
-      const ta = el('textarea');
-      ta.value = draft.markdown;
-      ta.style.cssText = 'width:100%;max-width:900px;height:46vh;margin:12px 0;font-family:var(--mono);font-size:12px;line-height:1.5;';
-      main.appendChild(ta);
-
-      const row1 = el('div', 'row');
-      const dir = el('input'); dir.value = draft.suggested_dir; dir.style.width = '420px';
-      row1.append(lblWrap('publish into directory', dir));
-      main.appendChild(row1);
-
-      const row2 = el('div', 'row');
-      const mk = (label, checked, title) => {
-        const c = el('input'); c.type = 'checkbox'; c.checked = checked; c.title = title || '';
-        const l = el('label', '', ' ' + label);
-        row2.append(c, l);
-        return c;
-      };
-      const cbIgnore = mk('git-ignore .crossing-guard/', true, 'Governance default: keep the handoff out of git history');
-      const cbClaude = mk('CLAUDE.md block', true, 'Claude Code auto-loads CLAUDE.md — this is the proven crosscarry rail');
-      const cbAgents = mk('AGENTS.md block', true, 'Codex auto-loads AGENTS.md');
-      main.appendChild(row2);
-      main.appendChild(el('div', 'banner',
-        'Governance: .crossing-guard/handoff.md is git-ignored by default, but CLAUDE.md / AGENTS.md blocks are NOT — a committed handoff is effectively undeletable (git history). Review content before committing.'));
-
-      const pub = el('button', 'btn primary', 'Publish handoff');
-      const out = el('div'); out.style.marginTop = '12px';
-      pub.onclick = async () => {
-        pub.disabled = true; pub.textContent = 'Publishing…';
-        out.innerHTML = '';
-        try {
-          const res = await api('/api/handoff/publish', { method: 'POST', body: JSON.stringify({
-            dir: dir.value.trim(), markdown: ta.value,
-            gitignore: cbIgnore.checked, write_claude: cbClaude.checked, write_agents: cbAgents.checked,
-          })});
-          const okBox = el('div', 'banner'); okBox.style.borderLeftColor = 'var(--ok)';
-          okBox.append('Published ✓', document.createElement('br'));
-          for (const p of res.written) { okBox.append('· ' + p, document.createElement('br')); }
-          out.appendChild(okBox);
-          for (const n of (res.notes || [])) out.appendChild(el('div', 'banner', '⚠ ' + n));
-          const next = el('div', 'banner');
-          next.style.borderLeftColor = 'var(--accent2)';
-          next.textContent = 'Next session picks it up automatically: cd ' + dir.value.trim() + ' && claude   (or codex) — both auto-load their context file.';
-          out.appendChild(next);
-          // console-design §6.2: the gate "generates a handoff you review before
-          // it is written, and only then starts the target session." Publishing
-          // and stopping stranded the user on this screen.
-          if (target) {
-            const go = el('button', 'btn primary', 'Start the ' + target + ' session →');
-            go.style.marginTop = '10px';
-            go.onclick = () => {
-              setDefaults({ ...getDefaults(), runtime: target, cwd: dir.value.trim() });
-              document.dispatchEvent(new CustomEvent('cg:continue', { detail: { fresh: true } }));
-            };
-            out.appendChild(go);
-            out.appendChild(el('div', 'sub',
-              'Starts a new ' + target + ' session in ' + dir.value.trim()
-              + '. It carries the handoff you just published — not this session\'s history.'));
-          }
-        } catch (err) {
-          out.appendChild(el('div', 'banner', '✖ ' + (err.message || err)));
-        }
-        pub.disabled = false; pub.textContent = 'Publish handoff';
-      };
-      main.appendChild(pub);
-      main.appendChild(out);
-    });
-}
-
 // the audit evidence for ONE session, rendered on the session detail (design gap
 // named: clicking a finding must land you where the evidence is, not just the transcript).
 export async function loadExposure(box, badge, runtime, id) {
@@ -1659,19 +1954,17 @@ export async function loadExposure(box, badge, runtime, id) {
     const e = await api('/api/audit/session?runtime=' + encodeURIComponent(runtime)
       + '&id=' + encodeURIComponent(id));
     if (box) renderExposure(box, e); // box may be null: badge-only fill (card lives in the panel provider)
+    // The header chip shows a finding only. "No detector matched" is a weak
+    // negative, and saying it in prime space reads as a clean bill; it lives
+    // with the evidence instead (session.impact, Data and secrets).
     if (badge) {
       const n = (e.matched || []).length;
-      if (e.watermark) {
-        badge.textContent = '⚠ ' + e.watermark + (n ? ' · ' + n + ' rule' + (n > 1 ? 's' : '') : '');
-        badge.style.color = 'var(--bad)';
-      } else {
-        badge.textContent = '○ no data-class (weak neg.)';
-      }
-      badge.style.cursor = 'default';
+      badge.hidden = !e.watermark;
+      if (e.watermark) badge.textContent = '⚠ ' + e.watermark + (n ? ' · ' + n + ' rule' + (n > 1 ? 's' : '') : '');
     }
   } catch {
     if (box) box.replaceChildren(el('div', 'evidence-state', 'Request failed'), el('div', 'sub', 'Data and secret evidence could not be loaded.'));
-    if (badge) badge.textContent = '';
+    if (badge) badge.hidden = true;
   }
 }
 export function renderExposure(box, e) {
@@ -1689,10 +1982,17 @@ export function renderExposure(box, e) {
       const line = el('div', 'evidence-exposure-row');
       line.append(el('span', 'chip ' + (SEV_CHIP[m.severity] || 'st-draft'), m.severity || '?'),
         el('code', '', m.rule || '?'), el('span', 'sub', m.message || ''));
+      if (m.absent && m.absent.length) line.appendChild(el('span', 'sub', ' · absent: ' + m.absent.join(', ')));
       box.appendChild(line);
     });
   } else {
     box.appendChild(el('div', 'sub', 'No declared detector matched · weak negative'));
+  }
+  if (e.agent_state === 'unavailable') {
+    box.appendChild(el('div', 'sub', 'Agent tags could not be read · rules on agent: tags were not evaluated'));
+  }
+  if (e.rules_not_fully_audited > 0) {
+    box.appendChild(el('div', 'sub', e.rules_not_fully_audited + ' armed rule(s) read the command, tool or target of one call and are only partly audited here'));
   }
   if (e.tags && e.tags.length) {
     const tw = el('div'); tw.style.cssText = 'margin-top:6px';
@@ -1711,10 +2011,31 @@ configureViewList({ onSelect: () => { clearBar(); renderRail(); }, onEdit: loadV
 configureQueryBar({ renderRail });
 configureRailSelection({ onTagged: repaintTaggedRows });
 configureHeaderTags({ onSessionChanged: repaintTaggedRows });
-api('/api/console/config').then(found => {
-  const organization = found?.config?.session_organization || {};
-  configureViewList({ settings: { viewsVisible: organization.views_visible, countRefreshMs: organization.count_refresh_ms } });
-  configureHeaderTags({ recentTagToggles: organization.recent_tag_toggles });
-}).catch(() => {});
+// readOrganization reads the rail's published settings and applies them. A read
+// that fails is forgotten, so the next caller reads again: the Handoffs group asks
+// through this until it has its cadence.
+let organizationRead = null;
+function readOrganization() {
+  organizationRead ||= api('/api/console/config').then(found => {
+    const organization = found?.config?.session_organization || {};
+    configureViewList({ settings: { viewsVisible: organization.views_visible, countRefreshMs: organization.count_refresh_ms } });
+    configureHeaderTags({ recentTagToggles: organization.recent_tag_toggles });
+    return { countRefreshMs: organization.count_refresh_ms, endedVisible: organization.handoffs_ended_visible };
+  }).catch(error => { organizationRead = null; throw error; });
+  return organizationRead;
+}
+configureHandoffRail({ readSettings: readOrganization });
 
-export { openSession, renderSessionList, renderRail, renderTranscript, renderHandoffComposer };
+// Settings › Views sends cg:view-select before cg:nav. Navigating alone would
+// restore this pinned pane from cache without a repaint (app.js FRESH
+// policy), so the view would never show; selectView's state change would sit
+// under stale DOM and a stale filter bar. The listener mirrors what a click
+// on the view's own rail row does. clearBar first: an un-cleared bar would
+// override the view (query-bar's activeQuery precedence).
+document.addEventListener('cg:view-select', event => {
+  clearBar();
+  selectView(String(event.detail || ''));
+  renderRail();
+});
+
+export { openSession, renderSessionList, renderRail, renderTranscript };

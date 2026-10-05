@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:session-checkpoint-fact:1.0",
+  "title": "A session checkpoint's facts \u2014 identity, class, revisions, and digests; never a body or an absolute path",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "device_id",
+    "session_id",
+    "kind",
+    "status",
+    "boundary_class",
+    "repository_id",
+    "requested_at",
+    "ended_at",
+    "revision",
+    "failure_kind",
+    "detail_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "attachment",
+        "pre-mutation",
+        "settled",
+        "pre-verification",
+        "pre-commit",
+        "closing",
+        "timeout"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "failed",
+        "unavailable"
+      ]
+    },
+    "boundary_class": {
+      "type": "string",
+      "enum": [
+        "direct-pre-release",
+        "late-replay",
+        "unconfirmed",
+        "settled",
+        "point-in-time",
+        "exact-close"
+      ]
+    },
+    "repository_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 255
+    },
+    "requested_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "ended_at": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "revision": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "evidence_class",
+            "base",
+            "head",
+            "snapshot_digest",
+            "source_digest",
+            "verification_result",
+            "items"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "declaration",
+                "revision",
+                "implementation",
+                "verification"
+              ]
+            },
+            "evidence_class": {
+              "type": "string",
+              "enum": [
+                "claimed",
+                "observed"
+              ]
+            },
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "head": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "snapshot_digest": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "source_digest": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "verification_result": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "failure_kind": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "detail_digest": {
+      "type": "string",
+      "maxLength": 128
+    }
+  }
+}

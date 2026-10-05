@@ -10,6 +10,7 @@ import (
 
 	"crossing-guard/harvest"
 	"crossing-guard/internal/sessionactivity"
+	"crossing-guard/internal/sessionquery"
 	"crossing-guard/store"
 )
 
@@ -23,27 +24,49 @@ const (
 type sessionRepository struct {
 	// Label is set only where Key is not fit to show as written (a tag group's
 	// key is case-folded); the browser shows Label when present, else Key.
-	Label      string    `json:"label,omitempty"`
-	Key        string    `json:"key"`
-	LaunchCwd  string    `json:"launch_cwd,omitempty"`
-	Total      int       `json:"total"`
-	OpenTotal  int       `json:"open_total"`
-	Newest     time.Time `json:"newest"`
-	NewestOpen time.Time `json:"newest_open,omitempty"`
+	Label                string    `json:"label,omitempty"`
+	Key                  string    `json:"key"`
+	LaunchCwd            string    `json:"launch_cwd,omitempty"`
+	Total                int       `json:"total"`
+	OpenTotal            int       `json:"open_total"`
+	PresenceUnknownTotal int       `json:"presence_unknown_total,omitempty"`
+	Newest               time.Time `json:"newest"`
+	NewestOpen           time.Time `json:"newest_open,omitempty"`
 }
 
 type sessionRailResponse struct {
-	Activity        sessionactivity.Capability `json:"activity"`
-	RepositoryTotal int                        `json:"repository_total"`
-	Repositories    []sessionRepository        `json:"repositories"`
+	Activity        sessionactivity.Capability   `json:"activity"`
+	RepositoryTotal int                          `json:"repository_total"`
+	Repositories    []sessionRepository          `json:"repositories"`
+	RuntimeHealth   []harvest.RuntimeScanOutcome `json:"runtime_health,omitempty"`
+	// ChangeEvidenceProblem says why sessions known only from recorded change
+	// evidence are missing from this answer (the store could not be read);
+	// absent when the store was read or does not exist yet.
+	ChangeEvidenceProblem string `json:"change_evidence_problem,omitempty"`
 	// GroupBy is set when the groups are not repositories (a filtered rail may
 	// group by runtime or by one of the owner's tag keys).
 	GroupBy string `json:"group_by,omitempty"`
 	// ViewCounts answers counts=1: sessions per saved view, by view id. A view
 	// that cannot be counted truthfully is absent rather than approximated.
 	ViewCounts map[string]int `json:"view_counts,omitempty"`
+	// QueryNotes are the query's own notes (sessionquery.Query.Notes) over
+	// the tags this read bound it against. ViewNotes answer counts=1 beside
+	// ViewCounts: notes per saved view, by view id. Neither is sent when the
+	// tags could not be read in full.
+	QueryNotes []sessionquery.Note            `json:"query_notes,omitempty"`
+	ViewNotes  map[string][]sessionquery.Note `json:"view_notes,omitempty"`
 	// MoreTextMatches: see sessionGroupPageResponse.
 	MoreTextMatches bool `json:"more_text_matches,omitempty"`
+	// PlacementCounts and PlacementNotes answer a board_view read of a board
+	// that has placement rules: per rule, in the view's order, how many of
+	// the view's sessions the rule placed; and the notes on the rules' queries.
+	PlacementCounts []int            `json:"placement_counts,omitempty"`
+	PlacementNotes  []boardRuleNotes `json:"placement_notes,omitempty"`
+	// MatchTotal answers a filtered read: how many sessions the query matched,
+	// before grouping and the group limit. It is absent when the number would
+	// not hold, under the rule ViewCounts follows: a query that is not durable,
+	// or tags read in part. A pointer, so "matched none" is 0 and not absent.
+	MatchTotal *int `json:"match_total,omitempty"`
 }
 
 type sessionPageResponse struct {
@@ -60,12 +83,26 @@ type sessionPageResponse struct {
 	// sessions only). Only parents present on this page carry entries.
 	// Decorated at the daemon layer so harvest stays orchestration-free.
 	AgentChildren map[string][]agentChildSession `json:"agent_children,omitempty"`
+	// NativeChildren folds native (vendor-observed) subagent sessions under
+	// their parent rail row, keyed by the parent's session id. Provenance is
+	// separate from AgentChildren (caused) — the two classes never merge
+	// (native-session-lineage-plan §3).
+	NativeChildren map[string][]nativeChildSession `json:"native_children,omitempty"`
 }
 
 // agentChildSession is one agent session folded under its parent rail row.
 type agentChildSession struct {
 	SessionSummary
 	AgentRole string `json:"agent_role"`
+}
+
+// nativeChildSession is one native subagent session folded under its parent
+// rail row. NativeRole is the vendor-published role label; NativeKind the
+// vendor-neutral lineage kind.
+type nativeChildSession struct {
+	SessionSummary
+	NativeRole string `json:"native_role"`
+	NativeKind string `json:"native_kind"`
 }
 
 func handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -96,9 +133,12 @@ func handleSessionsWith(w http.ResponseWriter, r *http.Request, scan func() []Se
 		if len(groups) > limit {
 			groups = groups[:limit]
 		}
+		views := requestedViewCounts(r, sessions, presence)
 		writeJSON(w, sessionRailResponse{
 			Activity: presence.Capability, RepositoryTotal: total, Repositories: groups,
-			ViewCounts: requestedViewCounts(r, sessions, presence),
+			RuntimeHealth:         sessionScanCoalescer.runtimeHealth(),
+			ChangeEvidenceProblem: sessionScanCoalescer.changeEvidenceProblem(),
+			ViewCounts:            views.Counts, ViewNotes: views.Notes,
 		})
 	case "group":
 		handleOrganizedGroup(w, r, scan, openSet)
@@ -172,6 +212,11 @@ func (p presenceOpenSet) isOpen(s SessionSummary) bool {
 }
 
 func buildSessionRepositories(sessions []SessionSummary, presence presenceOpenSet) []sessionRepository {
+	// Native subagents are excluded from the rail header count (RT2), matching
+	// the page Total. Caused-agent children were already absent from the page
+	// path but are NOT partitioned here — that pre-existing divergence is not
+	// widened by this change; native children are, to keep the new fold honest.
+	sessions = partitionNativeMainRows(sessions)
 	groups := map[string]*sessionRepository{}
 	for _, s := range sessions {
 		key := s.RepositoryKey
@@ -195,6 +240,8 @@ func buildSessionRepositories(sessions []SessionSummary, presence presenceOpenSe
 			if group.NewestOpen.IsZero() || s.Modified.After(group.NewestOpen) {
 				group.NewestOpen = s.Modified
 			}
+		} else if s.ActivityStatus == "unknown" {
+			group.PresenceUnknownTotal++
 		}
 	}
 	out := make([]sessionRepository, 0, len(groups))
@@ -220,10 +267,15 @@ func buildSessionRepositories(sessions []SessionSummary, presence presenceOpenSe
 	return out
 }
 
-// sessionIdentityAlternates returns one session row's exact identity forms:
-// artifact id, vendor meta id, vendor thread id (g4 plan §3 — the store keys
-// agent children by the TASK row's native id, which for codex is the thread
-// id, so every alternate must be offered; nothing is inferred).
+// sessionIdentityAlternates returns every id something about one session row
+// may be recorded under: artifact id, vendor meta id, vendor thread id (g4
+// plan §3 — the store keys agent children by the TASK row's native id, which
+// for codex is the thread id, so every alternate must be offered; nothing is
+// inferred). These are lookup keys, never a membership decision: a subagent
+// rollout carries its parent's thread id, which names the parent. Watching,
+// candidate lookup and agent-session classification keep all of them, because
+// a subagent's activity is recorded under that thread (child-thread-identity
+// plan D-1). Whatever must name the session itself uses sessionIdentities.
 func sessionIdentityAlternates(row SessionSummary) []string {
 	ids := make([]string, 0, 3)
 	for _, id := range []string{row.ID, row.MetaID, row.ThreadID} {
@@ -238,6 +290,21 @@ func sessionIdentityAlternates(row SessionSummary) []string {
 			}
 		}
 		if !duplicate {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// sessionIdentities returns the ids that name this session: the alternates
+// its runtime's MatchID accepts, its own artifact id first. A subagent
+// rollout's thread id names its parent, so it is left out; a primary keeps
+// every alternate it has.
+func sessionIdentities(row SessionSummary) []string {
+	alternates := sessionIdentityAlternates(row)
+	ids := make([]string, 0, len(alternates))
+	for _, id := range alternates {
+		if id == row.ID || harvest.MatchID(row, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -272,6 +339,18 @@ func partitionAgentSessions(rows []SessionSummary) ([]SessionSummary, map[string
 	return partitionAgentSessionsUsing(rows, agentSessionParentsRead(ids))
 }
 
+// agentParentOf says whether a session is a Crossing Guard agent's own
+// session (a managed run's child or a group's helper session) and whose,
+// matching any of the row's identity alternates.
+func agentParentOf(row SessionSummary, parents map[string]store.AgentSessionParent) (store.AgentSessionParent, bool) {
+	for _, id := range sessionIdentityAlternates(row) {
+		if parent, ok := parents[id]; ok {
+			return parent, true
+		}
+	}
+	return store.AgentSessionParent{}, false
+}
+
 // partitionAgentSessionsUsing is the fold itself, over parents the caller
 // already holds. The filtered rail reads every parent once for the whole list
 // instead of asking per 200 ids.
@@ -279,14 +358,7 @@ func partitionAgentSessionsUsing(rows []SessionSummary, parents map[string]store
 	if len(parents) == 0 {
 		return rows, nil
 	}
-	parentOf := func(row SessionSummary) (store.AgentSessionParent, bool) {
-		for _, id := range sessionIdentityAlternates(row) {
-			if parent, ok := parents[id]; ok {
-				return parent, true
-			}
-		}
-		return store.AgentSessionParent{}, false
-	}
+	parentOf := func(row SessionSummary) (store.AgentSessionParent, bool) { return agentParentOf(row, parents) }
 	main := make([]SessionSummary, 0, len(rows))
 	agents := make([]SessionSummary, 0)
 	rowIDByIdentity := map[string]string{}
@@ -297,7 +369,9 @@ func partitionAgentSessionsUsing(rows []SessionSummary, parents map[string]store
 			continue
 		}
 		main = append(main, row)
-		for _, id := range sessionIdentityAlternates(row) {
+		// A root id folds under the row it names: a newer subagent row also
+		// carries its parent's thread id, and must not take the parent's agents.
+		for _, id := range sessionIdentities(row) {
 			if _, taken := rowIDByIdentity[id]; !taken {
 				rowIDByIdentity[id] = row.ID
 			}
@@ -328,6 +402,109 @@ func partitionAgentSessionsUsing(rows []SessionSummary, parents map[string]store
 	return main, children
 }
 
+// isNativeChild is the one native-child predicate: a row whose own runtime
+// reports a parent (vendor-observed lineage). Shared by partitionNativeMainRows
+// and partitionNativeChildren so the header count and the page partition can
+// never disagree.
+func isNativeChild(row SessionSummary) bool {
+	facts, ok := harvest.Lineage(row)
+	return ok && facts.Parent.ID != "" && facts.Parent.Runtime == row.Runtime
+}
+
+// partitionNativeMainRows returns the non-native-child rows only, for the rail
+// header count. It shares the child test with partitionNativeChildren so the
+// header and page counts cannot disagree.
+func partitionNativeMainRows(rows []SessionSummary) []SessionSummary {
+	main := make([]SessionSummary, 0, len(rows))
+	for _, row := range rows {
+		if isNativeChild(row) {
+			continue
+		}
+		main = append(main, row)
+	}
+	return main
+}
+
+// partitionNativeChildren removes native (vendor-observed) subagent rows from
+// the pageable rows and folds each under its nearest top-level ancestor, keyed
+// by that ancestor's session id. Provenance stays separate from the caused
+// agent fold (partitionAgentSessionsUsing): a row the caused fold already
+// removed never reaches here, so the two maps are disjoint.
+//
+// Parent resolution walks parent_id up through child rows to the first
+// non-child row (RT1 depth-2), using separate non-child and child identity maps
+// so a child's own thread id — which equals its parent's thread id for codex —
+// can never shadow the parent.
+func partitionNativeChildren(rows []SessionSummary) ([]SessionSummary, map[string][]nativeChildSession) {
+	children := []SessionSummary{}
+	main := make([]SessionSummary, 0, len(rows))
+	parentID := map[string]bool{} // a child claims this identity as one of its alternates
+	nonChildRowID := map[string]string{}
+	// childByOwnID resolves a parent_id to the child whose OWN identity it names,
+	// keyed by MetaID (fallback ID) only — never ThreadID, which for codex equals
+	// the parent's thread id and would let a sibling shadow the absent parent (PW2).
+	childByOwnID := map[string]SessionSummary{}
+	for _, row := range rows {
+		if !isNativeChild(row) {
+			main = append(main, row)
+			for _, id := range sessionIdentityAlternates(row) {
+				if _, taken := nonChildRowID[id]; !taken {
+					nonChildRowID[id] = row.ID
+				}
+			}
+			continue
+		}
+		children = append(children, row)
+		for _, id := range sessionIdentityAlternates(row) {
+			parentID[id] = true
+		}
+		own := row.MetaID
+		if own == "" {
+			own = row.ID
+		}
+		childByOwnID[own] = row
+	}
+	if len(children) == 0 {
+		return rows, nil
+	}
+	// Map each child to its nearest top-level ancestor's row id, walking
+	// parent_id up through child rows.
+	childParentRowID := map[string]string{} // child row id -> top-level ancestor row id
+	for _, child := range children {
+		facts, _ := harvest.Lineage(child)
+		parent := facts.Parent.ID
+		seen := map[string]bool{}
+		for {
+			if rowID, ok := nonChildRowID[parent]; ok {
+				childParentRowID[child.ID] = rowID
+				break
+			}
+			if seen[parent] || !parentID[parent] {
+				break // orphan: parent resolves to no scanned non-child row
+			}
+			seen[parent] = true
+			next, ok := childByOwnID[parent]
+			if !ok {
+				break
+			}
+			nf, _ := harvest.Lineage(next)
+			parent = nf.Parent.ID
+		}
+	}
+	folded := map[string][]nativeChildSession{}
+	for _, child := range children {
+		rowID, ok := childParentRowID[child.ID]
+		if !ok {
+			continue
+		}
+		facts, _ := harvest.Lineage(child)
+		folded[rowID] = append(folded[rowID], nativeChildSession{
+			SessionSummary: child, NativeRole: facts.Role, NativeKind: facts.Kind,
+		})
+	}
+	return main, folded
+}
+
 func buildSessionPage(sessions []SessionSummary, presence presenceOpenSet, key, mode string, offset, limit int, selectedRuntime, selectedID string) (sessionPageResponse, bool) {
 	rows := make([]SessionSummary, 0)
 	found := false
@@ -350,6 +527,9 @@ func buildSessionPage(sessions []SessionSummary, presence presenceOpenSet, key, 
 	// pagination — the fold is an annotation of the parent, mode-invariant,
 	// and Total counts non-agent sessions only, so pager math stays flat.
 	main, children := partitionAgentSessions(rows)
+	// Native subagents fold the same way, after the caused fold, so a row the
+	// caused fold removed never reaches here (disjoint provenance, RT4).
+	main, nativeChildren := partitionNativeChildren(main)
 	if mode == "open" {
 		filtered := main[:0]
 		for _, s := range main {
@@ -368,6 +548,14 @@ func buildSessionPage(sessions []SessionSummary, presence presenceOpenSet, key, 
 			// fold expanded (g4 plan §3a) — never an unfindable selection.
 			if !match {
 				for _, child := range children[row.ID] {
+					if child.Runtime == selectedRuntime && (child.ID == selectedID || harvest.MatchID(child.SessionSummary, selectedID)) {
+						match = true
+						break
+					}
+				}
+			}
+			if !match {
+				for _, child := range nativeChildren[row.ID] {
 					if child.Runtime == selectedRuntime && (child.ID == selectedID || harvest.MatchID(child.SessionSummary, selectedID)) {
 						match = true
 						break
@@ -402,6 +590,17 @@ func buildSessionPage(sessions []SessionSummary, presence presenceOpenSet, key, 
 		}
 		if len(pageChildren) > 0 {
 			page.AgentChildren = pageChildren
+		}
+	}
+	if len(nativeChildren) > 0 {
+		pageNative := map[string][]nativeChildSession{}
+		for _, row := range page.Sessions {
+			if fold := nativeChildren[row.ID]; len(fold) > 0 {
+				pageNative[row.ID] = fold
+			}
+		}
+		if len(pageNative) > 0 {
+			page.NativeChildren = pageNative
 		}
 	}
 	if mode == "open" {

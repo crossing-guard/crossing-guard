@@ -366,12 +366,18 @@ func (c *lifecycleCoordinator) runScheduler() {
 	defer flushTicker.Stop()
 	defer sweepTicker.Stop()
 	c.safetySweep()
+	// The handoff owner's sweep rides this one, not the managed host's, so an armed
+	// brief is re-armed with no agent turned on (team rest-of-release plan §6.5).
+	// The pass at start-up re-arms a brief handed over by a daemon that died
+	// before confirming it.
+	handoffOpens.sweep(true)
 	for {
 		select {
 		case now := <-flushTicker.C:
 			c.admitDelayed(now)
 		case <-sweepTicker.C:
 			c.safetySweep()
+			handoffOpens.sweep(false)
 			// Parked-run relaunches ride the same sweep cadence
 			// (provider-outage plan Slice B): one bounded ladder pass —
 			// retry, chain advance, or leave parked — per sweep. Natural

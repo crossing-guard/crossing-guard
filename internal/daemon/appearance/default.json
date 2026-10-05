@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "id": "default",
+  "name": "Default",
+  "theme_dark": "dark",
+  "theme_light": "light",
+  "follow_os": true,
+  "ui_font": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+  "mono_font": "ui-monospace, SFMono-Regular, Menlo, monospace",
+  "text_size": 14,
+  "transcript_width": 880,
+  "chat_width": 860,
+  "type_steps": [
+    7,
+    8,
+    9,
+    10,
+    10.5,
+    11,
+    11.5,
+    12,
+    12.5,
+    13,
+    14,
+    15,
+    16,
+    17,
+    20
+  ]
+}

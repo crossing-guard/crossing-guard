@@ -140,6 +140,10 @@ func decideTurnProgress(execution, attention string, boundaries []turnBoundary, 
 type liveEvent struct {
 	harvest.CanonicalEvent
 	ThoughtMS int64 `json:"thought_ms,omitempty"`
+	// Facts are the detector facts (key:value) a tool_call row classifies as.
+	// Set on GET /api/session rows and on stream deltas only; snapshot rows
+	// carry none, because the client reads them for their sequence alone.
+	Facts []string `json:"facts,omitempty"`
 }
 
 // annotateThoughts attaches "thought for" durations. For each thinking block,

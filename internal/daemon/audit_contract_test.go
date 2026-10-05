@@ -113,7 +113,7 @@ func TestAuditFindingUsesRuleSeverityWithoutChangingAction(t *testing.T) {
 		ID: "report-only", Action: "observe", Severity: "high",
 		If: engine.Predicate{Tag: "session:fs", Value: "write"},
 	}}
-	findings := livePolicyFindings(rules, []engine.Tag{{Key: "session:fs", Value: "write"}}, SessionSummary{})
+	findings := livePolicyFindings(rules, []engine.Tag{{Key: "session:fs", Value: "write"}}, nil, SessionSummary{})
 	if len(findings) != 1 || findings[0].Severity != "high" {
 		t.Fatalf("severity metadata was not preserved: %+v", findings)
 	}

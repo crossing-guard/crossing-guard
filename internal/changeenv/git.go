@@ -180,7 +180,8 @@ func expectedMissingCheckpointContent(item store.ChangeItem, err error) bool {
 }
 
 func gitRawContext(ctx context.Context, root string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root, "--no-optional-locks"}, args...)...)
+	argv := append(append([]string{"-C", root, "--no-optional-locks"}, gitReadGuard(ctx)...), args...)
+	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
 	out := &cappedOutput{max: 16 << 20}
 	cmd.Stdout = out

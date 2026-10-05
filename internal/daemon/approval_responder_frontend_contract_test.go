@@ -40,12 +40,13 @@ func TestApprovalDecisionFrontendDTOStaysHumanCompatible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two bodies, deliberately: a held call that asked no question sends exactly
-	// what it always sent, and one that did asks the approver to answer it. The
-	// second shape is the ONLY addition the browser may make to a decision.
+	// Request-bound decisions retain their exact legacy bodies. The only other
+	// browser-owned field is the immutable request-bound grant option ID.
 	for _, required := range [][]byte{
 		[]byte("JSON.stringify({ id, decision, reason })"),
 		[]byte("JSON.stringify({ id, decision, reason, selections })"),
+		[]byte("grantID !== 'request'"),
+		[]byte("grant_id: selectedGrant"),
 	} {
 		if !bytes.Contains(api, required) {
 			t.Fatalf("interactive approval decision DTO changed: missing %q", required)

@@ -16,8 +16,15 @@ type Subscription struct {
 // Service owns exactly one bounded sampling schedule and one latest-value
 // subscriber projection. Full snapshots make reconnect repair deterministic;
 // native observations are transient and are never persisted as task truth.
+//
+// Writer serialization (opencode-session-visibility-and-status plan D6): a
+// writerMu mutex serializes full refresh sample-plus-commit and event-driven
+// replacement so a stale in-flight refresh cannot overwrite a newer event
+// replacement. If an event arrives during a refresh it waits, then its
+// replacement lands after the older refresh.
 type Service struct {
 	mu       sync.RWMutex
+	writerMu sync.Mutex
 	sampler  Sampler
 	interval time.Duration
 	timeout  time.Duration
@@ -65,6 +72,10 @@ func (s *Service) run(ctx context.Context) {
 func (s *Service) refresh(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, s.timeout)
 	defer cancel()
+	// writerMu serializes the full sample-plus-commit with event-driven
+	// replacement so a newer event cannot be overwritten by a stale refresh.
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
 	now := s.now().UTC()
 	capability, items := s.sampler(ctx, now)
 	s.mu.Lock()
@@ -92,7 +103,12 @@ func (s *Service) refresh(parent context.Context) {
 // generation. This is the event-driven path: a turn row, a task event, or an
 // approval decision refolds ONE session instead of waiting for the sampler's
 // next full pass. Identity is runtime + catalog session id, the rail's key.
+//
+// writerMu ensures this lands after any in-flight refresh, not before it
+// (plan D6): a stale refresh cannot overwrite a newer event replacement.
 func (s *Service) Replace(item Item) {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
 	s.mu.Lock()
 	items := append([]Item(nil), s.snapshot.Items...)
 	replaced := false

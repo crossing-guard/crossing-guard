@@ -35,7 +35,8 @@ func TestOpenCodeInstallIsAdditiveCollectionOnlyAndReversible(t *testing.T) {
 	}
 	text := string(raw)
 	for _, want := range []string{"collect-hook", "tool.execute.before", "tool.execute.after", openCodePluginMarker,
-		"canonicalTool", `["patchText", "command"]`, openCodeGatePrefix + "lane=collection-only"} {
+		"canonicalTool", `["patchText", "command"]`, openCodeGatePrefix + "lane=collection-only",
+		"session.status", "statusTransition", "collectLifecycle", "Symbol.for"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plugin missing %q:\n%s", want, text)
 		}
@@ -44,6 +45,11 @@ func TestOpenCodeInstallIsAdditiveCollectionOnlyAndReversible(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("collection plugin contains decision-path token %q", forbidden)
 		}
+	}
+	// The deprecated session.idle handler must not fire for the exact 1.18
+	// contract; session.status carries the same idle boundary.
+	if strings.Contains(text, `"session.idle"`) {
+		t.Fatalf("collection plugin still handles deprecated session.idle")
 	}
 	if !installer.CollectionOnly(config) {
 		t.Fatal("collection-only plugin reported as governed")
@@ -54,6 +60,9 @@ func TestOpenCodeInstallIsAdditiveCollectionOnlyAndReversible(t *testing.T) {
 	status := installer.HookPhaseStatus(config, executable)
 	if !status["PreToolUse"] || !status["PostToolUse"] || status["SessionStart"] || status["SessionEnd"] {
 		t.Fatalf("unexpected OpenCode hook capability: %+v", status)
+	}
+	if !status["turn.started"] || !status["turn.ended"] {
+		t.Fatalf("OpenCode lifecycle turn boundaries not reported as current: %+v", status)
 	}
 	removed, err := installer.Uninstall(config, executable)
 	if err != nil || !removed {
@@ -171,7 +180,7 @@ func TestOpenCodeGovernanceStatusReadsArtifact(t *testing.T) {
 		t.Fatalf("decision status mismatch: %+v", status)
 	}
 	// A pre-gate v2 artifact reports collection-only with the reconnect note.
-	v2 := []byte(openCodePluginMarker + "\nconst crossingGuardBinary = " + strconv.Quote(executable) + "\n")
+	v2 := []byte(openCodePluginMarkerV2 + "\nconst crossingGuardBinary = " + strconv.Quote(executable) + "\n")
 	if err := os.WriteFile(openCodePluginPath(config), v2, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +264,12 @@ await hooks["tool.execute.after"](
   { sessionID: "ses_native", callID: "call_native", tool: "bash", args: { command: "pwd" } },
   { title: "pwd", output: "/tmp/worktree", metadata: { exit: 0 } },
 )
+if (hooks["event"]) {
+  await hooks["event"]({ event: { type: "session.status", properties: { sessionID: "ses_native", status: { type: "busy" } } } })
+  await hooks["event"]({ event: { type: "session.status", properties: { sessionID: "ses_native", status: { type: "retry" } } } })
+  await hooks["event"]({ event: { type: "session.status", properties: { sessionID: "ses_native", status: { type: "idle" } } } })
+  await hooks["event"]({ event: { type: "session.idle", properties: { sessionID: "ses_native" } } })
+}
 `
 	if err := os.WriteFile(harness, []byte(harnessSource), 0o600); err != nil {
 		t.Fatal(err)
@@ -287,34 +302,74 @@ func TestGeneratedOpenCodePluginExecutesBeforeAndAfterCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Split(strings.TrimSpace(string(argsRaw)), "\n"); len(got) != 2 || got[0] != "collect-hook --runtime opencode --carrier" || got[1] != got[0] {
-		t.Fatalf("collector argv mismatch: %q", argsRaw)
+	gotArgs := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
+	// 4 calls: collect-hook before, collect-hook after, lifecycle turn.started
+	// (busy), lifecycle turn.ended (idle). busy→retry is no boundary and
+	// deprecated session.idle is ignored.
+	if len(gotArgs) != 4 {
+		t.Fatalf("collector argv count=%d: %q", len(gotArgs), argsRaw)
+	}
+	if gotArgs[0] != "collect-hook --runtime opencode --carrier" || gotArgs[1] != gotArgs[0] {
+		t.Fatalf("tool collector argv mismatch: %q", argsRaw)
+	}
+	if gotArgs[2] != "collect-hook --runtime opencode --observe turn.started" {
+		t.Fatalf("lifecycle turn.started argv mismatch: %q", gotArgs[2])
+	}
+	if gotArgs[3] != "collect-hook --runtime opencode --observe turn.ended" {
+		t.Fatalf("lifecycle turn.ended argv mismatch: %q", gotArgs[3])
 	}
 	payloadRaw, err := os.ReadFile(collectorLog)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(payloadRaw)), "\n")
-	if len(lines) != 2 {
+	if len(lines) != 4 {
 		t.Fatalf("collector payload count=%d: %q", len(lines), payloadRaw)
 	}
-	var before, after map[string]any
+	var before, after, turnStart, turnEnd map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &before); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal([]byte(lines[1]), &after); err != nil {
 		t.Fatal(err)
 	}
+	if err := json.Unmarshal([]byte(lines[2]), &turnStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[3]), &turnEnd); err != nil {
+		t.Fatal(err)
+	}
 	if before["hook_event_name"] != "PreToolUse" || after["hook_event_name"] != "PostToolUse" ||
 		before["session_id"] != "ses_native" || after["call_id"] != "call_native" || before["tool_name"] != "Bash" {
 		t.Fatalf("unexpected callback payloads before=%v after=%v", before, after)
+	}
+	if turnStart["hook_event_name"] != "session.status" || turnStart["session_id"] != "ses_native" {
+		t.Fatalf("unexpected turn.started payload: %v", turnStart)
+	}
+	if turnEnd["hook_event_name"] != "session.status" || turnEnd["session_id"] != "ses_native" {
+		t.Fatalf("unexpected turn.ended payload: %v", turnEnd)
 	}
 	diagnosticRaw, err := os.ReadFile(diagnosticLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(diagnosticRaw)); got != `{"body":{"service":"crossing-guard","level":"info","message":"OpenCode collection firing"}}` {
-		t.Fatalf("unexpected success diagnostic: %q", got)
+	diagnostics := strings.Split(strings.TrimSpace(string(diagnosticRaw)), "\n")
+	// The first run fires tool collection (firing) and lifecycle collection
+	// (lifecycle.firing). Both report at info level.
+	for _, want := range []string{
+		`{"body":{"service":"crossing-guard","level":"info","message":"OpenCode collection firing"}}`,
+		`{"body":{"service":"crossing-guard","level":"info","message":"OpenCode collection lifecycle.firing"}}`,
+	} {
+		found := false
+		for _, line := range diagnostics {
+			if line == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing success diagnostic %q in %q", want, diagnosticRaw)
+		}
 	}
 
 	if err := os.WriteFile(diagnosticLog, nil, 0o600); err != nil {
@@ -329,15 +384,16 @@ func TestGeneratedOpenCodePluginExecutesBeforeAndAfterCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	diagnostics := string(diagnosticRaw)
-	for _, want := range []string{"OpenCode collection before.exit", "OpenCode collection after.exit"} {
-		if !strings.Contains(diagnostics, want) {
-			t.Fatalf("missing bounded failure diagnostic %q in %q", want, diagnostics)
+	diagnosticText := string(diagnosticRaw)
+	for _, want := range []string{"OpenCode collection before.exit", "OpenCode collection after.exit",
+		"OpenCode collection lifecycle.exit"} {
+		if !strings.Contains(diagnosticText, want) {
+			t.Fatalf("missing bounded failure diagnostic %q in %q", want, diagnosticText)
 		}
 	}
 	for _, forbidden := range []string{"pwd", "ses_native", "call_native", "/tmp/worktree"} {
-		if strings.Contains(diagnostics, forbidden) {
-			t.Fatalf("diagnostic reflected payload %q: %q", forbidden, diagnostics)
+		if strings.Contains(diagnosticText, forbidden) {
+			t.Fatalf("diagnostic reflected payload %q: %q", forbidden, diagnosticText)
 		}
 	}
 }
@@ -374,13 +430,18 @@ func TestGeneratedOpenCodeDecisionPluginBlocksOnDenyAndFailsOpen(t *testing.T) {
 	if blocked := lastResult()["blocked"]; !strings.Contains(anyToString(blocked), "Crossing Guard denied this tool call: rule protect-main fired") {
 		t.Fatalf("deny did not block: %v", blocked)
 	}
-	// The before phase spawns govern-opencode alone; collect-hook records only the after phase.
+	// The before phase spawns govern-opencode alone; collect-hook records only
+	// the after phase. The harness also fires session.status events producing
+	// lifecycle turn.started and turn.ended collector calls.
 	argsRaw, err := os.ReadFile(collectorArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
-	if len(got) != 2 || got[0] != "govern-hook --runtime opencode --carrier" || got[1] != "collect-hook --runtime opencode --carrier" {
+	if len(got) != 4 || got[0] != "govern-hook --runtime opencode --carrier" ||
+		got[1] != "collect-hook --runtime opencode --carrier" ||
+		got[2] != "collect-hook --runtime opencode --observe turn.started" ||
+		got[3] != "collect-hook --runtime opencode --observe turn.ended" {
 		t.Fatalf("decision-lane argv mismatch: %q", argsRaw)
 	}
 
@@ -460,5 +521,99 @@ func TestGeneratedOpenCodePluginCarriesHelperDeliveries(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestOpenCodeSessionStatusTransitionDedup pins the plan D5 contract: the
+// process-global transition filter emits exactly one boundary per real
+// active/idle transition. busy↔retry is no boundary; deprecated session.idle
+// is ignored; duplicate plugin loads share one state map.
+func TestOpenCodeSessionStatusTransitionDedup(t *testing.T) {
+	plugin := openCodePlugin("placeholder", openCodeGate{Lane: "collection-only", Interface: "1.18.0"})
+	text := string(plugin)
+	if !strings.Contains(text, "statusTransition") {
+		t.Fatal("plugin lacks statusTransition function")
+	}
+	// The harness drives: busy, retry, idle, deprecated session.idle.
+	// Expected collector calls for lifecycle: turn.started (busy from idle),
+	// turn.ended (idle from retry-active). busy→retry is no boundary.
+	node, harness, pluginPath, collectorLog, collectorArgs, _, _ :=
+		writeOpenCodePluginProbe(t, plugin)
+	cmd := exec.Command(node, harness, pluginPath, t.TempDir()+"/diag.log", t.TempDir()+"/result.log")
+	cmd.Env = append(os.Environ(), "CG_FAKE_LOG="+collectorLog, "CG_FAKE_ARGS="+collectorArgs)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute plugin: %v\n%s", err, output)
+	}
+	argsRaw, err := os.ReadFile(collectorArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
+	// 2 tool calls (before+after) + 2 lifecycle (turn.started, turn.ended) = 4
+	var lifecycleArgs []string
+	for _, arg := range gotArgs {
+		if strings.Contains(arg, "--observe") {
+			lifecycleArgs = append(lifecycleArgs, arg)
+		}
+	}
+	if len(lifecycleArgs) != 2 {
+		t.Fatalf("expected 2 lifecycle calls, got %d: %v", len(lifecycleArgs), lifecycleArgs)
+	}
+	if !strings.HasSuffix(lifecycleArgs[0], "turn.started") {
+		t.Fatalf("first lifecycle should be turn.started: %q", lifecycleArgs[0])
+	}
+	if !strings.HasSuffix(lifecycleArgs[1], "turn.ended") {
+		t.Fatalf("second lifecycle should be turn.ended: %q", lifecycleArgs[1])
+	}
+}
+
+// TestOpenCodeSessionStatusIdleOnlyEmitsNoBoundary pins that an idle event
+// with no prior active state produces no boundary — the session was already
+// idle.
+func TestOpenCodeSessionStatusIdleOnlyEmitsNoBoundary(t *testing.T) {
+	plugin := openCodePlugin("placeholder", openCodeGate{Lane: "collection-only", Interface: "1.18.0"})
+	dir := t.TempDir()
+	collectorLog := filepath.Join(dir, "collector.jsonl")
+	collectorArgs := filepath.Join(dir, "collector.args")
+	diagnosticLog := filepath.Join(dir, "diag.log")
+	resultLog := filepath.Join(dir, "result.log")
+	node, _, pluginPath, _, _, _, _ := writeOpenCodePluginProbe(t, plugin)
+
+	// Custom harness: fire only idle (no prior busy), then deprecated session.idle.
+	harnessPath := filepath.Join(dir, "harness-idle.mjs")
+	harnessSource := `import { appendFileSync } from "node:fs"
+import { pathToFileURL } from "node:url"
+const plugin = await import(pathToFileURL(process.argv[2]))
+const factory = Object.values(plugin).find((value) => typeof value === "function")
+const hooks = await factory({
+  directory: "/tmp/worktree",
+  client: { app: { log: async (entry) => appendFileSync(process.argv[3], JSON.stringify(entry) + "\n") } },
+})
+if (hooks["event"]) {
+  await hooks["event"]({ event: { type: "session.status", properties: { sessionID: "ses_idle", status: { type: "idle" } } } })
+  await hooks["event"]({ event: { type: "session.idle", properties: { sessionID: "ses_idle" } } })
+}
+appendFileSync(process.argv[4], "{}\n")
+`
+	if err := os.WriteFile(harnessPath, []byte(harnessSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(node, harnessPath, pluginPath, diagnosticLog, resultLog)
+	cmd.Env = append(os.Environ(), "CG_FAKE_LOG="+collectorLog, "CG_FAKE_ARGS="+collectorArgs)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute plugin: %v\n%s", err, output)
+	}
+	argsRaw, err := os.ReadFile(collectorArgs)
+	if err != nil {
+		// No collector calls means no file was created — the expected outcome.
+		if os.IsNotExist(err) {
+			return
+		}
+		t.Fatal(err)
+	}
+	// No lifecycle calls expected: idle from idle is no boundary, deprecated
+	// session.idle is ignored.
+	if got := strings.TrimSpace(string(argsRaw)); got != "" {
+		t.Fatalf("expected zero collector calls for idle-only, got: %q", got)
 	}
 }

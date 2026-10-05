@@ -2,7 +2,8 @@ package harvest
 
 // Claude observed lineage and edges. Child transcripts live at
 // <slug>/<parentSessionId>/subagents/agent-<agentId>.jsonl beside an optional
-// agent-<agentId>.meta.json ({agentType, description, toolUseId, spawnDepth}).
+// agent-<agentId>.meta.json ({agentType, description, toolUseId, spawnDepth,
+// requestShape, requestNonInteractive, and parentAgentId on a nested agent).
 // The main collect scan deliberately keeps skipping these directories: child
 // transcripts stay out of the top-level catalog; lineage only ENUMERATES them.
 // (Folding them in would let the search-index projection silently attribute
@@ -18,36 +19,68 @@ import (
 const claudeSubagentsDirName = "subagents"
 
 type claudeSubagentMeta struct {
-	AgentType  string `json:"agentType"`
-	SpawnDepth int    `json:"spawnDepth"`
+	AgentType     string `json:"agentType"`
+	Description   string `json:"description"`
+	SpawnDepth    int    `json:"spawnDepth"`
+	ParentAgentID string `json:"parentAgentId"`
 }
 
-// claudeSubagentChildren enumerates a session's native children from one
-// bounded directory listing — no child transcript is parsed.
-func claudeSubagentChildren(s SessionSummary) []LineageChild {
-	dir := filepath.Join(filepath.Dir(s.Path), s.ID, claudeSubagentsDirName)
+// readClaudeSubagentMeta parses one subagent's sidecar. It is the one reader
+// of that file: lineage labels children with it, and the usage listing takes
+// each source's role from it. ok is false when the file is absent or malformed.
+func readClaudeSubagentMeta(path string) (claudeSubagentMeta, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return claudeSubagentMeta{}, false
+	}
+	var meta claudeSubagentMeta
+	if json.Unmarshal(raw, &meta) != nil {
+		return claudeSubagentMeta{}, false
+	}
+	return meta, true
+}
+
+// claudeSubagentFile is one child transcript under a session's directory.
+type claudeSubagentFile struct {
+	id, path, metaPath string
+}
+
+// claudeSubagentFiles lists a session directory's child transcripts from one
+// directory listing; nothing is parsed. Lineage and usage both list with it.
+func claudeSubagentFiles(sessionDir string) []claudeSubagentFile {
+	dir := filepath.Join(sessionDir, claudeSubagentsDirName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-	var children []LineageChild
+	var files []claudeSubagentFile
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
-		child := LineageChild{
-			ID:   strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl"),
-			Kind: "native-subagent",
-		}
+		id := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl")
+		files = append(files, claudeSubagentFile{id: id, path: filepath.Join(dir, name),
+			metaPath: filepath.Join(dir, "agent-"+id+".meta.json")})
+	}
+	return files
+}
+
+// claudeSubagentChildren enumerates a session's native children from one
+// directory listing — no child transcript is parsed.
+func claudeSubagentChildren(s SessionSummary) []LineageChild {
+	var children []LineageChild
+	for _, file := range claudeSubagentFiles(filepath.Join(filepath.Dir(s.Path), s.ID)) {
+		child := LineageChild{ID: file.id, Kind: "native-subagent"}
 		// The sidecar carries vendor-published labels; absent one, the child
 		// stays unlabeled — nothing is inferred from the prompt or transcript.
-		if raw, err := os.ReadFile(filepath.Join(dir, "agent-"+child.ID+".meta.json")); err == nil {
-			var meta claudeSubagentMeta
-			if json.Unmarshal(raw, &meta) == nil {
-				child.Role = meta.AgentType
-				child.Depth = meta.SpawnDepth
-			}
+		if meta, ok := readClaudeSubagentMeta(file.metaPath); ok {
+			child.Role = meta.AgentType
+			child.Depth = meta.SpawnDepth
+			child.Description = truncate(meta.Description, titleMaxLen)
+			// A nested agent names the agent that launched it; the
+			// session itself never stated that relationship.
+			child.Via = meta.ParentAgentID
 		}
 		children = append(children, child)
 	}

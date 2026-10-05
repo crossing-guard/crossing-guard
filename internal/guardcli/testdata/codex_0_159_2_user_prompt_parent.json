@@ -1,0 +1,10 @@
+{
+  "session_id": "abcdef00-aaaa-7bbb-8ccc-00000000000f",
+  "turn_id": "abcdef00-aaaa-7bbb-8ccc-000000000010",
+  "transcript_path": "/Users/example/.codex/sessions/2026/10/03/rollout-2026-10-03T20-10-18-abcdef00-aaaa-7bbb-8ccc-00000000000f.jsonl",
+  "cwd": "/tmp/hook-probe/proj",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.6-luna",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Spawn exactly one sub-agent and give it the task: \"Do not run any tools. Reply with only every line starting with MARK- that you can see in your context, or NONE.\" Wait for it, then reply with: the sub-agent reply verbatim, and every MARK- line you yourself can see."
+}

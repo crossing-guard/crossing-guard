@@ -71,3 +71,46 @@ func TestClaimSchemaDescriptionNamesTypeActions(t *testing.T) {
 		t.Fatalf("reviewer description=%q", reviewer)
 	}
 }
+
+func TestClaimAcceptsOneEnclosingFence(t *testing.T) {
+	labels := []string{"source.final_message"}
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"bare json", `{"action":"reply","message":"Continue.","citations":["source.final_message"]}`},
+		{"fenced json", "```json\n{\"action\":\"reply\",\"message\":\"Continue.\",\"citations\":[\"source.final_message\"]}\n```"},
+		{"fenced no lang", "```\n{\"action\":\"reply\",\"message\":\"Continue.\",\"citations\":[\"source.final_message\"]}\n```"},
+	}
+	for _, tc := range cases {
+		claim, err := DecodeAgentClaim([]byte(tc.raw), "helper", 1024, labels, nil, nil)
+		if err != nil || claim.Action != "reply" || claim.Message != "Continue." {
+			t.Fatalf("%s: claim=%+v err=%v", tc.name, claim, err)
+		}
+	}
+}
+
+func TestClaimRefusesFenceAbuse(t *testing.T) {
+	labels := []string{"source.final_message"}
+	good := `{"action":"reply","message":"Continue.","citations":["source.final_message"]}`
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"prose before fence", "Here you go:\n```json\n" + good + "\n```"},
+		{"prose after fence", "```json\n" + good + "\n```\nDone."},
+		{"two fenced documents", "```json\n" + good + "\n```\n```json\n" + good + "\n```"},
+	}
+	for _, tc := range cases {
+		if _, err := DecodeAgentClaim([]byte(tc.raw), "helper", 4096, labels, nil, nil); err == nil {
+			t.Fatalf("%s: accepted fence abuse", tc.name)
+		}
+	}
+	// A fence inside a JSON string VALUE is the model's message content:
+	// valid JSON that decodes; refusal, if any, belongs to the delivery
+	// layer's fenced-block rule — not the decoder.
+	contentValue := "{\"action\":\"reply\",\"message\":\"```Continue.\",\"citations\":[\"source.final_message\"]}"
+	if _, err := DecodeAgentClaim([]byte(contentValue), "helper", 4096, labels, nil, nil); err != nil {
+		t.Fatalf("fence inside a value must decode: %v", err)
+	}
+}

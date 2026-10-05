@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:private-ai-control-plane:schema:rule:0.1-draft",
+  "$id": "urn:crossing-guard:schema:rule:0.1-draft",
   "title": "Governance rule (authored)",
   "description": "A portable, authored deterministic rule. Layer A is a mechanical predicate (capability + resource + optional pattern) that blocks/redacts an action; Layer B is context-as-steering, GENERATED from Layer A so it never bluffs. Rules are authored once and compiled per-runtime to hooks. Determinism/coverage labels are emitted by the compiler per runtime (see hook-capability-matrix), not authored here. The runtime result of evaluating a rule is a policy-decision record.",
   "type": "object",

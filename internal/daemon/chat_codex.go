@@ -5,10 +5,12 @@ import (
 	"context"
 	"crossing-guard/internal/guardcli"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +21,21 @@ func init() { registerChatDriver("codex", codexChatDriver{}) }
 
 // codexChatDriver drives `codex exec --json`.
 type codexChatDriver struct{}
+
+// codexBundledBinaries are where the ChatGPT app ships the CLI, newest layout first.
+// Codex is bundled inside the app, not on PATH (proven 2026-07-13), so these are
+// runtime-specific fallbacks rather than search directories. The app moved the CLI on
+// 2026-09-30; a move is a new entry here, not an edit at every caller.
+var codexBundledBinaries = []string{
+	"/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex", // codex-package.json layoutVersion 1 entrypoint
+	"/Applications/ChatGPT.app/Contents/Resources/codex",               // before 2026-09-30
+}
+
+// codexBinary is the one place the Codex executable is located: a configured path,
+// then PATH and the known install directories, then the app bundle.
+func codexBinary(configured string) (string, error) {
+	return guardcli.ResolveRuntimeBinary("codex", configured, codexBundledBinaries...)
+}
 
 func (codexChatDriver) ChatCapability() ChatCapability {
 	return ChatCapability{
@@ -41,7 +58,7 @@ func (codexChatDriver) ChatCapability() ChatCapability {
 			{Kind: "text", MediaTypes: []string{"text/plain"}, CanStart: true, CanResume: true,
 				Note: "Validated UTF-8 content is serialized into the prompt."},
 			{Kind: "image", MediaTypes: []string{"image/png"}, CanStart: true, CanResume: true,
-				ModelConditional: true, Note: "Proved for the configured Codex default model; custom/local model support is not inferred."},
+				ModelConditional: true, CatalogRequired: true, Note: "Proved for the configured Codex default model; custom/local model support is not inferred."},
 		},
 	}
 }
@@ -62,7 +79,7 @@ func (codexChatDriver) ValidateChatInputs(req ChatRequest, inputs []taskinput.Re
 }
 
 func (codexChatDriver) ProbeVendorAuth(ctx context.Context) (bool, string, string, error) {
-	bin, err := guardcli.ResolveRuntimeBinary("codex", "", "/Applications/ChatGPT.app/Contents/Resources/codex")
+	bin, err := codexBinary("")
 	if err != nil {
 		return false, "", "", err
 	}
@@ -75,21 +92,40 @@ func (codexChatDriver) ProbeVendorAuth(ctx context.Context) (bool, string, strin
 }
 
 func (codexChatDriver) BuildVendorLogin(ctx context.Context) (*exec.Cmd, error) {
-	bin, err := guardcli.ResolveRuntimeBinary("codex", "", "/Applications/ChatGPT.app/Contents/Resources/codex")
+	bin, err := codexBinary("")
 	if err != nil {
 		return nil, err
 	}
 	return exec.CommandContext(ctx, bin, "login"), nil
 }
 
-func (codexChatDriver) CanonicalizeChatRequest(req ChatRequest) (ChatRequest, error) {
-	if _, err := codexExtraArgs(req.ExtraArgs); err != nil {
-		return ChatRequest{}, err
-	}
-	return req, nil
+func (d codexChatDriver) CanonicalizeChatRequest(req ChatRequest) (ChatRequest, error) {
+	return d.ParseEffort(req)
 }
 
-const codexExtraArgsWhere = "(Settings → extra args for Codex, or the request's extra_args)"
+func (codexChatDriver) ParseEffort(req ChatRequest) (ChatRequest, error) {
+	tokens, err := codexExtraArgs(req.ExtraArgs)
+	if err != nil {
+		return ChatRequest{}, err
+	}
+	keep := []string{}
+	level := ""
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
+		if token == "-c" || token == "--config" {
+			i++
+			level = strings.TrimPrefix(tokens[i], "model_reasoning_effort=")
+		} else if strings.HasPrefix(token, "--config=") {
+			level = strings.TrimPrefix(token, "--config=model_reasoning_effort=")
+		} else {
+			keep = append(keep, token)
+		}
+	}
+	req.ExtraArgs = strings.Join(keep, " ")
+	return mergeLegacyEffort(req, level)
+}
+
+const codexExtraArgsWhere = "(Settings → Runtimes → extra args for Codex, or the request's extra_args)"
 
 // codexEffortLevel is the shape of a reasoning-effort level. The provider owns the
 // enum and refuses a bad word at turn time. codexExtraArgs also refuses the TOML
@@ -167,13 +203,19 @@ func codexExtraArgs(raw string) ([]string, error) {
 // ("review", "help"). The greedy --image list stops at "--" (proven with
 // ordered images 2026-09-24).
 func (codexChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exec.Cmd, error) {
+	var effortErr error
+	req, effortErr = normalizeEffort(req)
+	if effortErr == nil {
+		req, effortErr = (codexChatDriver{}).ParseEffort(req)
+	}
+	if effortErr != nil {
+		return nil, effortErr
+	}
 	extra, err := codexExtraArgs(req.ExtraArgs)
 	if err != nil {
 		return nil, err
 	}
-	// Codex ships bundled inside the ChatGPT app, not on PATH (proven 2026-07-13),
-	// so it is passed as a runtime-specific fallback rather than a search dir.
-	bin, err := guardcli.ResolveRuntimeBinary("codex", req.Binary, "/Applications/ChatGPT.app/Contents/Resources/codex")
+	bin, err := codexBinary(req.Binary)
 	if err != nil {
 		return nil, err
 	}
@@ -185,13 +227,8 @@ func (codexChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exe
 		mode = "read-only"
 	}
 	args := []string{"exec", "--sandbox", mode}
-	localProvider := strings.TrimPrefix(req.Model, "local:")
-	oss := req.OSS || localProvider != req.Model
-	if oss {
+	if localProvider, oss := codexLocalLane(req); oss {
 		args = append(args, "--oss")
-		if localProvider == req.Model {
-			localProvider = req.LocalProvider
-		}
 		if localProvider != "" {
 			args = append(args, "--local-provider", localProvider)
 		}
@@ -204,6 +241,12 @@ func (codexChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exe
 		args = append(args, "-m", req.Model)
 	}
 	args = append(args, extra...)
+	if effort := req.ThinkingEffort; effort != nil && effort.Kind == "level" {
+		if !codexEffortLevel.MatchString(effort.Value) {
+			return nil, effortError("invalid_choice", "Invalid native effort")
+		}
+		args = append(args, "-c", "model_reasoning_effort="+effort.Value)
+	}
 	for _, input := range launch.Inputs {
 		if input.Kind == taskinput.KindImage {
 			args = append(args, "--image", input.Path)
@@ -227,8 +270,42 @@ func (codexChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exe
 	args = append(args, prompt)
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = req.Cwd
-	cmd.Env = os.Environ()
+	cmd.Env = chatLaunchEnv(req)
 	return cmd, nil
+}
+
+// codexLocalLane is the one decision for Codex's local-provider lane, shared by
+// BuildCmd (which emits --oss [--local-provider P]) and LocalRoute: a `local:P`
+// model id selects the lane with provider P (the model wins over a separate
+// LocalProvider), and the legacy OSS flag selects it with LocalProvider.
+func codexLocalLane(req ChatRequest) (provider string, oss bool) {
+	provider = strings.TrimPrefix(req.Model, "local:")
+	if provider != req.Model {
+		return provider, true
+	}
+	if req.OSS {
+		return req.LocalProvider, true
+	}
+	return "", false
+}
+
+// codexBuiltinLocalProviders are the providers Codex ships as local model
+// servers. Only they count as local: measured on 0.154.0-alpha.6.2,
+// `--local-provider` accepts ANY configured provider id ("Model provider
+// `bogus` not found"), and a configured provider may name a remote base URL.
+// Even these two are the runtime's own configuration — CODEX_OSS_BASE_URL and
+// provider settings can repoint them — so the claim is the lane, not a
+// verified endpoint.
+var codexBuiltinLocalProviders = map[string]bool{"ollama": true, "lmstudio": true}
+
+// LocalRoute: a request is local when it selects the local-provider lane with
+// a built-in local provider (managed-turn-profile-limits plan §4.1).
+func (codexChatDriver) LocalRoute(req ChatRequest) (bool, string) {
+	provider, oss := codexLocalLane(req)
+	if !oss || !codexBuiltinLocalProviders[provider] {
+		return false, ""
+	}
+	return true, "Codex local provider lane: " + provider
 }
 
 // ProjectEvent maps codex exec records without coupling the adapter to SSE.
@@ -259,7 +336,11 @@ func (codexChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 			}
 		}
 	case "turn.completed":
-		add(ChatEvent{"type": "result", "usage": obj["usage"]})
+		// turn.completed.usage is a running total for the whole thread, across
+		// invocations (measured on 0.154.0-alpha, plan §4 step 0), so one turn's
+		// share cannot be derived neutrally. Decision D-7: live Codex usage is
+		// unknown; session history carries Codex usage.
+		add(ChatEvent{"type": "result"})
 	case "error":
 		message := anyString(obj["message"])
 		if isVendorAuthFailure(message) {
@@ -328,11 +409,14 @@ func (codexChatDriver) DeliverSessionMessage(ctx context.Context, target Session
 	if !codexSessionUUID.MatchString(sessionID) || strings.TrimSpace(message) == "" {
 		return SessionMessageReceipt{State: "unavailable", Detail: "Delivery requires an exact native session UUID and a nonempty message."}
 	}
-	bin, err := guardcli.ResolveRuntimeBinary("codex", "", "/Applications/ChatGPT.app/Contents/Resources/codex")
+	bin, err := codexBinary("")
 	if err != nil {
 		return SessionMessageReceipt{State: "unavailable", Detail: err.Error()}
 	}
-	cmd := exec.CommandContext(ctx, bin, "queue", "--thread", sessionID, "--message", message)
+	// One `--message=` token: as a separate value, clap parses a message that
+	// starts with `-` (a Markdown bullet, `--yolo`) as a flag and exits 2
+	// (measured on 0.154.0-alpha.6.2).
+	cmd := exec.CommandContext(ctx, bin, "queue", "--thread", sessionID, "--message="+message)
 	cmd.WaitDelay = time.Second
 	output := &codexDeliveryOutput{}
 	cmd.Stdout, cmd.Stderr = output, output
@@ -373,4 +457,104 @@ func (out *codexDeliveryOutput) Write(p []byte) (int, error) {
 		out.overflow = true
 	}
 	return n, nil
+}
+
+// codexModelListPagesMax bounds model/list pagination; a validation limit.
+const codexModelListPagesMax = 20
+
+// DiscoverChatModels asks the app-server's model/list (measured on
+// 0.154.0-alpha, plan §4 step 0: id, displayName, description, isDefault,
+// hidden, inputModalities; no limits or prices; paginated by nextCursor). The
+// process runs in the framework's bounded session; the protocol is the shared
+// app-server helper.
+func (codexChatDriver) DiscoverChatModels(ctx context.Context, env ChatModelEnv) (ChatModelDiscovery, error) {
+	discovery := ChatModelDiscovery{Scope: "Codex models available to the signed-in account (app-server model/list)"}
+	bin, err := codexBinary("")
+	if err != nil {
+		return discovery, modelDiscoveryFailure(modelReasonNotInstalled)
+	}
+	discovery.Binary = bin
+	cmd := exec.Command(bin, "app-server")
+	cmd.Env = chatLaunchEnv(ChatRequest{}) // a model listing: no ticket
+	session, err := env.Session(cmd)
+	if err != nil {
+		return discovery, err
+	}
+	defer session.Close()
+	rpc := &codexAppServer{stdin: session.Stdin, lines: session.Lines, done: ctx.Done()}
+	failed := func(err error) error {
+		if streamErr := session.Err(); streamErr != nil {
+			return streamErr
+		}
+		if ctx.Err() != nil {
+			return modelDiscoveryFailure(modelReasonTimedOut)
+		}
+		if errors.Is(err, errCodexAppServerClosed) {
+			return modelDiscoveryFailure(modelReasonExited)
+		}
+		return modelDiscoveryFailure(modelReasonUnparseable)
+	}
+	params := map[string]any{}
+	var defaults, others []ChatModelOption
+	for page := 0; page < codexModelListPagesMax; page++ {
+		var result json.RawMessage
+		if page == 0 {
+			result, err = rpc.initializeAndCall("crossing-guard-models", "model/list", params)
+		} else {
+			result, err = rpc.call("model/list", params)
+		}
+		if err != nil {
+			return discovery, failed(err)
+		}
+		var listed struct {
+			Data []struct {
+				ID                        string   `json:"id"`
+				DisplayName               string   `json:"displayName"`
+				Description               string   `json:"description"`
+				IsDefault                 bool     `json:"isDefault"`
+				Hidden                    bool     `json:"hidden"`
+				InputModalities           []string `json:"inputModalities"`
+				SupportedReasoningEfforts []struct {
+					Level       string `json:"reasoningEffort"`
+					Description string `json:"description"`
+				} `json:"supportedReasoningEfforts"`
+				DefaultReasoningEffort string `json:"defaultReasoningEffort"`
+			} `json:"data"`
+			NextCursor *string `json:"nextCursor"`
+		}
+		if json.Unmarshal(result, &listed) != nil {
+			return discovery, modelDiscoveryFailure(modelReasonUnparseable)
+		}
+		for _, model := range listed.Data {
+			if model.Hidden || model.ID == "" {
+				continue
+			}
+			label := model.DisplayName
+			if label == "" {
+				label = model.ID
+			}
+			option := ChatModelOption{ID: model.ID, Label: label, Description: model.Description, Source: chatModelSourceRuntime}
+			levels := []string{}
+			for _, effort := range model.SupportedReasoningEfforts {
+				levels = append(levels, effort.Level)
+			}
+			option.Effort = nativeEffortCapability(levels, model.DefaultReasoningEffort)
+			// Publish only what ValidateChatInputs would admit for a named
+			// model (S-RT5): text, never image.
+			if slices.Contains(model.InputModalities, string(taskinput.KindText)) {
+				option.Inputs = []string{string(taskinput.KindText)}
+			}
+			if model.IsDefault {
+				defaults = append(defaults, option)
+			} else {
+				others = append(others, option)
+			}
+		}
+		if listed.NextCursor == nil || *listed.NextCursor == "" {
+			discovery.Models = append(defaults, others...)
+			return discovery, nil
+		}
+		params = map[string]any{"cursor": *listed.NextCursor}
+	}
+	return discovery, modelDiscoveryFailure(modelReasonTooManyEntries)
 }

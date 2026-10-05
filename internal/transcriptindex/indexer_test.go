@@ -197,7 +197,7 @@ func TestPlanIncrementalAndForceAreNewestFirstAndBounded(t *testing.T) {
 func TestRefreshMapsOneTitleAndCanonicalEventKinds(t *testing.T) {
 	session := sourceSession("claude", "session-1", "g1", fixedIndexTime.Add(-time.Minute))
 	snapshot := sourceSnapshot(session,
-		SourceEvent{Ordinal: 0, Lineage: "event-0", Timestamp: "t0", Kind: "user", Text: "  due diligence  "},
+		SourceEvent{Ordinal: 0, Lineage: "event-0", Timestamp: "t0", Kind: "user", Text: "  sprint retro  "},
 		SourceEvent{Ordinal: 1, Lineage: "event-1", Timestamp: "t1", Kind: "assistant", Text: "agreements\x00"},
 		SourceEvent{Ordinal: 2, Lineage: "event-2", Timestamp: "t2", Kind: "tool_call", Name: "Read", Text: strings.Repeat("x", 205)},
 		SourceEvent{Ordinal: 3, Lineage: "event-3", Timestamp: "t3", Kind: "tool_result", Text: " result "},
@@ -227,7 +227,7 @@ func TestRefreshMapsOneTitleAndCanonicalEventKinds(t *testing.T) {
 	if replacement.Documents[0].Text != session.Title || replacement.Documents[0].Order != 0 {
 		t.Fatalf("title document = %+v", replacement.Documents[0])
 	}
-	if replacement.Documents[1].Text != "due diligence" ||
+	if replacement.Documents[1].Text != "sprint retro" ||
 		replacement.Documents[2].Text != "agreements" ||
 		replacement.Documents[3].Text != "Read "+strings.Repeat("x", 200)+"…" {
 		t.Fatalf("mapped documents = %+v", replacement.Documents)

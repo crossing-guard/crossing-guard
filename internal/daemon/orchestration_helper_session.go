@@ -11,6 +11,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -103,8 +104,8 @@ func helperTurnResumes(group store.ManagedGroup, primaryRuntime, runtime string)
 // launch (first launch, parked relaunch): it re-reads the group and resumes
 // its helper session exactly when helperTurnResumes says so (the mechanism
 // resumeParent already uses).
-func (host *orchestrationManagedHost) helperTurnRequest(groupID, primaryRuntime, runtime, model, mode, cwd, prompt string) ChatRequest {
-	request := ChatRequest{Runtime: runtime, Prompt: prompt, Model: model, Mode: mode, Cwd: cwd}
+func (host *orchestrationManagedHost) helperTurnRequest(groupID, primaryRuntime, runtime, model, mode, cwd, prompt string, effort *store.ThinkingEffort) ChatRequest {
+	request := ChatRequest{Runtime: runtime, Prompt: prompt, Model: model, Mode: mode, Cwd: cwd, ThinkingEffort: effort, effortSource: "binding"}
 	group, found, err := host.ix.ManagedGroup(groupID)
 	if err != nil || !found || !helperTurnResumes(group, primaryRuntime, runtime) {
 		return request
@@ -130,6 +131,12 @@ func (host *orchestrationManagedHost) adoptHelperSession(run store.ManagedRun, b
 	if err != nil || !found {
 		return
 	}
+	// A turn the deadline watcher stopped neither adopts nor clears (plan
+	// §4.2, RT-5): a vendor slow to answer — 11 min 40 s in the 2026-09-24
+	// incident — is not evidence the helper session is bad.
+	if settled.State == "failed" && settled.ErrorClass == "timeout" {
+		return
+	}
 	task, found, err := host.tasks.Task(run.ChildTaskID)
 	if err != nil || !found || task.Runtime != binding.Runtime {
 		return
@@ -147,7 +154,7 @@ func (host *orchestrationManagedHost) adoptHelperSession(run store.ManagedRun, b
 					reported, vendorAnswered = id, true
 				}
 			case "task.activity":
-				if anyString(item.Payload["type"]) == "session" && anyString(item.Payload["id"]) != "" {
+				if sessionFrameID(item) != "" {
 					vendorAnswered = true
 				}
 			}
@@ -241,7 +248,7 @@ func (host *orchestrationManagedHost) matchBinding(bindingID, producer string, t
 	if producer != managedTaskStreamKind && !binding.WatchNatural {
 		return matchedAgent{}, false
 	}
-	if !bindingScopeMatches(binding, task) {
+	if !bindingScopeMatches(binding, task, newFolderScope(task.WorkingDirectory)) {
 		return matchedAgent{}, false
 	}
 	return host.selectBinding(binding, signal)
@@ -345,4 +352,187 @@ func pendingSignalFor(binding store.ManagedBinding, task RuntimeTask, event Task
 	body, _ := json.Marshal(task)
 	return store.ManagedPendingSignal{BindingID: binding.BindingID, Producer: event.Producer, EventID: event.EventID,
 		Sequence: event.Sequence, Signal: signal, Kind: event.Kind, OccurredAt: event.OccurredAt, Task: body, At: time.Now().UnixMilli()}
+}
+
+// ── Turn deadlines (managed-turn-profile-limits plan §4.2) ─────────────────
+
+// turnTimeout is the marker the deadline watcher writes on a run before it
+// stops that run's child. It names the child, so it can never apply to a
+// later attempt of the same run.
+type turnTimeout struct {
+	ChildTaskID string `json:"child_task_id"`
+	Limit       string `json:"limit"`
+	LimitMS     int64  `json:"limit_ms"`
+	StartedAtMS int64  `json:"started_at_ms"`
+	StoppedAtMS int64  `json:"stopped_at_ms"`
+}
+
+func turnTimeoutFrom(detail map[string]any) turnTimeout {
+	marker := turnTimeout{}
+	raw, ok := detail["timeout"]
+	if !ok {
+		return marker
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return marker
+	}
+	_ = json.Unmarshal(encoded, &marker)
+	return marker
+}
+
+// turnTimeoutMarker returns the run's timeout marker when it names the run's
+// CURRENT child — the only child it may settle.
+func turnTimeoutMarker(run store.ManagedRun) (turnTimeout, bool) {
+	marker := turnTimeoutFrom(run.Detail)
+	return marker, marker.ChildTaskID != "" && marker.ChildTaskID == run.ChildTaskID
+}
+
+// pinnedTurnLimit is one pinned revision's timeout, cached by digest pair:
+// revisions are immutable, so the cache never goes stale and a pass does not
+// re-parse PROFILE.md per running run.
+type pinnedTurnLimit struct {
+	limit time.Duration
+	text  string
+}
+
+// runTurnDeadlineWatcher enforces helper-turn timeouts on their own configured
+// cadence (helper_session.turn_deadline_check_ms). The 30 s lifecycle sweep
+// shares its goroutine with other work, so riding it would silently make that
+// lateness the precision of a user-facing limit.
+func (host *orchestrationManagedHost) runTurnDeadlineWatcher() {
+	defer host.wg.Done()
+	every := orchestrationConfig().TurnDeadlineCheck()
+	if every <= 0 {
+		// Never trust a swapped or half-loaded value with a ticker.
+		every = defaultOrchestrationConfig().TurnDeadlineCheck()
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	limits := map[string]pinnedTurnLimit{}
+	for {
+		select {
+		case <-host.ctx.Done():
+			return
+		case <-ticker.C:
+			host.enforceTurnDeadlinesOnce(time.Now(), limits)
+		}
+	}
+}
+
+// enforceTurnDeadlinesOnce is one watcher pass over running helper turns and
+// delegate children — never reply or correction runs, which are the source
+// session's own work. For a child past its pinned profile timeout it marks the
+// run for exactly that child and interrupts the child only once the mark is
+// durable (plan §4.2, R2-3): an unmarked kill would settle as an ordinary
+// failure, which can park and relaunch the turn or clear a healthy helper
+// session. A child that already ended is left to the pump, however late the
+// pump is, so a provider death before the deadline still reaches the provider
+// lane.
+func (host *orchestrationManagedHost) enforceTurnDeadlinesOnce(now time.Time, limits map[string]pinnedTurnLimit) {
+	if host.tasks == nil {
+		return
+	}
+	running, err := host.ix.RunningManagedRuns(orchestrationConfig().HelperSession.SweepBatch)
+	if err != nil {
+		log.Printf("turn deadlines: running runs unavailable: %v", err)
+		return
+	}
+	for _, run := range running {
+		if (run.Kind != "" && run.Kind != "delegate") || run.ChildTaskID == "" {
+			continue
+		}
+		limit, ok := host.pinnedTurnLimit(run, limits)
+		if !ok {
+			continue
+		}
+		started, live := host.childTurnStart(run.ChildTaskID)
+		if !live || now.Sub(started) < limit.limit {
+			continue
+		}
+		if _, marked := turnTimeoutMarker(run); !marked {
+			wrote, err := host.ix.MarkManagedRunTimedOut(run.RunID, run.ChildTaskID, map[string]any{
+				"limit": limit.text, "limit_ms": limit.limit.Milliseconds(),
+				"started_at_ms": started.UnixMilli(), "stopped_at_ms": now.UnixMilli()})
+			if err != nil {
+				log.Printf("turn deadlines: run %s could not be marked (not stopped this pass): %v", run.RunID, err)
+				continue
+			}
+			if !wrote {
+				continue // the run settled, parked, or moved to another child since the read
+			}
+		}
+		if _, err := host.tasks.Interrupt(run.ChildTaskID); err != nil {
+			log.Printf("turn deadlines: run %s child %s interrupt failed (retried next pass): %v", run.RunID, run.ChildTaskID, err)
+		}
+	}
+}
+
+// pinnedTurnLimit reads the run's pinned revision's timeout (the child's own
+// revision for a delegate run).
+func (host *orchestrationManagedHost) pinnedTurnLimit(run store.ManagedRun, limits map[string]pinnedTurnLimit) (pinnedTurnLimit, bool) {
+	key := run.ProfileID + "\x00" + run.ProfileSourceDigest + "\x00" + run.ProfileBundleDigest
+	if cached, ok := limits[key]; ok {
+		return cached, true
+	}
+	detail, err := host.profiles.GetRevision(run.ProfileID, run.ProfileSourceDigest, run.ProfileBundleDigest)
+	if err != nil || detail.Normalized == nil {
+		return pinnedTurnLimit{}, false
+	}
+	limit, err := profilefs.Duration(detail.Normalized.Limits.Timeout)
+	if err != nil || limit <= 0 {
+		return pinnedTurnLimit{}, false
+	}
+	limits[key] = pinnedTurnLimit{limit: limit, text: detail.Normalized.Limits.Timeout}
+	return limits[key], true
+}
+
+// childTurnStart is when the child left the execution queue — its
+// `task.started` event (Unix ms) — and whether it is still starting or
+// running. A queued child has not started, so it is never overdue: the timeout
+// bounds run time, not time spent waiting for a runtime slot.
+func (host *orchestrationManagedHost) childTurnStart(childTaskID string) (time.Time, bool) {
+	task, found, err := host.tasks.Task(childTaskID)
+	if err != nil || !found || (task.Lifecycle != TaskStarting && task.Lifecycle != TaskRunning) {
+		return time.Time{}, false
+	}
+	events, err := host.tasks.Events(childTaskID, 0, 16)
+	if err != nil {
+		return time.Time{}, false
+	}
+	for _, event := range events {
+		if event.Kind == "task.started" {
+			return time.UnixMilli(event.OccurredAt), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// settleTimedOutRun ends a run whose child the watcher stopped (failure:
+// record-unavailable). A classified provider failure on that child still
+// counts toward its route's breaker (plan §4.2, RT-11), so an outage trips
+// the circuit instead of launching doomed turns — but the run itself never
+// parks: a relaunch would repeat the turn its wall-time bound just ended.
+func (host *orchestrationManagedHost) settleTimedOutRun(run store.ManagedRun, event TaskEvent, marker turnTimeout) error {
+	if class, providerDetail := host.providerFailureForTask(event.TaskID); class != "" {
+		runtime, model := host.attemptRoute(run)
+		host.recordProviderFailure(runtime, model, class, providerDetail)
+	}
+	ran := (time.Duration(marker.StoppedAtMS-marker.StartedAtMS) * time.Millisecond).Round(time.Second)
+	recovery := fmt.Sprintf("The helper turn was stopped after %s; its profile timeout is %s. The next signal runs in the same helper session.", ran, marker.Limit)
+	return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, run.Detail, "timeout", boundedRecovery(recovery), time.Now().Unix())
+}
+
+// attemptRoute is the route the run's current attempt used: the provider
+// ledger's newest attempt when it moved routes, else the binding's primary.
+func (host *orchestrationManagedHost) attemptRoute(run store.ManagedRun) (string, string) {
+	if ledger := providerOutageLedgerFrom(run.Detail); len(ledger.Attempts) > 0 {
+		last := ledger.Attempts[len(ledger.Attempts)-1]
+		return last.Runtime, last.Model
+	}
+	binding, found, err := host.ix.ManagedBinding(run.BindingID)
+	if err != nil || !found {
+		return "", ""
+	}
+	return binding.Runtime, binding.Model
 }

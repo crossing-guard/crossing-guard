@@ -245,3 +245,123 @@ func TestBuildSessionPageFoldIsModeInvariant(t *testing.T) {
 		t.Fatalf("open-mode parent lost its fold: %#v", page.AgentChildren)
 	}
 }
+
+// nativeChildFixture builds a codex guardian child with its ParentID pointing
+// at the parent's thread id.
+func nativeChildFixture(key, runtime, id, parentID, role, kind string, modified time.Time) SessionSummary {
+	s := sessionFixture(key, runtime, id, modified)
+	s.ParentID = parentID
+	s.LineageKind = kind
+	s.LineageRole = role
+	return s
+}
+
+// Native subagents fold under their nearest top-level ancestor, provenance
+// separate from the caused agent fold; Total counts non-child rows only.
+func TestBuildSessionPageFoldsNativeSubagents(t *testing.T) {
+	base := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	parent := sessionFixture("/repo", "codex", "parent", base)
+	parent.ThreadID = "thread-p"
+	child := nativeChildFixture("/repo", "codex", "child", "thread-p", "guardian", "native-subagent", base.Add(-time.Minute))
+	other := sessionFixture("/repo", "codex", "other", base.Add(-2*time.Minute))
+	page, found := buildSessionPage([]SessionSummary{parent, child, other}, presenceOpenSet{}, "/repo", "all", 0, 15, "", "")
+	if !found || page.Total != 2 || len(page.Sessions) != 2 {
+		t.Fatalf("native child was not partitioned out of the pageable rows: %#v", page)
+	}
+	fold := page.NativeChildren["parent"]
+	if len(fold) != 1 || fold[0].ID != "child" || fold[0].NativeRole != "guardian" || fold[0].NativeKind != "native-subagent" {
+		t.Fatalf("native fold did not attach by parent identity: %#v", page.NativeChildren)
+	}
+	for _, row := range page.Sessions {
+		if row.ID == "child" {
+			t.Fatalf("native child rendered as a flat rail row: %s", row.ID)
+		}
+	}
+	if page.AgentChildren != nil {
+		t.Fatalf("native child leaked into the caused agent fold: %#v", page.AgentChildren)
+	}
+}
+
+// A depth-2 native child (parent_id resolves to another child, not a top-level
+// row) still folds under the nearest top-level ancestor (RT1), never dropped.
+func TestBuildSessionPageFoldsDepthTwoNativeChild(t *testing.T) {
+	base := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	top := sessionFixture("/repo", "codex", "top", base)
+	top.ThreadID = "thread-top"
+	// mid is a native child of top (parent_id = thread-top).
+	mid := nativeChildFixture("/repo", "codex", "mid", "thread-top", "review-php", "native-thread-spawn", base.Add(-time.Minute))
+	mid.MetaID = "mid-meta"
+	// deep is a native child whose parent_id resolves to mid's MetaID.
+	deep := nativeChildFixture("/repo", "codex", "deep", "mid-meta", "guardian", "native-subagent", base.Add(-2*time.Minute))
+	page, found := buildSessionPage([]SessionSummary{top, mid, deep}, presenceOpenSet{}, "/repo", "all", 0, 15, "", "")
+	if !found || page.Total != 1 || len(page.Sessions) != 1 || page.Sessions[0].ID != "top" {
+		t.Fatalf("depth-2 native children were not folded under the top-level ancestor: %#v", page)
+	}
+	fold := page.NativeChildren["top"]
+	if len(fold) != 2 {
+		t.Fatalf("expected both native children under top, got %#v", page.NativeChildren)
+	}
+}
+
+// A native child whose parent resolves to no scanned row renders nowhere on the
+// rail (orphan), and the rail header count excludes native children (RT2).
+func TestBuildSessionPageOrphanNativeChildAndHeaderCount(t *testing.T) {
+	base := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	parent := sessionFixture("/repo", "codex", "parent", base)
+	parent.ThreadID = "thread-p"
+	child := nativeChildFixture("/repo", "codex", "child", "thread-p", "guardian", "native-subagent", base.Add(-time.Minute))
+	orphan := nativeChildFixture("/repo", "codex", "orphan", "missing-parent", "guardian", "native-subagent", base.Add(-2*time.Minute))
+	page, found := buildSessionPage([]SessionSummary{parent, child, orphan}, presenceOpenSet{}, "/repo", "all", 0, 15, "", "")
+	if !found || page.Total != 1 || len(page.Sessions) != 1 {
+		t.Fatalf("orphan native child must render nowhere and Total must count non-child only: %#v", page)
+	}
+	if len(page.NativeChildren["parent"]) != 1 {
+		t.Fatalf("parent lost its native fold: %#v", page.NativeChildren)
+	}
+	groups := buildSessionRepositories([]SessionSummary{parent, child, orphan}, presenceOpenSet{})
+	if len(groups) != 1 || groups[0].Total != 1 {
+		t.Fatalf("rail header count must exclude native children: %#v", groups)
+	}
+}
+
+// A selected native child lands on its parent's page (offset math matches
+// children), mirroring selected-agent-child behavior.
+func TestBuildSessionPageSelectedNativeChildLandsOnParentPage(t *testing.T) {
+	base := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	rows := make([]SessionSummary, 0, 21)
+	for i := 0; i < 20; i++ {
+		rows = append(rows, sessionFixture("/repo", "codex", string(rune('a'+i)), base.Add(-time.Duration(i)*time.Minute)))
+	}
+	// parent is row "a"; its native child is older, so it would page elsewhere.
+	rows[0].ThreadID = "thread-a"
+	child := nativeChildFixture("/repo", "codex", "native-x", "thread-a", "guardian", "native-subagent", base.Add(-30*time.Minute))
+	rows = append(rows, child)
+	page, found := buildSessionPage(rows, presenceOpenSet{}, "/repo", "all", 0, 15, "codex", "native-x")
+	if !found || page.Offset != 0 || page.Total != 20 {
+		t.Fatalf("selected native child did not choose the parent's page: %#v", page)
+	}
+	if len(page.NativeChildren["a"]) != 1 || page.NativeChildren["a"][0].ID != "native-x" {
+		t.Fatalf("selected native child missing from the parent's fold: %#v", page.NativeChildren)
+	}
+}
+
+// PW2: two sibling children share the parent's thread id (codex children carry
+// their parent's thread id). When the parent row is absent from the scan, a
+// child's parent_id must never resolve to its sibling's ThreadID — both must
+// resolve to orphans, never to each other.
+func TestBuildSessionPageSiblingChildrenDoNotShadowAbsentParent(t *testing.T) {
+	base := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	shared := "thread-parent"
+	childA := nativeChildFixture("/repo", "codex", "child-a", shared, "guardian", "native-subagent", base.Add(-time.Minute))
+	childA.MetaID = "meta-a"
+	childB := nativeChildFixture("/repo", "codex", "child-b", shared, "guardian", "native-subagent", base.Add(-2*time.Minute))
+	childB.MetaID = "meta-b"
+	// Both children carry the parent's thread id; the parent row is absent.
+	page, found := buildSessionPage([]SessionSummary{childA, childB}, presenceOpenSet{}, "/repo", "all", 0, 15, "", "")
+	if !found || page.Total != 0 || len(page.Sessions) != 0 {
+		t.Fatalf("sibling children must not fold under each other when the parent is absent: %#v", page)
+	}
+	if page.NativeChildren != nil {
+		t.Fatalf("no native fold should exist without a top-level parent: %#v", page.NativeChildren)
+	}
+}

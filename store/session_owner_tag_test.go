@@ -52,14 +52,14 @@ func TestFreshStoreHasNoOwnerTagsNotesOrVocabulary(t *testing.T) {
 func TestOwnerTagApplyIsIdempotentCasePreservingAndCaseBlind(t *testing.T) {
 	ix := openOwnerTagTestIndex(t)
 	session := ownerTarget("claude", "s1")
-	first := SessionOwnerTagValue{Key: "Topic", Value: "Amazon-Routing"}
+	first := SessionOwnerTagValue{Key: "Topic", Value: "Order-Routing"}
 	if err := ix.ApplySessionOwnerTags([]SessionOwnerTarget{session}, []SessionOwnerTagValue{first}, 10); err != nil {
 		t.Fatal(err)
 	}
 	// The same tag in another case, on the same and on another session, is the
 	// same tag, spelled as first written; re-applying refreshes what is
 	// remembered about the session and adds no row.
-	again := SessionOwnerTagValue{Key: "topic", Value: "AMAZON-ROUTING"}
+	again := SessionOwnerTagValue{Key: "topic", Value: "ORDER-ROUTING"}
 	renamed := session
 	renamed.Title = "Renamed since"
 	other := ownerTarget("codex", "s2")
@@ -71,7 +71,7 @@ func TestOwnerTagApplyIsIdempotentCasePreservingAndCaseBlind(t *testing.T) {
 		t.Fatalf("want one row per session, got %+v", tags)
 	}
 	for _, tag := range tags {
-		if tag.Key != "Topic" || tag.Value != "Amazon-Routing" {
+		if tag.Key != "Topic" || tag.Value != "Order-Routing" {
 			t.Fatalf("first spelling not kept: %+v", tag)
 		}
 		if tag.SessionID == "s1" && (tag.Title != "Renamed since" || tag.AppliedAt != 10) {
@@ -134,7 +134,7 @@ func TestOwnerTagValidationRefusesWhatTheGrammarCannotExpress(t *testing.T) {
 		}
 	}
 	for _, good := range []SessionOwnerTagValue{
-		{Value: "approved"}, {Value: "needs review"}, {Key: "topic", Value: "amazon-routing"},
+		{Value: "approved"}, {Value: "needs review"}, {Key: "topic", Value: "order-routing"},
 		{Key: "sprint", Value: "38"}, {Value: strings.Repeat("x", SessionOwnerTagPartMax)},
 	} {
 		if err := ValidateSessionOwnerTag(good); err != nil {
@@ -182,7 +182,7 @@ func TestOwnerTagRenameKeepsAgeAndMergesAndPurgeDeletes(t *testing.T) {
 func TestOwnerTagVocabularyOrdersByRecentUse(t *testing.T) {
 	ix := openOwnerTagTestIndex(t)
 	a, b := ownerTarget("claude", "a"), ownerTarget("claude", "b")
-	for at, tag := range []SessionOwnerTagValue{{Value: "old"}, {Key: "topic", Value: "walmart"}, {Value: "recent"}} {
+	for at, tag := range []SessionOwnerTagValue{{Value: "old"}, {Key: "topic", Value: "checkout"}, {Value: "recent"}} {
 		if err := ix.ApplySessionOwnerTags([]SessionOwnerTarget{a}, []SessionOwnerTagValue{tag}, int64(10+at)); err != nil {
 			t.Fatal(err)
 		}
@@ -191,7 +191,7 @@ func TestOwnerTagVocabularyOrdersByRecentUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	vocabulary, err := ix.SessionOwnerTagVocabulary(2)
-	if err != nil || len(vocabulary) != 2 || vocabulary[0].Value != "recent" || vocabulary[1].Value != "walmart" || vocabulary[1].Key != "topic" {
+	if err != nil || len(vocabulary) != 2 || vocabulary[0].Value != "recent" || vocabulary[1].Value != "checkout" || vocabulary[1].Key != "topic" {
 		t.Fatalf("vocabulary=%+v err=%v", vocabulary, err)
 	}
 	all, _ := ix.SessionOwnerTagVocabulary(10)
@@ -203,7 +203,7 @@ func TestOwnerTagVocabularyOrdersByRecentUse(t *testing.T) {
 func TestOwnerNoteReplacesClearsAndIsBounded(t *testing.T) {
 	ix := openOwnerTagTestIndex(t)
 	session := ownerTarget("claude", "s1")
-	for _, text := range []string{"lawyer call Thursday", "  waiting on finance  "} {
+	for _, text := range []string{"designer call Thursday", "  waiting on finance  "} {
 		if err := ix.PutSessionOwnerNote(session, text, 10); err != nil {
 			t.Fatal(err)
 		}
@@ -306,15 +306,15 @@ func TestSessionsMatchingTextFindsWhatGlobalRankingBuriesAndCountsSessions(t *te
 	for i := 0; i < 8; i++ {
 		id := fmt.Sprintf("noisy-%d", i)
 		if _, err := ix.ReplaceTranscriptProjection(projectionFixture("claude", id, "g1", id,
-			"repricer repricer repricer repricer margin", projectionTestTime)); err != nil {
+			"indexer indexer indexer indexer latency", projectionTestTime)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := ix.ReplaceTranscriptProjection(projectionFixture("claude", "wanted", "g1", "wanted",
-		"a long passage about many unrelated things that mentions the repricer exactly once near its end", projectionTestTime)); err != nil {
+		"a long passage about many unrelated things that mentions the indexer exactly once near its end", projectionTestTime)); err != nil {
 		t.Fatal(err)
 	}
-	global, err := ix.SearchEvents("repricer", 3)
+	global, err := ix.SearchEvents("indexer", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestSessionsMatchingTextFindsWhatGlobalRankingBuriesAndCountsSessions(t *te
 			t.Fatal("the fixture no longer buries the wanted session in the global top 3, so this test proves nothing; strengthen the noise")
 		}
 	}
-	confined, more, err := ix.SessionsMatchingText("repricer", []string{"wanted", "absent"}, 3)
+	confined, more, err := ix.SessionsMatchingText("indexer", []string{"wanted", "absent"}, 3)
 	if err != nil || more || len(confined) != 1 || confined[0] != (TranscriptProjectionKey{Runtime: "claude", SessionID: "wanted"}) {
 		t.Fatalf("confined=%+v more=%v err=%v", confined, more, err)
 	}
@@ -331,7 +331,7 @@ func TestSessionsMatchingTextFindsWhatGlobalRankingBuriesAndCountsSessions(t *te
 	for i := 0; i < 8; i++ {
 		ids = append(ids, fmt.Sprintf("noisy-%d", i))
 	}
-	sessions, more, err := ix.SessionsMatchingText("repricer", ids, 4)
+	sessions, more, err := ix.SessionsMatchingText("indexer", ids, 4)
 	if err != nil || !more || len(sessions) != 4 {
 		t.Fatalf("nine sessions match and four were asked for: got %d more=%v err=%v", len(sessions), more, err)
 	}
@@ -342,7 +342,7 @@ func TestSessionsMatchingTextFindsWhatGlobalRankingBuriesAndCountsSessions(t *te
 		}
 		seen[key] = true
 	}
-	if none, _, err := ix.SessionsMatchingText("repricer", nil, 3); err != nil || len(none) != 0 {
+	if none, _, err := ix.SessionsMatchingText("indexer", nil, 3); err != nil || len(none) != 0 {
 		t.Fatalf("an empty set matches nothing: %+v %v", none, err)
 	}
 }

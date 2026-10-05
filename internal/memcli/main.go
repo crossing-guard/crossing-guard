@@ -22,8 +22,11 @@ import (
 )
 
 // Main is the memcli entry point: args is everything after the binary name
-// (cmd/cpmem and cmd/crossing-guard both dispatch here). It may os.Exit.
-func Main(args []string) {
+// (cmd/crossing-guard dispatches here). locate finds the daemon the memory read
+// verbs read through; the caller owns the client so this package never imports
+// the daemon's. It may os.Exit.
+func Main(args []string, locate func() (Daemon, error)) {
+	locateDaemon = locate
 	if len(args) < 1 {
 		usage()
 		os.Exit(2)
@@ -118,25 +121,15 @@ func cmdHarvest(args []string) {
 		st.Remaining, st.Orphaned, result.Coverage.State)
 }
 
-type hookPayload struct {
-	HookEventName  string `json:"hook_event_name"`
-	TranscriptPath string `json:"transcript_path"`
-	CWD            string `json:"cwd"`
-}
-
-// readHookPayload parses the hook stdin JSON when the process is hook-invoked
-// (stdin is a pipe). Returns nil for interactive/manual runs.
-func readHookPayload() *hookPayload {
+// readHookPayload transports bounded legacy hook input without interpreting
+// native fields. Explicit runtime selection does not need or read this input.
+func readHookPayload() []byte {
 	fi, err := os.Stdin.Stat()
 	if err != nil || fi.Mode()&os.ModeCharDevice != 0 {
 		return nil
 	}
 	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
-	var hp hookPayload
-	if json.Unmarshal(raw, &hp) != nil || hp.HookEventName == "" {
-		return nil
-	}
-	return &hp
+	return raw
 }
 
 func printJSON(v any) {
@@ -157,8 +150,8 @@ contracts may change; use "crossing-guard init" for the supported first-run path
   crossing-guard memory upsert --id <slug> --title <t> --category <c>
                       [--tags a,b] [--aliases x,y] [--repository r] [--source s]
                       (body from stdin or --content)
-  crossing-guard memory get <id> [--json] | list [--json] | log [--limit N]
-  crossing-guard memory search <query> [--why] [--json] [--category c] [--repository r]
+  crossing-guard memory get <id> [--json] | list [--status s] [--json] | log [--limit N]
+  crossing-guard memory search <query> [--why] [--json] [--category c] [--repository r] [--tag t] [--limit N]
   crossing-guard memory new [id]        (template in $EDITOR, checklist included)
   crossing-guard memory edit <id>       ($EDITOR; validate + restamp on save)
   crossing-guard memory note "<text>"   (quick capture -> pending/, curate later)
@@ -166,7 +159,8 @@ contracts may change; use "crossing-guard init" for the supported first-run path
   crossing-guard memory reject <id> --reason "..."  (pending/ -> rejected/)
   crossing-guard memory delete <id>     (remove + tombstone; retained in local history)
   crossing-guard memory verify <id>     (dated attestation: verified YYYY-MM-DD by user)
-  crossing-guard memory index  [--max-bytes N] [--project r]
+  crossing-guard memory take-team-version <id>  (give up the edit made here; the team's version returns)
+  crossing-guard memory index  [--max-bytes N] [--project r] [--runtime NAME]
 
   crossing-guard harvest [--rebuild]    (refresh transcript projections; --rebuild forces projection replacement only)
   crossing-guard sync [--quiet]         (recovery: import vendor memory + incremental transcript refresh)
@@ -175,7 +169,9 @@ contracts may change; use "crossing-guard init" for the supported first-run path
   crossing-guard attach claude [--settings PATH]   (default ~/.claude/settings.json)
   crossing-guard attach codex  [--config PATH]     (default ~/.codex/config.toml)
 store: $CG_MEMORY_DIR or ~/.crossing-guard/memory; index: $CG_INDEX or ~/.crossing-guard/index.sqlite
-(legacy $CPMEM_DIR / $CPMEM_INDEX still read)`)
+(legacy $CPMEM_DIR / $CPMEM_INDEX still read)
+memory get/list/search/index read through the running daemon and refuse when the index it
+reports is not the index above; the other memory verbs open the index themselves.`)
 }
 
 // ---------- sessions ----------
@@ -220,12 +216,8 @@ func cmdAttach(args []string) {
 	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 	config := fs.String(adapter.ConfigFlag(), adapter.DefaultConfigPath(), "")
 	fs.Parse(args[1:])
-	if err := adapter.Attach(*config, self); err != nil {
+	if _, err := attachAt(adapter, *config, self); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := recordAttachment(adapter.Name(), *config); err != nil {
-		fmt.Fprintf(os.Stderr, "hook may be installed at %s, but attachment evidence was not recorded: %v\n", *config, err)
 		os.Exit(1)
 	}
 }
@@ -238,8 +230,6 @@ func shortID(id string) string {
 	}
 	return id
 }
-
-func dirJoin(parts ...string) string { return strings.Join(parts, "/") }
 
 func orDash(s string) string {
 	if s == "" {

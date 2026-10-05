@@ -35,6 +35,7 @@ import (
 	"crossing-guard/internal/guardcli"
 	"crossing-guard/internal/installprofile"
 	"crossing-guard/internal/orchestration/profilefs"
+	"crossing-guard/internal/platform"
 	"crossing-guard/internal/rulebook"
 	"crossing-guard/internal/workspace"
 )
@@ -63,6 +64,9 @@ func Main(args []string) {
 	policyPath := flags.String("policy", "", "engine policy.json (default: $CG_POLICY, then <data>/policy-engine.json)")
 	noHookInstall := flags.Bool("no-hook-install", false, "do not ensure/repair vendor hooks on startup (default: ensure them)")
 	flags.Parse(args)
+	if err := dropInheritedHandoffTicket(); err != nil {
+		log.Printf("handoff: the daemon's own environment could not be cleared of a ticket: %v", err)
+	}
 
 	// Fix the index location ONCE, from the flag the operator actually passed.
 	// flags.Visit reports only explicitly-set flags, which is the distinction that
@@ -116,6 +120,7 @@ func Main(args []string) {
 			pp = filepath.Join(*dataDir, "policy-engine.json")
 		}
 	}
+	daemonPolicyPath = pp
 	// An absent policy-engine.json is the NORMAL state of a healthy install, not a
 	// fault: enforcement reads policy/rules.json (the hook and the stateful tier both
 	// go through rulebook.Load), so nothing about being governed depends
@@ -136,8 +141,8 @@ func Main(args []string) {
 		ledgerInitErr = initLedger(lp, ledgerDetectors.Detectors, pp)
 	}
 	if ledgerInitErr != nil {
-		log.Printf("engine ledger unavailable (%v) — the dev Ledger tab and the compiled "+
-			"coverage report are off. Enforcement and capture are unaffected.", ledgerInitErr)
+		log.Printf("engine ledger unavailable (%v) — the dev Ledger tab is off. "+
+			"Enforcement and capture are unaffected.", ledgerInitErr)
 	} else {
 		log.Printf("live ledger ready: %s (detectors=%s origin=%s)", lp, ledgerDetectors.Digest, ledgerDetectors.Origin)
 	}
@@ -176,11 +181,24 @@ func Main(args []string) {
 	}
 
 	// Live governor (plan Phase 1b): observe → classify → fold into the one index.
-	// Non-fatal; observe returns 503 if it could not open the index.
-	if governorDetectorErr != nil {
-		log.Printf("governor not configured (%v) — live observe disabled", governorDetectorErr)
-	} else if err := initGovernor(*dataDir, governorDetectors.Detectors); err != nil {
-		log.Printf("governor not configured (%v) — live observe disabled", err)
+	// Non-fatal: without it the daemon serves degraded — observe returns 503 and
+	// /api/govern/health names the reason (serve-startup-unopenable-store plan §2).
+	// A busy store is retried once before the listener exists; exiting instead
+	// would crash-loop the service for as long as the lock is held.
+	governorErr := governorDetectorErr
+	if governorErr == nil {
+		governorErr = initGovernor(*dataDir, governorDetectors.Detectors)
+		if governorStartupBusy(governorErr) {
+			log.Printf("governor: the store is busy (%v) — retrying once", governorErr)
+			if governorErr = initGovernor(*dataDir, governorDetectors.Detectors); governorStartupBusy(governorErr) {
+				governorErr = fmt.Errorf("the store was busy at start-up (%w) — another process held its "+
+					"write lock; restart the daemon to retry", governorErr)
+			}
+		}
+	}
+	if governorErr != nil {
+		setGovernorUnavailable(governorErr)
+		log.Printf("governor not configured (%v) — serving degraded: live observe disabled", governorErr)
 	} else {
 		log.Printf("governor ready: observe → %s", indexPath())
 	}
@@ -203,14 +221,21 @@ func Main(args []string) {
 	}
 	defer closeSpeech()
 	if err := initRuntimeTaskService(indexPath(), taskWorkspaceService); err != nil {
+		runtimeTasksProblem = err.Error()
 		log.Printf("runtime tasks unavailable (%v) — owned chat is disabled", err)
 	} else {
 		defer closeRuntimeTaskService()
 		log.Printf("runtime tasks ready: daemon-owned turns → %s", indexPath())
+		// The handoff owner follows the tasks an Open launched: their first session
+		// frame and their end (team rest-of-release plan §6.3).
+		handoffOpens.start()
 	}
 	initSessionActivityService()
 	defer closeSessionActivityService()
 	log.Printf("native session activity ready: qualified file-open observation every %s", sessionActivityConfig().SamplerInterval())
+	// Named model routes (team rest-of-release plan §5.6): after the store is open and
+	// before any orchestration host is built.
+	prepareModelRoutes(*dataDir, indexPath())
 	if governor != nil {
 		reviewHost, err = newOrchestrationReviewHost(governor.ix, profileOwner)
 		if err != nil {
@@ -225,23 +250,31 @@ func Main(args []string) {
 	if err != nil {
 		log.Printf("managed orchestration unavailable (%v) — lower layers are unaffected", err)
 		managedHost = nil
+		setOrchestrationManagedHostService(nil)
 	} else {
-		defer managedHost.close()
+		setOrchestrationManagedHostService(managedHost)
+		defer func() {
+			setOrchestrationManagedHostService(nil)
+			managedHost.close()
+		}()
 		log.Printf("managed orchestration host ready: optional durable task-event consumer")
 	}
+	wireTeamRestOfRelease(managedHost, reviewHost, profileOwner)
 	// Construction is Governor-independent, but activation waits until the existing
 	// SQLite owners have attempted their opens so a first v22 migration cannot race a
 	// primary owner. The worker itself remains non-blocking for HTTP startup.
 	transcriptCoordinator.Start()
 	defer transcriptCoordinator.Close()
+	// The usage recorder reads every runtime's usage sources into the store on its
+	// own handle (token-usage-analytics plan §3.4); it starts with the other
+	// store owners for the same reason.
+	daemonUsageRecorder = newUsageRecorderCoordinator(indexPath())
+	daemonUsageRecorder.Start()
+	defer daemonUsageRecorder.Close()
 
 	// Publish our listen address so hooks find us on ANY port without an env var
 	// (a hardcoded default port would silently break every non-default daemon).
-	addrFile := filepath.Join(*dataDir, "daemon-addr")
-	if err := os.WriteFile(addrFile, []byte(*addr+"\n"), 0o644); err != nil {
-		log.Printf("warn: could not publish daemon address (%v) — hooks will not find us", err)
-	}
-	defer func() { _ = os.Remove(addrFile) }()
+	defer publishDaemonAddr(*dataDir, *addr)()
 
 	// Self-healing install: make every vendor's hook match THIS binary. "Run
 	// crossing-guard install" was an unowned human step — the same failure mode that left the
@@ -290,10 +323,21 @@ func Main(args []string) {
 				log.Printf("hooks[%s]: ACTION REQUIRED — %s", st.Vendor, st.Manual)
 			}
 		}
+		// Recall tools: repaired only where their own yes is recorded.
+		for _, st := range guardcli.EnsureRecall() {
+			switch st.Action {
+			case "current":
+				log.Printf("recall[%s]: current — %s", st.Vendor, st.Path)
+			case "installed":
+				log.Printf("recall[%s]: REGISTERED/REPAIRED -> %s", st.Vendor, st.Path)
+			default:
+				log.Printf("recall[%s]: %s %s (%s)", st.Vendor, strings.ToUpper(st.Action), st.Detail, st.Path)
+			}
+		}
 		// The platform capability record (item 8): say plainly what THIS GOOS has
 		// demonstrated, so "supported" is never assumed. Item 17 gates stateful
 		// enforcement on it; logging it here makes the gate's basis visible at boot.
-		ps := CurrentPlatformSupport()
+		ps := platform.Current()
 		log.Printf("platform[%s]: service=%s uninstall=%s store-acl=%s stateful-enforcement-ready=%v",
 			ps.GOOS, ps.Service, ps.Uninstall, ps.StoreACL, ps.StatefulEnforcementReady())
 		if ps.Note != "" {
@@ -314,6 +358,19 @@ func Main(args []string) {
 	mux.HandleFunc("POST /api/govern/decide", handleGovernDecide)
 	mux.HandleFunc("GET /api/govern/health", handleGovernHealth)
 	mux.HandleFunc("GET /api/chain/verify", handleChainVerify)
+	// --- the team link (team plan §5.15): the daemon owns it; console and CLI ask ---
+	mux.HandleFunc("GET /api/team", handleTeamStatus)
+	mux.HandleFunc("POST /api/team/link", handleTeamLink)
+	mux.HandleFunc("POST /api/team/unlink", handleTeamUnlink)
+	mux.HandleFunc("POST /api/team/content", handleTeamContent)
+	mux.HandleFunc("GET /api/team/content/sent", handleTeamContentSent)
+	mux.HandleFunc("POST /api/team/memory/share", handleTeamMemoryShare)
+	mux.HandleFunc("GET /api/team/memory/deletions", handleTeamMemoryDeletions)
+	mux.HandleFunc("POST /api/team/memory/take-team-version", handleTeamMemoryTake)
+	mux.HandleFunc("GET /api/team/layers", handleTeamLayers)
+	mux.HandleFunc("POST /api/team/layers/adopt", handleTeamAdopt)
+	mux.HandleFunc("POST /api/team/layers/unadopt", handleTeamUnadopt)
+	registerTeamPublishingRoutes(mux)
 	mux.HandleFunc("GET /api/govern/runtimes", handleGovernRuntimes)
 	mux.HandleFunc("GET /api/govern/sessions", handleGovernSessions)
 	mux.HandleFunc("GET /api/govern/session", handleGovernSession)
@@ -329,6 +386,12 @@ func Main(args []string) {
 
 	// --- session harvest ---
 	mux.HandleFunc("GET /api/sessions", handleSessions)
+	mux.HandleFunc("GET /api/sessions/peers", handleSessionPeers)
+	// --- agent-initiated cross-vendor sends (session-message-cross-vendor-plan §4.1):
+	// one typed, documented POST route; the record is the ledger, the reply is typed.
+	mux.HandleFunc("POST /api/session-message/send", handleSessionMessageSend)
+	mux.HandleFunc("GET /api/session-message/invocations", handleSessionMessageInvocations)
+	mux.HandleFunc("GET /api/session-message/health", handleSessionMessageHealth)
 	mux.HandleFunc("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
 		runtime, id := r.URL.Query().Get("runtime"), r.URL.Query().Get("id")
 		detail, err := LoadSession(runtime, id)
@@ -336,6 +399,8 @@ func Main(args []string) {
 			http.Error(w, err.Error(), 404)
 			return
 		}
+		// The recorded usage (plan D-6); absent until the recorder has read it.
+		detail.Usage, _ = recordedSessionUsage(detail.SessionSummary)
 		writeJSON(w, decorateSessionAgents(detail))
 	})
 	registerSessionGraphRoutes(mux)
@@ -347,9 +412,7 @@ func Main(args []string) {
 	mux.HandleFunc("GET /api/search", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, SearchAll(r.URL.Query().Get("q"), transcriptCoordinator.Coverage()))
 	})
-	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, BuildUsageReport())
-	})
+	registerUsageRoutes(mux)
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, SearchFiles(r.URL.Query().Get("cwd"), r.URL.Query().Get("q")))
 	})
@@ -391,39 +454,41 @@ func Main(args []string) {
 
 	// --- memory ---
 	mux.HandleFunc("GET /api/memory", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, store.ListMemories())
+		handleConsoleMemories(w, store.ListMemories)
 	})
 	mux.HandleFunc("POST /api/memory", func(w http.ResponseWriter, r *http.Request) {
-		var m Memory
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		saved, err := store.UpsertMemory(m)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, saved)
+		handleMemoryUpsert(w, r, store)
 	})
 
+	mux.HandleFunc("GET /api/memory/search", handleMemorySearch)
+
+	// --- owner tags over memory records (plan §6; session grammar, one more
+	// record kind — never agent context, never a rule input) ---
+	mux.HandleFunc("POST /api/memory/tags", handleMemoryTags)
+	mux.HandleFunc("GET /api/memory/tags", handleMemoryTagUses)
+	mux.HandleFunc("GET /api/memory/by-tag", handleMemoryByTag)
+	// The memory settings in one declared place (config-ownership plan Fix A):
+	// the propose consent, read live, plus the search budgets. The MCP propose
+	// tool reads this per invocation; the import throttle stays in doctor.
+	mux.HandleFunc("GET /api/memory/config", handleMemoryConfig)
+
+	// --- memory proposal door for agent sessions (plan §5.2 / RT-6) ---
+	// Consent is checked HERE (recall.propose_enabled), the rate is bounded
+	// per session, and the store enforces pending — an agent can never write
+	// an active record through this route.
+	mux.HandleFunc("POST /api/memory/propose", handleMemoryPropose)
+
 	// --- full record (dossier body) — lazy-fetched on expand ---
-	mux.HandleFunc("GET /api/memory/record", func(w http.ResponseWriter, r *http.Request) {
-		rec, err := GetCpmemMemory(r.URL.Query().Get("id"))
-		if err != nil {
-			http.Error(w, err.Error(), 404)
-			return
-		}
-		writeJSON(w, rec)
-	})
+	mux.HandleFunc("GET /api/memory/record", handleMemoryRecord)
+	// --- one status's records in the /record shape (the CLI's list and
+	// SessionStart index read; memory-reads-through-daemon plan §4.2) ---
+	mux.HandleFunc("GET /api/memory/records", handleMemoryRecords)
+	// --- conflict copies: local versions a team revision or deletion displaced ---
+	mux.HandleFunc("GET /api/memory/conflicts", handleMemoryConflicts)
 
 	// --- memory proposal inbox (engine pending/ queue; R7) ---
 	mux.HandleFunc("GET /api/memory/pending", func(w http.ResponseWriter, r *http.Request) {
-		out := ListPendingMemories()
-		if out == nil {
-			out = []Memory{}
-		}
-		writeJSON(w, out)
+		handleConsoleMemories(w, ListPendingMemories)
 	})
 	mux.HandleFunc("POST /api/memory/promote", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -493,6 +558,7 @@ func Main(args []string) {
 	// --- approvals inbox (gui-design §10.1): the hook's held call + the human act ---
 	mux.HandleFunc("POST /api/approvals/request", handleApprovalRequest)
 	mux.HandleFunc("POST /api/approvals/decision", handleApprovalDecision)
+	mux.HandleFunc("POST /api/approvals/grant/revoke", handleApprovalGrantRevoke)
 	mux.HandleFunc("GET /api/approvals", handleApprovalsList)
 	mux.HandleFunc("GET /api/approvals/stream", handleApprovalsStream)
 	mux.HandleFunc("POST /api/approvals/presence", handleApprovalPresence)
@@ -506,26 +572,41 @@ func Main(args []string) {
 
 	// --- handoff composer (the product verb) ---
 	mux.HandleFunc("GET /api/handoff/generate", handleHandoffGenerate)
-	mux.HandleFunc("POST /api/handoff/publish", handleHandoffPublish)
+	registerTeamHandoffRoutes(mux)
+	registerFolderChooseRoutes(mux)
 
 	// --- fallback chat (SSE over POST) ---
 	mux.HandleFunc("GET /api/chat/auth", handleVendorAuthStatus)
 	mux.HandleFunc("POST /api/chat/auth/start", handleVendorAuthStart)
 	mux.HandleFunc("GET /api/chat/capabilities", handleChatCapabilities)
+	mux.HandleFunc("GET /api/chat/models", handleChatModels)
+	mux.HandleFunc("GET /api/session-turn-settings", handleSessionEffortGet)
+	mux.HandleFunc("PUT /api/session-turn-settings", handleSessionEffortPut)
+	mux.HandleFunc("POST /api/chat/effort-preview", handleEffortPreview)
+	mux.HandleFunc("POST /api/chat/models/refresh", handleChatModelsRefresh)
 	registerEventStreamRoutes(mux)
 	registerConsoleConfigRoutes(mux)
 	registerSessionOrganizationRoutes(mux)
 	registerWorkspaceRoutes(mux, workspaceHost)
-	consoleSettings, _ := consoleConfig()
-	reviewService := workspace.NewReviewService(reviewBudgets(consoleSettings), governor.ix)
+	// The git scopes read recorded session folders from the store; without the
+	// governor's handle they answer store-unavailable instead of dereferencing nil.
+	var reviewService *workspace.ReviewService
+	if governor != nil {
+		consoleSettings, _ := consoleConfig()
+		reviewService = workspace.NewReviewService(reviewBudgets(consoleSettings), governor.ix)
+	}
 	registerWorkspaceDiffRoutes(mux, reviewService)
 	registerWorkspaceFilesRoutes(mux, reviewService)
 	registerTaskInputRoutes(mux)
 	registerSpeechRoutes(mux)
 	registerRuntimeIntegrationRoutes(mux)
-	registerOrchestrationProfileRoutes(mux, profileOwner)
+	pinnedFor := governorPinSource
+	registerOrchestrationProfileRoutes(mux, profileOwner, pinnedFor)
+	registerOrchestrationDraftRoutes(mux, profileOwner, pinnedFor)
 	registerOrchestrationReviewRoutes(mux, reviewHost, profileOwner)
 	registerOrchestrationManagedRoutes(mux, managedHost, profileOwner)
+	registerOrchestrationRosterRoutes(mux, rosterSources{profiles: profileOwner, managed: managedHost, review: reviewHost})
+	registerModelRouteRoutes(mux, *dataDir, profileOwner, managedHost, reviewHost)
 	mux.HandleFunc("POST /api/chat", handleChat)
 	mux.HandleFunc("POST /api/runtime-tasks", handleRuntimeTaskCreate)
 	mux.HandleFunc("GET /api/runtime-tasks", handleRuntimeTaskList)
@@ -536,14 +617,17 @@ func Main(args []string) {
 
 	// --- API contract version (D16) — how a BYO-GUI discovers what it built against ---
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"version": apiVersion,
-			"note": "the canonical path prefix is /api/" + apiVersion + "/; /api/ is a compat alias"})
+		writeJSON(w, daemonVersion(*dataDir, *addr))
 	})
 
 	// --- static UI ---
 	// no-store: embedded files carry zero modtime, so browsers heuristically
 	// cache the SPA forever and every rebuild looks "broken" until a hard
 	// refresh. Localhost + 100KB = revalidation costs nothing.
+	// The appearance sheet is generated from the selected appearance module and
+	// loads between tokens.css and app.css (session-view-and-console-preferences
+	// plan §C2). It guards its own Host, like the redirect below.
+	mux.HandleFunc("GET /appearance.css", appearanceCSSHandler(*addr))
 	sub, _ := fs.Sub(staticFS, "static")
 	staticHandler := http.FileServerFS(sub)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

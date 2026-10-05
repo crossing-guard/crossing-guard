@@ -33,6 +33,7 @@ import (
 
 	"crossing-guard/internal/filelock"
 	"crossing-guard/internal/sessionquery"
+	"crossing-guard/store"
 )
 
 const (
@@ -48,6 +49,50 @@ type SavedSessionView struct {
 	Query   string `json:"query"`
 	GroupBy string `json:"group_by,omitempty"`
 	Sort    string `json:"sort,omitempty"`
+	// RecordKind selects what the view lists: "sessions" (the default and the
+	// only kind before memory views existed) or "memory" (memory-first-class-
+	// records plan §6: the same file, the same grammar, one more record kind).
+	// The empty string means sessions — additive, so an existing file is valid
+	// untouched.
+	RecordKind string `json:"record_kind,omitempty"`
+	// Board turns the view into the kanban rendering (sessions-board plan
+	// rev 3): cards grouped by the view's own `group_by` — which MUST be
+	// `tag-key:<key>` for a board view (one grouping truth, RT-B2/N1) — with
+	// the owner's declared column order and empty-column visibility. The
+	// grouping derives from GroupBy; the board config never names a second
+	// group field.
+	Board *SavedViewBoard `json:"board,omitempty"`
+}
+
+// SavedViewBoard is one view's board configuration. Column names are the
+// owner's vocabulary (no compiled columns — the flows precedent); the
+// framework renders whatever tag values exist, in this order first.
+type SavedViewBoard struct {
+	// Columns is the declared column order. A value observed in the data but
+	// not declared renders after the declared ones; declared columns render
+	// even when empty when EmptyColumns is set.
+	Columns []string `json:"columns,omitempty"`
+	// EmptyColumns renders declared columns that currently hold no sessions.
+	EmptyColumns bool `json:"empty_columns,omitempty"`
+	// Placement are the owner's rules for sessions he has not placed himself
+	// (board-observed-columns plan §2): a session with no owner tag under the
+	// board's key is in the column of the first rule, in this order, whose
+	// query it matches. A rule writes nothing.
+	Placement []SavedViewPlacement `json:"placement,omitempty"`
+}
+
+// SavedViewPlacement is one placement rule: a declared column and a query in
+// the session grammar.
+type SavedViewPlacement struct {
+	Column string `json:"column"`
+	Query  string `json:"query"`
+}
+
+// sessionViewBoardLimits are the owner's budgets for one board view.
+type sessionViewBoardLimits struct{ columns, rules int }
+
+func sessionViewBoardBudgets(o ConsoleSessionOrganization) sessionViewBoardLimits {
+	return sessionViewBoardLimits{columns: o.BoardColumnsMax, rules: o.BoardPlacementRulesMax}
 }
 
 // SavedSessionViewRejection names an entry that could not be used, in words fit to
@@ -117,7 +162,7 @@ func loadSessionViews(dataDir string, limits ConsoleSessionOrganization) session
 	}
 	seen := map[string]bool{}
 	for index, entry := range file.Views {
-		view, err := decodeSessionView(entry, sessionQueryLimits(limits))
+		view, err := decodeSessionView(entry, sessionQueryLimits(limits), sessionViewBoardBudgets(limits))
 		if err == nil && seen[view.ID] {
 			err = fmt.Errorf("the id %q is used twice", view.ID)
 		}
@@ -157,7 +202,7 @@ func sessionViewsToken(raw []byte) string {
 
 // decodeSessionView reads one entry strictly. The partly decoded view comes
 // back even on failure so a rejection can carry the name the owner gave it.
-func decodeSessionView(entry json.RawMessage, limits sessionquery.Limits) (SavedSessionView, error) {
+func decodeSessionView(entry json.RawMessage, limits sessionquery.Limits, board sessionViewBoardLimits) (SavedSessionView, error) {
 	var view SavedSessionView
 	decoder := json.NewDecoder(bytes.NewReader(entry))
 	decoder.DisallowUnknownFields()
@@ -168,12 +213,20 @@ func decodeSessionView(entry json.RawMessage, limits sessionquery.Limits) (Saved
 		_ = json.Unmarshal(entry, &loose)
 		return SavedSessionView{Name: loose.Name}, errors.New("the entry has a field this version does not know, or the wrong type")
 	}
-	return view, validateSessionView(view, limits)
+	return view, validateSessionView(view, limits, board)
 }
 
-func validateSessionView(view SavedSessionView, limits sessionquery.Limits) error {
+func validateSessionView(view SavedSessionView, limits sessionquery.Limits, board sessionViewBoardLimits) error {
 	if view.ID == "" || strings.ContainsAny(view.ID, "/\\ \t\n") {
 		return fmt.Errorf("%w: it needs an id without spaces or slashes", errSessionViewInvalid)
+	}
+	switch view.RecordKind {
+	case "", sessionViewRecordKindSessions:
+		// the default kind; nothing more to check
+	case sessionViewRecordKindMemory:
+		// a memory view: valid by shape; the query grammar is the same one
+	default:
+		return fmt.Errorf("%w: record_kind %q is not one of sessions|memory", errSessionViewInvalid, view.RecordKind)
 	}
 	name := strings.TrimSpace(view.Name)
 	if name == "" || len(name) > sessionViewNameMax {
@@ -182,11 +235,101 @@ func validateSessionView(view SavedSessionView, limits sessionquery.Limits) erro
 	if _, err := sessionquery.Parse(view.Query, limits); err != nil {
 		return err
 	}
-	if _, err := sessionquery.ParseGroupBy(view.GroupBy); err != nil {
+	groupBy, err := sessionquery.ParseGroupBy(view.GroupBy)
+	if err != nil {
 		return err
 	}
-	_, err := sessionquery.ParseSort(view.Sort)
-	return err
+	if _, err := sessionquery.ParseSort(view.Sort); err != nil {
+		return err
+	}
+	if view.Board != nil {
+		return validateSessionViewBoard(*view.Board, groupBy, limits, board)
+	}
+	return nil
+}
+
+// A view's record kind: sessions (also the empty default) or memory records.
+const (
+	sessionViewRecordKindSessions = "sessions"
+	sessionViewRecordKindMemory   = "memory"
+)
+
+// validateSessionViewBoard holds a board to its rules (sessions-board plan
+// §3 and board-observed-columns plan §2.1): one grouping truth, a tag key the
+// owner's moves can be written under; column names that are the owner's
+// vocabulary, storable as that key's values, each naming one group; placement
+// rules that name a declared column and can be decided the same way by every
+// read of the board.
+func validateSessionViewBoard(config SavedViewBoard, groupBy sessionquery.GroupBy, limits sessionquery.Limits, budgets sessionViewBoardLimits) error {
+	if groupBy.Kind != sessionquery.GroupTagKey || groupBy.Key == "" {
+		return fmt.Errorf("%w: a board view needs group_by=tag-key:<key>", errSessionViewInvalid)
+	}
+	if len(config.Columns) > budgets.columns {
+		return fmt.Errorf("%w: a board declares at most %d columns", errSessionViewInvalid, budgets.columns)
+	}
+	// A move is written as an owner tag under the board's key, so the key
+	// must be one a tag can have, whether or not a column is declared yet.
+	if err := store.ValidateSessionOwnerTag(store.SessionOwnerTagValue{Key: groupBy.Key, Value: groupBy.Key}); err != nil {
+		return fmt.Errorf("%w: the board's key %q cannot be a tag key: %v", errSessionViewInvalid, groupBy.Key, err)
+	}
+	// Columns that read the same group are one column: a tag group's key
+	// ignores letter case (board-column-letter-case plan §2).
+	columnByGroup := map[string]string{}
+	for _, column := range config.Columns {
+		column = strings.TrimSpace(column)
+		if column == "" {
+			return fmt.Errorf("%w: a board column needs a name", errSessionViewInvalid)
+		}
+		// A move writes the column as an owner tag under the board's key, so
+		// both must be storable as one.
+		if err := store.ValidateSessionOwnerTag(store.SessionOwnerTagValue{Key: groupBy.Key, Value: column}); err != nil {
+			return fmt.Errorf("%w: board column %q cannot be a tag: %v", errSessionViewInvalid, column, err)
+		}
+		group := sessionGroupKey(groupBy, column)
+		if twin, found := columnByGroup[group]; found {
+			if twin == column {
+				return fmt.Errorf("%w: board column %q is declared twice", errSessionViewInvalid, column)
+			}
+			return fmt.Errorf("%w: board columns %q and %q differ only by letter case, so they are one column; keep one", errSessionViewInvalid, twin, column)
+		}
+		columnByGroup[group] = column
+	}
+	if len(config.Placement) > budgets.rules {
+		return fmt.Errorf("%w: a board has at most %d placement rules", errSessionViewInvalid, budgets.rules)
+	}
+	for index, rule := range config.Placement {
+		if err := validateBoardPlacementRule(rule, groupBy, columnByGroup, limits); err != nil {
+			return fmt.Errorf("%w: placement rule %d (%s): %v", errSessionViewInvalid, index+1, strings.TrimSpace(rule.Column), err)
+		}
+	}
+	return nil
+}
+
+// validateBoardPlacementRule refuses a rule the board's reads could not all
+// decide alike. Search words are ranked and capped; status: and open: depend
+// on the open-session observation, which a column read of a durable view
+// does not take. A rule that names the board's own key could only match a
+// session the owner placed, and those never reach the rules.
+func validateBoardPlacementRule(rule SavedViewPlacement, groupBy sessionquery.GroupBy, columnByGroup map[string]string, limits sessionquery.Limits) error {
+	if _, declared := columnByGroup[sessionGroupKey(groupBy, strings.TrimSpace(rule.Column))]; !declared {
+		return errors.New("it names a column the board does not declare")
+	}
+	query, err := sessionquery.Parse(rule.Query, limits)
+	if err != nil {
+		return err
+	}
+	if query.Empty() {
+		return errors.New("it needs a query")
+	}
+	if !query.Durable() {
+		return errors.New("a rule cannot use status:, open: or search words")
+	}
+	for _, key := range query.TagKeys() {
+		if key == groupBy.Key {
+			return fmt.Errorf("it names %q, the key this board writes moves under", groupBy.Key)
+		}
+	}
+	return nil
 }
 
 // mutateSessionViews is every write. Under the lock it re-reads the file from
@@ -215,9 +358,25 @@ func mutateSessionViews(dataDir string, limits ConsoleSessionOrganization, expec
 		seen := map[string]bool{}
 		for index := range next {
 			next[index].Name = strings.TrimSpace(next[index].Name)
+			if board := next[index].Board; board != nil {
+				// A column is stored as it is validated and rendered: trimmed.
+				trimmed := *board
+				trimmed.Columns = make([]string, len(board.Columns))
+				for at, column := range board.Columns {
+					trimmed.Columns[at] = strings.TrimSpace(column)
+				}
+				trimmed.Placement = make([]SavedViewPlacement, len(board.Placement))
+				for at, rule := range board.Placement {
+					trimmed.Placement[at] = SavedViewPlacement{Column: strings.TrimSpace(rule.Column), Query: strings.TrimSpace(rule.Query)}
+				}
+				if len(trimmed.Placement) == 0 {
+					trimmed.Placement = nil
+				}
+				next[index].Board = &trimmed
+			}
 		}
 		for _, view := range next {
-			if err := validateSessionView(view, sessionQueryLimits(limits)); err != nil {
+			if err := validateSessionView(view, sessionQueryLimits(limits), sessionViewBoardBudgets(limits)); err != nil {
 				return err
 			}
 			if seen[view.ID] {

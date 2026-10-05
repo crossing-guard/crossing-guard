@@ -22,6 +22,7 @@ type ImpactGeneration struct {
 	ConventionSourceRef    string `json:"convention_source_ref,omitempty"`
 	ConventionSourceDigest string `json:"convention_source_digest,omitempty"`
 	ProducedAt             int64  `json:"produced_at"`
+	FactsState             string `json:"facts_state"`
 }
 
 type ImpactNode struct {
@@ -86,6 +87,9 @@ func buildImpact(ix *store.Index, repositoryID, checkoutID string, revision *sto
 	}
 	if generation.Status != "complete" {
 		return unavailableImpact("failed", generation.LimitationCode+": "+generation.Limitation), nil
+	}
+	if factsPruned(generation) {
+		return unavailableImpact("unavailable", factsPrunedReason), nil
 	}
 	allEdges, err := loadGenerationEdges(ix, generation.ID)
 	if err != nil {
@@ -180,7 +184,7 @@ func buildImpact(ix *store.Index, repositoryID, checkoutID string, revision *sto
 	}
 	nodePageValues, nodePage := slice(nodes, opt.ImpactNodeOffset, limit)
 	edgePageValues, edgePage := slice(edges, opt.ImpactEdgeOffset, limit)
-	view := ImpactView{State: state, Generation: &ImpactGeneration{ID: generation.ID, SnapshotProtocol: generation.SnapshotProtocol, SnapshotDigest: generation.SnapshotDigest, StructuralSchema: generation.StructuralSchema, AnalyzerBundleDigest: generation.AnalyzerBundleDigest, ConventionState: generation.ConventionState, ConventionSourceRef: generation.ConventionSourceRef, ConventionSourceDigest: generation.ConventionSourceDigest, ProducedAt: generation.EndedAt}, Center: center, NodePage: nodePage, Nodes: nodePageValues, EdgePage: edgePage, Edges: edgePageValues, Coverage: coverage, Candidates: []codemap.ResponsibilityCandidate{}}
+	view := ImpactView{State: state, Generation: &ImpactGeneration{ID: generation.ID, SnapshotProtocol: generation.SnapshotProtocol, SnapshotDigest: generation.SnapshotDigest, StructuralSchema: generation.StructuralSchema, AnalyzerBundleDigest: generation.AnalyzerBundleDigest, ConventionState: generation.ConventionState, ConventionSourceRef: generation.ConventionSourceRef, ConventionSourceDigest: generation.ConventionSourceDigest, ProducedAt: generation.EndedAt, FactsState: generation.FactsState}, Center: center, NodePage: nodePage, Nodes: nodePageValues, EdgePage: edgePage, Edges: edgePageValues, Coverage: coverage, Candidates: []codemap.ResponsibilityCandidate{}}
 	buildImpactCandidates(ix, generation, center, coverage, opt, &view)
 	return view, nil
 }

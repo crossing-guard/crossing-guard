@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "id": "ckp_22222222222222222222222222",
+  "device_id": "dev_11111111111111111111111111",
+  "session_id": "ses_00000000000000000000000000",
+  "kind": "attachment",
+  "status": "complete",
+  "boundary_class": "direct-pre-release",
+  "repository_id": "remote-sha256-v1:abc",
+  "requested_at": "2026-09-29T10:00:00Z",
+  "ended_at": "2026-09-29T10:00:01Z",
+  "revision": {
+    "kind": "revision",
+    "evidence_class": "observed",
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "snapshot_digest": null,
+    "source_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "verification_result": null,
+    "items": 2
+  },
+  "failure_kind": "",
+  "detail_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

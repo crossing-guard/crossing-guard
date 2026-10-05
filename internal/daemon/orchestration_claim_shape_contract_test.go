@@ -5,7 +5,7 @@ package daemon
 // break). One run with a full v2 claim detail and one reply relationship are
 // written through the real store owners and served through the real HTTP
 // projection; the test then asserts the EXACT field names the JS reads
-// (session-agents-panel.js, agent-turn-decorators.js, settings-agents.js), so
+// (session-agents-panel.js, agent-turn-decorators.js, orchestration/agents/), so
 // a Go rename breaks CI instead of the browser.
 
 import (
@@ -56,8 +56,11 @@ func TestManagedProjectionClaimPayloadShapeMatchesWhatTheGUIReads(t *testing.T) 
 		ProjectRoot: root, CreatedAt: 1, UpdatedAt: 1}
 	// The exact detail shape finishManagedChild + claimRefResolver write.
 	detail := map[string]any{
-		"verdict": "needs changes",
-		"tags":    []any{"needs-review"},
+		"verdict":          "needs changes",
+		"tags":             []any{"needs-review"},
+		"signal":           "task.completed",
+		"delivery":         map[string]any{"state": "accepted"},
+		"context_coverage": []any{map[string]any{"kind": "task.final-response", "state": "supplied"}},
 		"findings": []any{map[string]any{
 			"severity": "warn", "statement": "Missing ADR link",
 			"refs": []any{map[string]any{
@@ -129,4 +132,25 @@ func TestManagedProjectionClaimPayloadShapeMatchesWhatTheGUIReads(t *testing.T) 
 		relationship["source_turn_anchor"] != "anchor-src" || relationship["reply_turn_anchor"] != "anchor-reply" {
 		t.Fatalf("relationship=%v", relationship)
 	}
+
+	// The Agents pages' Activity tab reads the runs route (agents-settings-
+	// redesign plan RT-16): the same claim keys plus its own.
+	registerOrchestrationRosterRoutes(mux, rosterSources{profiles: owner, managed: host})
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/orchestration/roster/design-helper/runs", nil))
+	var page struct {
+		Runs []map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || response.Code != http.StatusOK || len(page.Runs) != 1 {
+		t.Fatalf("runs route status=%d body=%s", response.Code, response.Body.String())
+	}
+	activity := page.Runs[0]
+	requireKeys(t, "activity run", activity, "run_id", "place_id", "outcome", "state", "action", "message",
+		"citations", "detail", "admitted_at", "signal", "session")
+	activityDetail, _ := activity["detail"].(map[string]any)
+	requireKeys(t, "activity run.detail", activityDetail, "delivery", "context_coverage", "findings", "tags")
+	activityFinding, _ := activityDetail["findings"].([]any)[0].(map[string]any)
+	requireKeys(t, "activity finding", activityFinding, "refs")
+	session, _ := activity["session"].(map[string]any)
+	requireKeys(t, "activity run.session", session, "runtime", "catalog_id")
 }

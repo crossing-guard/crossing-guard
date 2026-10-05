@@ -83,6 +83,12 @@ type LineageChild struct {
 	Depth    int    `json:"depth,omitempty"`
 	Role     string `json:"role,omitempty"`
 	Nickname string `json:"nickname,omitempty"`
+	// Description is text the runtime recorded for this child (the parent
+	// model wrote it; the runtime stored it). Carried, never inferred.
+	Description string `json:"description,omitempty"`
+	// Via is the id of the native child that spawned this one, when the
+	// runtime records it; empty for a direct child of the session.
+	Via string `json:"via,omitempty"`
 }
 
 // edgeCollector merges repeated sightings of one relationship into one edge

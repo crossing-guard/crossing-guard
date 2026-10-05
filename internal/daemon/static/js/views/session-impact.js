@@ -210,7 +210,7 @@ function renderImpact(box, change, codeChanges, checkFacts, selection, state, lo
       const open = el('button', '', 'Editor ↗');
       open.title = `Open ${node.ref} in the editor`;
       open.setAttribute('aria-label', `Open file:${node.ref} in editor`);
-      open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cg:open-editor', {detail:{root:selection.cwd || selection.project || '', path:node.ref}})));
+      open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cg:open-editor', {detail:{root:selection.cwd || '', path:node.ref}})));
       actionCell.appendChild(open);
     } else if (node.kind === 'file') {
       const unavailable = el('button', '', 'Editor unavailable · multiple repositories');

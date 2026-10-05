@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +33,9 @@ import (
 	"crossing-guard/engine"
 	"crossing-guard/internal/approvalchoice"
 	"crossing-guard/internal/detectorselection"
+	"crossing-guard/internal/platform"
 	"crossing-guard/internal/rulebook"
+	"crossing-guard/store"
 )
 
 // MaxApprovalResponseBytes bounds a decoded approval wait result.
@@ -51,7 +55,7 @@ const usage = `usage:
 
 // The former format-2 rule types (guard/rule/ruleset with regex `Guards`) are gone.
 // Rules are now engine.Policy in ONE format, evaluated by the ONE evaluator
-// engine.Decide (ADR 0025). The command-guard layer feeds the raw command in as the
+// engine's evaluator (engine.Judge, ADR 0025). The command-guard layer feeds the raw command in as the
 // eval-only `command` tag so a regex rule has something to match.
 
 // detectorsOverlayPath resolves the USER detector overlay: $CG_DETECTORS, else
@@ -141,41 +145,110 @@ type Verdict struct {
 	Decision string // allow | ask | deny
 	Rule     string
 	Guard    string
+	Layer    string // the distribution tier the deciding rule arrived by; "" = unknown
 }
 
-// staticInvocationTags projects the exact invocation facts the standalone rulebook
-// can govern without a daemon. Tool identity is omitted when a command-only caller
-// does not have one; no runtime or tool is guessed.
-func staticInvocationTags(tool, command string) []engine.Tag {
-	tags := []engine.Tag{{Key: engine.CommandTagKey, Value: command}}
-	if tool = engine.BareTool(strings.TrimSpace(tool)); tool != "" {
-		tags = append(tags, engine.Tag{Key: engine.ToolTagKey, Value: tool})
+// Static is what one static evaluation found.
+type Static struct {
+	Decision engine.Decision
+	// Policy is the rules that were evaluated, so a caller binding the fired rule's
+	// boundary looks only at those.
+	Policy *engine.Policy
+	// StateRules counts the GATING rules left to the daemon's stateful tier (they read
+	// session:/target:/agent: state); Undecided counts the gating rules this site could
+	// not decide because a term reads a fact it never produces. Either can make the live
+	// call differ from this answer. Observe/warn rules never block and are not counted.
+	StateRules int
+	Undecided  int
+	Seen       engine.Seen
+}
+
+// StaticDecide is the static tier's only evaluator call. It decides over the rules a
+// daemon-free evaluation can judge (engine.StaticTier: no session:/target:/agent: term),
+// with the site's blind spots: a term the site cannot answer leaves its rule undecided,
+// and an undecided rule does not fire. Every static site goes through here; a scan test
+// pins that no other code in the module calls the engine's evaluators outside the
+// recorded owners, so a new lane cannot reintroduce a rule that fires by absence.
+func StaticDecide(tags []engine.Tag, pol *engine.Policy, unknown engine.Unknown) Static {
+	out := Static{Policy: engine.StaticTier(pol)}
+	if pol != nil {
+		for _, r := range pol.Rules {
+			if r.Gates() && engine.ReferencesState(r.If) {
+				out.StateRules++
+			}
+		}
 	}
-	return tags
+	out.Decision, out.Seen = engine.DecideSeeing(tags, out.Policy, unknown)
+	out.Undecided = out.Seen.GatingUndecided()
+	return out
 }
 
 // verdictOf maps an engine decision over standalone invocation rules onto the CLI verdict.
 // deny (HardBlock) → deny; ask (ConfirmAndRecord) → ask; anything that proceeds →
-// allow. This is the SAME engine.Decide the hook runs — one evaluator, one answer.
+// allow. This is the SAME evaluator the hook runs — one evaluator, one answer.
 func verdictOf(d engine.Decision) Verdict {
 	switch d.Mode {
 	case engine.HardBlock:
-		return Verdict{Decision: "deny", Rule: d.Rule, Guard: d.Rule}
+		return Verdict{Decision: "deny", Rule: d.Rule, Guard: d.Rule, Layer: string(d.Layer)}
 	case engine.ConfirmAndRecord:
-		return Verdict{Decision: "ask", Rule: d.Rule, Guard: d.Rule}
+		return Verdict{Decision: "ask", Rule: d.Rule, Guard: d.Rule, Layer: string(d.Layer)}
 	default:
 		return Verdict{Decision: "allow"}
 	}
 }
 
-// CheckCommand dry-runs the active rules against a command via engine.Decide — the
-// same evaluator cmdCheck and the command subset of the hook's guard layer use.
-func CheckCommand(command string) (Verdict, error) {
+// ActiveDetectors resolves the detector document this process's hook would classify
+// with. A daemon passes its own governor's set to the check functions instead: this
+// loader reads the hook's install profile.
+func ActiveDetectors() ([]engine.Detector, error) {
+	loaded, err := activeDetectorDocument()
+	if err != nil {
+		return nil, err
+	}
+	return loaded.Detectors, nil
+}
+
+// Unjudged is what a dry run could not evaluate (Static's two counts).
+type Unjudged struct {
+	StateRules int
+	Undecided  int
+}
+
+// CheckCommand dry-runs the active rules against a command through StaticDecide — the
+// same evaluator cmdCheck and the hook's tiers use.
+func CheckCommand(command string, dets []engine.Detector) (Verdict, error) {
+	v, _, err := CheckCommandStatic(command, dets)
+	return v, err
+}
+
+// CheckCommandStatic is CheckCommand plus what the dry run could not evaluate, so a
+// preview can say that its ALLOW is not the whole answer.
+func CheckCommandStatic(command string, dets []engine.Detector) (Verdict, Unjudged, error) {
 	pol, err := rulebook.Load()
 	if err != nil {
-		return Verdict{}, err
+		return Verdict{}, Unjudged{}, err
 	}
-	return verdictOf(engine.Decide(staticInvocationTags("", command), pol)), nil
+	st := CheckAction("", command, dets, pol)
+	return verdictOf(st.Decision), Unjudged{StateRules: st.StateRules, Undecided: st.Undecided}, nil
+}
+
+// CheckAction decides a shell command as a dry run. With no tool named it is a command
+// preview: the tool, and every detector fact that needs the tool, a path or a
+// destination, are undecidable there (engine.UnknownInPreview). nil dets means the
+// detector document is unavailable: only the invocation's own facts are readable.
+func CheckAction(tool, command string, dets []engine.Detector, pol *engine.Policy) Static {
+	ev := engine.ActionEvent(tool, command, "", "", "")
+	var unknown engine.Unknown
+	tags := engine.InvocationTags(tool, command)
+	if dets == nil {
+		unknown = engine.UnknownWithoutDetectors
+	} else {
+		tags = engine.ActionTags(ev, dets, command)
+	}
+	if ev.Tool == "" {
+		unknown = engine.AnyUnknown(unknown, engine.UnknownInPreview(dets))
+	}
+	return StaticDecide(tags, pol, unknown)
 }
 
 func logLine(entry map[string]any) {
@@ -228,10 +301,24 @@ func askHuman(session, runtime, ruleID, mode, message, command, tagSum, boundary
 		fmt.Fprintf(os.Stderr, "[crossing-guard] %s approval timing is unverified; failing closed (deny)\n", runtime)
 		return false, "runtime-budget-unverified-fail-closed", ""
 	}
+	// ONE deadline per invocation: the runtime's hook timeout runs from when it started
+	// us, not from this prompt. A second prompt (a stateful ask after a confirmed static
+	// one) gets what the first left; with nothing left the call is denied here, without
+	// asking — a zero budget reads as the full one at the inbox, and a prompt that
+	// outlives the runtime's timeout lets the call proceed unasked.
+	budget -= time.Since(hookStarted)
+	if budget <= 0 {
+		fmt.Fprintf(os.Stderr, "[crossing-guard] no approval time left in this hook run for rule %s; failing closed (deny)\n", ruleID)
+		return false, "ask-budget-exhausted-fail-closed", ""
+	}
 	// Record the hold BEFORE we block: past this line the runtime may kill us.
 	observeAsk("held for human: rule " + ruleID)
 	return askViaInbox(session, runtime, ruleID, mode, message, command, tagSum, boundary, budget)
 }
+
+// hookStarted is when this process began: the runtime's hook timeout is counted from
+// its start of us, so every prompt's budget is measured from here.
+var hookStarted = time.Now()
 
 func hookAskBudget(runtime string) (time.Duration, bool) {
 	if runtime == "" {
@@ -268,6 +355,17 @@ type RuntimeApprovalRequest struct {
 	ToolCallID       string
 	ToolName         string
 	Summary          string
+	// Action, Targets, and ApprovalReason are bounded display facts supplied by
+	// the runtime adapter. Authority and lifetime stay daemon-owned: a provider
+	// cannot widen an approval by changing presentation text.
+	Action         string
+	Targets        []string
+	ApprovalReason string
+	// OfferExactRunGrant asks the daemon to offer its server-owned, task-bound
+	// exact-match option. GrantToken is the opaque capability returned by an
+	// earlier interactive selection in this same runtime run.
+	OfferExactRunGrant bool
+	GrantToken         string
 	// Prompts are the questions the held call is asking its approver, if any.
 	// They are a bounded projection for display and validation; the exact tool
 	// input never leaves the bridge.
@@ -276,36 +374,43 @@ type RuntimeApprovalRequest struct {
 }
 
 type RuntimeApprovalResult struct {
-	Decision string
-	Reason   string
+	Decision   string `json:"decision"`
+	Reason     string `json:"reason,omitempty"`
+	GrantID    string `json:"grant_id,omitempty"`
+	GrantToken string `json:"grant_token,omitempty"`
 	// Selections is the approver's answer to Prompts. Present only on an
 	// allowed decision for a call that carried prompts.
-	Selections []approvalchoice.ChoiceSelection
+	Selections []approvalchoice.ChoiceSelection `json:"selections,omitempty"`
 	// PromptsCompleteness says what the inbox did with the prompts that were
 	// sent: "complete" carried them, "truncated" dropped them for exceeding the
 	// operator's ceilings, empty means none were sent. A bridge that sent
 	// prompts and reads "truncated" knows the approver never saw the options.
-	PromptsCompleteness string
+	PromptsCompleteness string `json:"prompts_completeness,omitempty"`
 }
 
 type approvalWireRequest struct {
-	Origin           string                        `json:"origin,omitempty"`
-	Session          string                        `json:"session,omitempty"`
-	Runtime          string                        `json:"runtime,omitempty"`
-	TaskID           string                        `json:"task_id,omitempty"`
-	CatalogSessionID string                        `json:"catalog_session_id,omitempty"`
-	NativeSessionID  string                        `json:"native_session_id,omitempty"`
-	ToolCallID       string                        `json:"tool_call_id,omitempty"`
-	ToolName         string                        `json:"tool_name,omitempty"`
-	Rule             string                        `json:"rule,omitempty"`
-	Mode             string                        `json:"mode,omitempty"`
-	Message          string                        `json:"message,omitempty"`
-	Command          string                        `json:"command,omitempty"`
-	Summary          string                        `json:"summary,omitempty"`
-	Prompts          []approvalchoice.ChoicePrompt `json:"prompts,omitempty"`
-	FiredTags        []string                      `json:"fired_tags,omitempty"`
-	Boundary         string                        `json:"boundary,omitempty"`
-	TimeoutMS        int                           `json:"timeout_ms"`
+	Origin             string                        `json:"origin,omitempty"`
+	Session            string                        `json:"session,omitempty"`
+	Runtime            string                        `json:"runtime,omitempty"`
+	TaskID             string                        `json:"task_id,omitempty"`
+	CatalogSessionID   string                        `json:"catalog_session_id,omitempty"`
+	NativeSessionID    string                        `json:"native_session_id,omitempty"`
+	ToolCallID         string                        `json:"tool_call_id,omitempty"`
+	ToolName           string                        `json:"tool_name,omitempty"`
+	Rule               string                        `json:"rule,omitempty"`
+	Mode               string                        `json:"mode,omitempty"`
+	Message            string                        `json:"message,omitempty"`
+	Command            string                        `json:"command,omitempty"`
+	Summary            string                        `json:"summary,omitempty"`
+	Action             string                        `json:"action,omitempty"`
+	Targets            []string                      `json:"targets,omitempty"`
+	ApprovalReason     string                        `json:"approval_reason,omitempty"`
+	OfferExactRunGrant bool                          `json:"offer_exact_run_grant,omitempty"`
+	GrantToken         string                        `json:"grant_token,omitempty"`
+	Prompts            []approvalchoice.ChoicePrompt `json:"prompts,omitempty"`
+	FiredTags          []string                      `json:"fired_tags,omitempty"`
+	Boundary           string                        `json:"boundary,omitempty"`
+	TimeoutMS          int                           `json:"timeout_ms"`
 }
 
 func requestApproval(ctx context.Context, in approvalWireRequest, timeout time.Duration,
@@ -363,6 +468,8 @@ func requestRuntimeApproval(ctx context.Context, in RuntimeApprovalRequest,
 		Origin: "runtime_tool", Runtime: in.Runtime, TaskID: in.TaskID,
 		CatalogSessionID: in.CatalogSessionID, NativeSessionID: in.NativeSessionID,
 		ToolCallID: in.ToolCallID, ToolName: in.ToolName, Summary: in.Summary,
+		Action: in.Action, Targets: in.Targets, ApprovalReason: in.ApprovalReason,
+		OfferExactRunGrant: in.OfferExactRunGrant, GrantToken: in.GrantToken,
 		Prompts: in.Prompts, TimeoutMS: int(in.Timeout.Milliseconds()),
 	}, in.Timeout+AskClientSlack, endpoint)
 }
@@ -378,6 +485,39 @@ func RequestRuntimeApprovalFromDataDir(ctx context.Context, dataRoot string, in 
 	return requestRuntimeApproval(ctx, in, func() (string, string, bool) {
 		return daemonEndpointFromDataDir(dataRoot)
 	})
+}
+
+// ReleaseRuntimeApprovalGrantFromDataDir invalidates one opaque run capability.
+// It is best-effort cleanup for the owning runtime protocol; a later run cannot
+// reuse the token because it never receives it and task identity is also checked.
+func ReleaseRuntimeApprovalGrantFromDataDir(ctx context.Context, dataRoot, grantToken string) error {
+	if grantToken == "" {
+		return nil
+	}
+	addr, token, ok := daemonEndpointFromDataDir(dataRoot)
+	if !ok {
+		return errors.New("approval daemon unavailable")
+	}
+	body, _ := json.Marshal(map[string]string{"grant_token": grantToken})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+addr+"/api/v1/approvals/grant/revoke", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-CG-Token", token)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("approval daemon refused grant release: HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // askViaInbox posts the held call to the daemon and blocks until a human decides or
@@ -403,7 +543,7 @@ func askViaInbox(session, runtime, ruleID, mode, message, command, tagSum, bound
 		Origin: "policy_hook", Session: session, Runtime: runtime, Rule: ruleID, Mode: mode,
 		Message: message, Command: command, FiredTags: strings.Split(tagSum, ", "),
 		Boundary: boundary, TimeoutMS: budgetMs,
-	}, time.Duration(budgetMs)*time.Millisecond+AskClientSlack, daemonEndpoint)
+	}, time.Duration(budgetMs)*time.Millisecond+askClientSlack(time.Duration(budgetMs)*time.Millisecond), daemonEndpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[crossing-guard] approvals inbox unreachable (%v); failing closed (deny)\n", err)
 		return false, "inbox-unreachable-fail-closed", ""
@@ -418,6 +558,17 @@ func askViaInbox(session, runtime, ruleID, mode, message, command, tagSum, bound
 	}
 }
 
+// askClientSlack is how long the HTTP client waits past a prompt's budget for the
+// inbox's own expiry answer: AskClientSlack, capped to what is left before the
+// runtime's hook timeout so a hung daemon cannot carry the wait past it.
+func askClientSlack(budget time.Duration) time.Duration {
+	left := RuntimeHookTimeout - time.Since(hookStarted) - budget
+	if left < 0 {
+		return 0
+	}
+	return min(AskClientSlack, left)
+}
+
 // emitDeny is the ONE choke point for a blocked action, so the log write lives here
 // rather than at four call sites where a fifth would forget it.
 //
@@ -428,9 +579,13 @@ func askViaInbox(session, runtime, ruleID, mode, message, command, tagSum, bound
 // cannot forget the switch.
 func emitDeny(reason string) {
 	if off, why := enforcementDisabled(); off {
-		observeDecision("allow", "WOULD BLOCK ("+reason+") — enforcement off: "+why)
+		in, deliveries := observeDecision("allow", "WOULD BLOCK ("+reason+") — enforcement off: "+why)
 		fmt.Fprintf(os.Stderr, "[crossing-guard] enforcement OFF — allowed an action that would be blocked: %s\n", reason)
-		return // no hookSpecificOutput: the tool proceeds
+		// This is an allow boundary, so the daemon may have handed it pending
+		// helper messages and recorded them delivered. Print them exactly as
+		// exitAllow does — context only, never a decision key — or they are lost.
+		printHookContext(in, deliveries)
+		return // no decision key: the tool proceeds
 	}
 	observeDecision("deny", reason)
 	// The runtime's own installer encodes the block where it publishes one;
@@ -458,12 +613,18 @@ type hookInput struct {
 	// RawHookEventName is the event name exactly as the runtime sent it,
 	// before canonicalization — the name an installer's encoder echoes back.
 	RawHookEventName string `json:"-"`
-	// Carrier says this invocation can print injected context for its
-	// runtime: the governed lane when the installer publishes a context
-	// encoder for this event, the collection lane when its plugin captured
-	// stdout (--carrier). It rides every envelope so the daemon hands over
+	// TurnKind is an optional boundary established by a runtime's native decoder.
+	TurnKind string `json:"-"`
+	// Carrier says this invocation can print injected context into the
+	// session's own conversation: the governed lane when the installer
+	// publishes a context encoder for this event and does not report the
+	// invocation as inside a sub-agent, the collection lane when its plugin
+	// captured stdout (--carrier). It rides every envelope so the daemon hands over
 	// pending helper messages only where they can land.
-	Carrier        bool   `json:"-"`
+	Carrier bool `json:"-"`
+	// AgentID is the payload's nested-agent id. Its meaning belongs to the
+	// runtime's installer (HookSubagentReporter), never to this code.
+	AgentID        string `json:"-"`
 	SessionID      string `json:"session_id"`
 	Source         string `json:"source"`
 	ToolName       string `json:"tool_name"`
@@ -482,7 +643,16 @@ type hookInput struct {
 	// ActionID is collector-owned correlation for one attempted tool action. It is
 	// deliberately generic: lower observation/governance code does not know which
 	// optional upper-layer consumers may correlate the committed evidence.
-	ActionID         string          `json:"-"`
+	ActionID string `json:"-"`
+	// Rule is staged by stageRule once a rule produces or asks for this action's
+	// decision; every observation flushed afterwards — the ask, then its resolution —
+	// carries it, so the rule is a field and no longer only prose inside the reason.
+	Rule string `json:"-"`
+	// Layer is staged beside Rule (schema 38): the distribution tier the staged rule
+	// arrived by — user, repository, or organization. The same staging reasoning; the
+	// tier that DECIDED rides with the rule that decided.
+	Layer            string          `json:"-"`
+	LayerReasons     string          `json:"-"`
 	ToolInput        toolInput       `json:"-"`
 	RawToolInput     json.RawMessage `json:"-"`
 	RawEnvelopeBytes int             `json:"-"`
@@ -517,6 +687,7 @@ func (in *hookInput) UnmarshalJSON(b []byte) error {
 		ToolUseID      string          `json:"tool_use_id"`
 		CallID         string          `json:"call_id"`
 		TranscriptPath string          `json:"transcript_path"`
+		AgentID        json.RawMessage `json:"agent_id"`
 		ToolInput      json.RawMessage `json:"tool_input"`
 		ToolResponse   json.RawMessage `json:"tool_response"`
 		ToolResult     json.RawMessage `json:"tool_result"`
@@ -527,6 +698,8 @@ func (in *hookInput) UnmarshalJSON(b []byte) error {
 		DurationMS     *int64          `json:"duration_ms"`
 		Duration       *int64          `json:"duration"`
 		WorkspaceRoots []string        `json:"workspace_roots"`
+		// Raw so a value of the wrong shape cannot fail the whole payload.
+		NotificationType json.RawMessage `json:"notification_type"`
 	}
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return err
@@ -545,6 +718,12 @@ func (in *hookInput) UnmarshalJSON(b []byte) error {
 	}
 	in.Source, in.ToolName, in.Cwd = wire.Source, wire.ToolName, wire.Cwd
 	in.ToolUseID, in.CallID, in.TranscriptPath = wire.ToolUseID, wire.CallID, wire.TranscriptPath
+	// Only a JSON string is an agent id. Any other shape is ignored rather than
+	// failing the whole payload, which would let every call through unjudged.
+	var agentID string
+	if json.Unmarshal(wire.AgentID, &agentID) == nil {
+		in.AgentID = agentID
+	}
 	if wire.DurationMS != nil {
 		in.DurationMS = *wire.DurationMS
 	} else if wire.Duration != nil {
@@ -567,6 +746,13 @@ func (in *hookInput) UnmarshalJSON(b []byte) error {
 	if wire.ErrorMessage != "" {
 		in.ToolIsError = true
 		in.ToolError = wire.ErrorMessage
+	}
+	// Only a JSON string is a sub-type. It is provenance, so any other shape is
+	// ignored: failing the payload would drop the turn it carries (and, were
+	// the field ever sent on a tool call, let that call through unjudged).
+	var notificationType string
+	if json.Unmarshal(wire.NotificationType, &notificationType) == nil {
+		in.NotificationType = notificationType
 	}
 	if len(wire.ToolInput) > 0 && string(wire.ToolInput) != "null" {
 		if err := json.Unmarshal(wire.ToolInput, &in.ToolInput); err != nil {
@@ -666,45 +852,156 @@ func (c *commandField) UnmarshalJSON(b []byte) error {
 	return nil // unknown shape -> empty command -> no guard matches
 }
 
-// engineDecision runs the SHARED engine over a tool-call event (tool identity, path,
-// url) and returns its decision — the same classify→decide the tags/audit/checkpoint
-// paths use. Returns (nil, false) when engine config is absent (engine is additive; a
-// missing detectors/policy file means "engine has nothing to say," not fail-closed —
-// the legacy regex path keeps its own fail-closed semantics). Session-scoped predicates
-// (e.g. "PII AND non-compliant endpoint" accumulated across a session) need the P3
-// ledger daemon; at a bare hook this decides on THIS event's tags only — declared.
-func engineDecision(in hookInput) (*engine.Decision, []engine.Tag, *engine.RuleBoundary, bool) {
-	// Detectors now ship embedded (LoadLayered is never empty), so the ONLY gate
-	// left is policy: with no policy file the engine still says nothing and the
-	// legacy regex path keeps its fail-closed semantics — adding the tag library
-	// cannot change a decision, only what a present policy has to reason over.
+// engineRules is what the hook's engine tier decides over, and which rule sets that
+// includes.
+type engineRules struct {
+	Policy  *engine.Policy // nil: the engine tier does not run
+	Reasons []string
+	// User, Team, Invocation: the engine tier's policy includes the user rulebook's
+	// rules, this checkout's team layers, the invocation file's rules.
+	User, Team, Invocation bool
+}
+
+// hookEngineRules is the one statement of which rules the hook's engine tier loads,
+// shared by the tier itself (engineDecision) and `coverage`, so the label cannot drift
+// from the evaluator. It runs only when the invocation file loads. The team layers
+// concatenate onto the user policy (item 3c): this checkout's repository layer ++ the
+// organization layer, each stamped with its tier, the load reasons riding every
+// observation. The user layer never depends on team parsing: a layered load error
+// leaves the invocation file deciding alone, and the reasons say so.
+//
+// An invocation file with rules is the COMPATIBILITY layer some installs ride beside the
+// user document (postwork M-1's fix): its rules go FIRST, the loader's TEAM rules
+// (repository ++ organization, known from the layered load's own user-prefix count —
+// never a second Load) follow. The user document's own rules are NOT re-appended: the
+// loader already carried them, and doubling them would let a repeated ask outrank the
+// user's deny. Ties keep the first occurrence. When the invocation file IS the user
+// document, its rules are the user rules. With zero rules the layered policy decides.
+func hookEngineRules(supplement *rulebook.InvocationPolicy, supplementErr error, layered rulebook.LayeredPolicy, layeredErr error) engineRules {
+	switch {
+	case supplementErr != nil || supplement == nil || !supplement.Available:
+		return engineRules{}
+	case layeredErr != nil:
+		return engineRules{Policy: supplement.Policy, Invocation: true,
+			Reasons: []string{"team layers could not load: " + layeredErr.Error()}}
+	case supplement.Policy != nil && len(supplement.Policy.Rules) > 0:
+		teamRules := append([]engine.Rule{}, layered.Policy.Rules[layered.UserRuleCount:]...)
+		combined := *layered.Policy
+		combined.Rules = append(append([]engine.Rule{}, supplement.Policy.Rules...), teamRules...)
+		return engineRules{Policy: &combined, Reasons: layered.Reasons, Invocation: true, Team: true,
+			User: isRulebookFile(supplement, layered.UserPath, layered.UserDigest)}
+	default:
+		return engineRules{Policy: layered.Policy, Reasons: layered.Reasons, User: true, Team: true}
+	}
+}
+
+// hookAction is the one action a hook invocation judges: its tags, built once and
+// decided over by every static tier (engine.ActionTags).
+type hookAction struct {
+	tags []engine.Tag
+	// dets is nil when the detector document could not load. The tags are then the
+	// invocation's own facts alone and unknown says so, so a rule reading a detector
+	// fact is left undecided rather than judged over a tag set known to be incomplete.
+	dets    []engine.Detector
+	unknown engine.Unknown
+}
+
+// hookContent is the body of a write-shaped call: the Write content, else the Edit
+// replacement. The hook classifies it and sends it to the stateful consult.
+func hookContent(in hookInput) string {
+	if in.ToolInput.Content != "" {
+		return in.ToolInput.Content
+	}
+	return in.ToolInput.NewString
+}
+
+// actionOf builds the action's tags for the rule sets that will decide it. It
+// classifies only with the detectors whose facts those rules read: a rulebook of
+// command and tool rules (the shipped one) loads no detector document and scans no
+// write body, and a rule on one fact costs that fact's detectors alone.
+func actionOf(in hookInput, pols ...*engine.Policy) hookAction {
+	command := string(in.ToolInput.Command)
+	if !engine.ReadsDetectorFacts(pols...) {
+		return hookAction{tags: engine.InvocationTags(in.ToolName, command), dets: []engine.Detector{}}
+	}
+	loaded, err := activeDetectorDocument()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[crossing-guard] detectors unloadable; rules reading detector facts are not decided:", err)
+		return hookAction{tags: engine.InvocationTags(in.ToolName, command), unknown: engine.UnknownWithoutDetectors}
+	}
+	ev := engine.ActionEvent(in.ToolName, command, hookContent(in), in.ToolInput.FilePath, in.ToolInput.URL)
+	dets := engine.DetectorsRead(loaded.Detectors, pols...)
+	return hookAction{tags: engine.ActionTags(ev, dets, command), dets: loaded.Detectors}
+}
+
+// commandWatermark is the water mark an engine-tier log line carries: the highest data
+// class of this call's command, path and destination under the whole detector library —
+// what the line has always recorded, whichever detectors the rules themselves read.
+func commandWatermark(in hookInput) string {
+	loaded, err := activeDetectorDocument()
+	if err != nil {
+		return ""
+	}
+	ev := engine.ActionEvent(in.ToolName, string(in.ToolInput.Command), "", in.ToolInput.FilePath, in.ToolInput.URL)
+	return engine.WaterMark(engine.Classify(ev, loaded.Detectors))
+}
+
+// undecidedReason is the staged reason a tier adds when it left gating rules undecided.
+func undecidedReason(tier string, st Static) []string {
+	if st.Undecided == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s: %d deny/ask rule(s) not decided (a term reads a fact unavailable to this call)", tier, st.Undecided)}
+}
+
+// loadEngineTier loads the hook's engine tier's rule set: the invocation file's rules
+// and the layers hookEngineRules joins to them. ok is false when there is no invocation
+// file — the engine is additive, and a missing file means "the engine has nothing to
+// say," not fail-closed.
+func loadEngineTier(in hookInput) (engineRules, bool) {
 	supplement, err := rulebook.LoadInvocationPolicy()
 	if err != nil || !supplement.Available {
-		return nil, nil, nil, false
+		return engineRules{}, false
 	}
-	loadedDetectors, err := activeDetectorDocument()
-	if err != nil {
-		return nil, nil, nil, false
-	}
-	dets := loadedDetectors.Detectors
-	pol := supplement.Policy
-	ev := engine.Event{Tool: engine.BareTool(in.ToolName), Path: in.ToolInput.FilePath,
-		Destination: in.ToolInput.URL, Text: string(in.ToolInput.Command), Role: "tool_call"}
-	tags := engine.Classify(ev, dets)
-	d := engine.Decide(tags, pol)
+	// The team layers concatenate onto the user policy (item 3c): this checkout's
+	// repository layer ++ the organization layer, each stamped with its tier, the
+	// load reasons riding every observation. The user layer never depends on team
+	// parsing: a layers load error leaves the user policy deciding, and the
+	// reasons say so.
+	layered, layerLoadErr := rulebook.LoadLayeredFull(in.Cwd, dataDir())
+	return hookEngineRules(supplement, nil, layered, layerLoadErr), true
+}
+
+// engineDecision decides the engine tier's rule set over the action's tags.
+// Session-scoped predicates need the daemon's stateful tier; here the decision is over
+// THIS action's tags only.
+func engineDecision(loaded engineRules, act hookAction) (Static, *engine.RuleBoundary) {
+	st := StaticDecide(act.tags, loaded.Policy, act.unknown)
+	stageLayerReasons(loaded.Reasons)
 	// the compiled honest label for the fired rule (P-COMPILE-2) rides
 	// along so the decision log carries boundary = detection ∧ reach
 	var boundary *engine.RuleBoundary
-	if d.Rule != "" { // allow decisions carry no rule; "" must not bind an id-less rule
-		for _, r := range pol.Rules {
-			if r.ID == d.Rule {
-				b := engine.Boundary(r, dets, engine.ReachStop)
+	// allow decisions carry no rule ("" must not bind an id-less rule); with no detector
+	// document a label would read INERT for a rule that just fired.
+	if st.Decision.Rule != "" && act.unknown == nil {
+		dets := act.dets
+		if len(dets) == 0 { // no rule read a detector fact: the label still names every producer
+			if loadedDets, err := activeDetectorDocument(); err == nil {
+				dets = loadedDets.Detectors
+			}
+		}
+		for _, r := range st.Policy.Rules {
+			if r.ID == st.Decision.Rule {
+				// The hook reads no store on its hot path: the direct-fact catalog is
+				// known, model claims are not (an agent: term reads unverified).
+				// The engine tier fired it, on its own tags: label that tier alone.
+				b := engine.BoundaryOn(r, dets, store.StateProducersFor(nil, 0), engine.ReachStop, engine.TierEngine)
 				boundary = &b
 				break
 			}
 		}
 	}
-	return &d, tags, boundary, true
+	return st, boundary
 }
 
 // emitObserve writes the complete v1 envelope to a local owner-only spool before its
@@ -735,6 +1032,55 @@ func observeAttempt(in hookInput) {
 	pendingObserve = &cp
 }
 
+// stageRule records which rule is producing, or asking for, the staged action's decision.
+// It rides beside the staged action (as pendingDenyRuntime does) because every decision
+// funnel takes prose only; threading an id through fifteen signatures would be the same
+// fact with more places to forget it. A warn-and-proceed rule is deliberately NOT staged:
+// it does not produce the decision, and the tier after it may.
+func stageRule(ruleID string) {
+	if pendingObserve != nil {
+		pendingObserve.Rule = ruleID
+	}
+}
+
+// stageLayerReasons records the layered loader's notes (a expired layer, one that
+// failed to parse, a checkout whose repository layer is not yet staged) so every
+// observation of this action carries WHY the team layers did or did not apply.
+func stageLayerReasons(reasons []string) {
+	if pendingObserve == nil || len(reasons) == 0 {
+		return
+	}
+	// The reasons ride their OWN staged fact, never the tier field (postwork
+	// M-4): the tier is Layer's enum, and storableLayer drops anything else, so
+	// a reasons string there was silently discarded.
+	pendingObserve.LayerReasons = strings.Join(reasons, "; ")
+}
+
+// addStagedReasons appends to the staged reasons instead of replacing them: what a
+// tier could not decide rides beside why the team layers did or did not apply.
+func addStagedReasons(groups ...[]string) {
+	if pendingObserve == nil {
+		return
+	}
+	for _, reasons := range groups {
+		for _, r := range reasons {
+			if pendingObserve.LayerReasons != "" {
+				pendingObserve.LayerReasons += "; "
+			}
+			pendingObserve.LayerReasons += r
+		}
+	}
+}
+
+// stageLayer records the distribution tier the staged rule arrived by (schema 38).
+// Always called beside stageRule: the tier that decided rides with the rule that
+// decided, on the ask, the resolution, and every would-block record.
+func stageLayer(layer string) {
+	if pendingObserve != nil {
+		pendingObserve.Layer = layer
+	}
+}
+
 // observeDecision flushes the staged action WITH its decision. Safe to call more
 // than once — only the first wins, so a path that both denies and falls through
 // cannot double-log. Callers must reach this on every exit; the deny helpers and
@@ -753,9 +1099,17 @@ func exitAllow(reason string) {
 
 // hookCanCarry reports whether this invocation's runtime publishes a context
 // encoder for the raw event — the only case the governed lane can print what
-// the daemon hands it.
+// the daemon hands it — and whether that context would reach the session's own
+// conversation. A hook that fires inside a sub-agent names the parent session,
+// but anything it prints lands in the sub-agent's separate conversation, so it
+// never carries a message addressed to the session (subagent-carrier-boundary
+// plan).
 func hookCanCarry(in hookInput) bool {
-	encoder, ok := hookInstallers[in.Runtime].(HookContextEncoder)
+	installer := hookInstallers[in.Runtime]
+	if reporter, ok := installer.(HookSubagentReporter); ok && reporter.HookRunsInSubagent(in.AgentID) {
+		return false
+	}
+	encoder, ok := installer.(HookContextEncoder)
 	if !ok {
 		return false
 	}
@@ -786,7 +1140,7 @@ func printHookContext(in hookInput, deliveries []observation.Delivery) {
 	joined := ""
 	for index, delivery := range deliveries {
 		if index > 0 {
-			joined += "\n\n"
+			joined += HookContextJoin
 		}
 		joined += delivery.Message
 	}
@@ -848,27 +1202,24 @@ type statefulVerdict struct {
 	rule     string
 	message  string
 	reason   string
+	layer    string // the distribution tier the deciding rule arrived by; "" = unknown
 }
 
 // consultStateful asks the daemon to decide over live session/target state (Phase 3).
 // It returns a verdict ONLY when the daemon evaluated the stateful tier AND a rule
-// denied/asked. Every failure path — no daemon, timeout, non-200, decode error,
+// denied/asked, and beside it how many gating rules the daemon could not decide. Every failure path — no daemon, timeout, non-200, decode error,
 // allow, or not-evaluated — returns nil, which the caller treats as "proceed". That is
 // the fail-open guarantee: a daemon problem can never turn into a blocked tool call.
-func consultStateful(in hookInput) *statefulVerdict {
+func consultStateful(in hookInput) (*statefulVerdict, int) {
 	addr, tok, ok := daemonEndpoint()
 	if !ok {
-		return nil // no daemon → fail open
-	}
-	content := in.ToolInput.Content
-	if content == "" {
-		content = in.ToolInput.NewString
+		return nil, 0 // no daemon → fail open
 	}
 	body, _ := json.Marshal(map[string]any{
 		"session":    in.SessionID,
 		"tool":       in.ToolName,
 		"command":    string(in.ToolInput.Command),
-		"content":    content,
+		"content":    hookContent(in),
 		"file_path":  in.ToolInput.FilePath,
 		"file_paths": structuredFilePaths(in),
 		"cwd":        in.Cwd,
@@ -878,7 +1229,7 @@ func consultStateful(in hookInput) *statefulVerdict {
 	})
 	req, err := http.NewRequest("POST", "http://"+addr+"/api/govern/decide", bytes.NewReader(body))
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tok != "" {
@@ -886,46 +1237,69 @@ func consultStateful(in hookInput) *statefulVerdict {
 	}
 	resp, err := (&http.Client{Timeout: statefulTimeout}).Do(req)
 	if err != nil {
-		return nil // unreachable / timeout → fail open
+		return nil, 0 // unreachable / timeout → fail open
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return nil, 0
 	}
 	var d struct {
-		Decision, Rule, Message, Reason string
-		Evaluated                       bool
+		Decision, Rule, Message, Reason, Layer string
+		Evaluated                              bool
+		Undecided                              int
 	}
 	if json.NewDecoder(resp.Body).Decode(&d) != nil {
-		return nil
+		return nil, 0
 	}
 	if !d.Evaluated || d.Decision == "" || d.Decision == "allow" {
-		return nil // nothing stateful fired → proceed
+		return nil, d.Undecided // nothing stateful fired → proceed
 	}
-	return &statefulVerdict{decision: d.Decision, rule: d.Rule, message: d.Message, reason: d.Reason}
+	return &statefulVerdict{decision: d.Decision, rule: d.Rule, message: d.Message, reason: d.Reason, layer: d.Layer}, d.Undecided
+}
+
+// readHookInput decodes one hook payload the way the installed command for runtime
+// does: through the runtime's own decoder when it has one. The runtime is the
+// installer's flag, never a guess from the payload; whether this invocation can carry
+// injected context is decided here, once, from the decoded payload.
+func readHookInput(payload io.Reader, runtime, event string) (hookInput, error) {
+	var in hookInput
+	var err error
+	if decoder, ok := hookInstallers[runtime].(HookInputDecoder); ok {
+		in, err = decoder.DecodeHookInput(payload, event)
+	} else {
+		err = json.NewDecoder(payload).Decode(&in)
+	}
+	if err != nil {
+		return hookInput{}, err
+	}
+	in.Runtime = runtime
+	in.Carrier = hookCanCarry(in)
+	return in, nil
 }
 
 func cmdHook(args []string) {
-	var in hookInput
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
-		// FAIL-OPEN, on purpose: a payload we cannot parse is most likely a vendor
-		// format change, and denying every tool call on a parse error would brick
-		// the agent (the same reasoning as the stateful consult's fail-open). But
-		// open must not also be SILENT — this line on stderr is the only trace that
-		// every call is sailing past an un-parsing guard.
-		fmt.Fprintln(os.Stderr, "[crossing-guard] hook payload did not parse — allowing without judging:", err)
-		os.Exit(0)
-	}
 	// WHICH runtime invoked us. The installer wrote this into the command, so it is
 	// a fact about the wiring rather than a guess about the payload. Absent (a hook
 	// installed before the flag existed) stays EMPTY and is recorded as unknown —
 	// never defaulted to a vendor, which would attribute one agent's actions to
 	// another in the only record that a blocked action ever existed.
-	in.Runtime = flagValue(args, "--runtime")
-	in.Carrier = hookCanCarry(in)
+	in, decodeErr := readHookInput(os.Stdin, flagValue(args, "--runtime"), flagValue(args, "--event"))
+	if decodeErr != nil {
+		// FAIL-OPEN, on purpose: a payload we cannot parse is most likely a vendor
+		// format change, and denying every tool call on a parse error would brick
+		// the agent (the same reasoning as the stateful consult's fail-open). But
+		// open must not also be SILENT — this line on stderr is the only trace that
+		// every call is sailing past an un-parsing guard.
+		fmt.Fprintln(os.Stderr, "[crossing-guard] hook payload did not parse — allowing without judging:", decodeErr)
+		os.Exit(0)
+	}
 	// A turn-boundary hook carries OUR kind in its own command line, so this
 	// dispatch never has to know the provider's name for it (decision 1, 2026-09-01).
-	if kind := flagValue(args, "--observe"); kind != "" {
+	kind := flagValue(args, "--observe")
+	if kind == "" {
+		kind = in.TurnKind
+	}
+	if kind != "" {
 		printHookContext(in, emitSessionTurn(in, kind))
 		return
 	}
@@ -945,114 +1319,204 @@ func cmdHook(args []string) {
 		return
 	}
 	observeAttempt(in) // staged; flushed WITH the decision by emitDeny/exitAllow
-	// The engine tier: detectors → water mark → severity ladder, decided locally on
-	// THIS event's tags. Session-scoped accumulation lives in the stateful tier below,
-	// consulted from the one daemon (consultStateful).
-	d, tags, boundary, _ := engineDecision(in)
-	var mark string
-	if d != nil {
-		mark = engine.WaterMark(tags)
-	}
-	// ENGINE path (event-local). Maps the severity ladder onto what a hook can
-	// actually do at STOP reach.
-	if d != nil && d.Decision != "allow" {
-		observed := map[string]any{"rule": d.Rule, "mode": string(d.Mode),
-			"fired_tags": tagSummary(d.FiredTags), "watermark": mark,
-			"session": in.SessionID, "via": "engine-local"}
-		if boundary != nil {
-			observed["boundary"] = boundary.Label
-		}
-		switch d.Mode {
-		case engine.HardBlock:
-			logLine(mergeMap(observed, map[string]any{"decision": "deny",
-				"note": "hard-block, non-overridable"}))
-			emitDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s. "+
-				"Tags: %s.", d.Rule, d.Message, tagSummary(d.FiredTags)))
-			os.Exit(0)
-		case engine.ConfirmAndRecord:
-			// the hook's honest override capture: inbox-first (typed, attributed
-			// reason via the console), dialog fallback (button only). Allow does
-			// NOT un-taint; it's recorded as an attributed override.
-			bLabel := ""
-			if boundary != nil {
-				bLabel = boundary.Label
-			}
-			allowed, mode, reason := askHuman(in.SessionID, in.Runtime, d.Rule, string(d.Mode),
-				d.Message, string(in.ToolInput.Command), tagSummary(d.FiredTags), bLabel)
-			claimed := "(dialog-button; no typed reason)"
-			if reason != "" {
-				claimed = reason + " (ATTRIBUTED, NOT VERIFIED)"
-			}
-			decision := "deny"
-			if allowed {
-				decision = "allow"
-			}
-			logLine(mergeMap(observed, map[string]any{"decision": decision,
-				"override":  mode,
-				"claimed":   claimed,
-				"untainted": false}))
-			if allowed {
-				exitAllow("override: " + mode)
-			}
-			emitDeny(fmt.Sprintf("Blocked by rule %s: %s. Tags: %s. Confirm to override "+
-				"(recorded, does not un-taint the session).", d.Rule, d.Message,
-				tagSummary(d.FiredTags)))
-			os.Exit(0)
-		case engine.WarnAndProceed:
-			logLine(mergeMap(observed, map[string]any{"decision": "allow",
-				"note": "warn-and-proceed"}))
-			// warn = proceed, logged; fall through to the legacy regex guard too
-		}
-	}
-	// Command-guard layer (destructive-rm, curl|sh, force-push …), ADDITIVE to the
-	// (The historical name now also includes exact tool-identity rules.) It is additive to
-	// the engine layer above and decided by the SAME evaluator (ADR 0025): the shipped
-	// default rules are engine.Policy, evaluated by engine.Decide over the exact bare tool
-	// identity and raw command. The private regex evaluator is gone.
+	command := string(in.ToolInput.Command)
+	// DECIDE, THEN ASK ONCE. Both static tiers are decided over the one action tag set
+	// before anything is emitted: the engine tier (the invocation file's rule set, when
+	// there is one) and the standalone tier (the user rulebook ++ this checkout's
+	// repository layer ++ the organization layer). Session-scoped accumulation lives in
+	// the stateful tier, consulted from the one daemon after them.
 	//
 	// A missing rules.json is not "unconfigured": rulebook.Load falls back to the SHIPPED
 	// default, so a fresh install is governed by sane rules rather than denying every
 	// tool call (which bricked the agent) or allowing everything. A present-but-broken
 	// file fails CLOSED.
-	pol, err := rulebook.Load()
+	engineSet, engineRan := loadEngineTier(in)
+	pol, layerReasons, err := rulebook.LoadLayered(in.Cwd, dataDir())
 	if err != nil {
 		emitDeny("crossing-guard could not load its rules; failing closed")
 		os.Exit(0)
 	}
-	command := string(in.ToolInput.Command)
-	gd := engine.Decide(staticInvocationTags(in.ToolName, command), pol)
-	if gd.Decision == "allow" {
-		// Static tier allows. Consult the STATEFUL tier (Phase 3) — decisions over the
-		// session's/target's live state that only the daemon holds. FAIL-OPEN: a nil
-		// verdict (no daemon, timeout, nothing fired) means proceed, so a daemon problem
-		// never blocks a tool call.
-		if sv := consultStateful(in); sv != nil {
-			enforceStateful(in, sv, command)
+	act := actionOf(in, engineSet.Policy, pol)
+	var eng Static
+	var boundary *engine.RuleBoundary
+	if engineRan {
+		eng, boundary = engineDecision(engineSet, act)
+	}
+	alone := StaticDecide(act.tags, pol, act.unknown)
+	// The load reasons (expiry, unloadable, not-yet-staged) ride every observation's
+	// reason so a person sees why a team rule did or did not apply.
+	stageLayerReasons(layerReasons)
+	addStagedReasons(undecidedReason("engine tier", eng), undecidedReason("standalone tier", alone))
+
+	d := eng.Decision
+	observed := map[string]any{"rule": d.Rule, "mode": string(d.Mode),
+		"fired_tags": tagSummary(d.FiredTags), "session": in.SessionID, "via": "engine-local"}
+	if engineRan && d.Decision != "allow" {
+		observed["watermark"] = commandWatermark(in)
+	}
+	if boundary != nil {
+		observed["boundary"] = boundary.Label
+	}
+	gd := alone.Decision
+
+	// 1. A hard block from either tier denies at once: nothing is asked first, so a
+	// confirm can never be given for a call a non-overridable rule stops.
+	if engineRan && d.Mode == engine.HardBlock {
+		stageRule(d.Rule)
+		stageLayer(string(d.Layer))
+		logLine(mergeMap(observed, map[string]any{"decision": "deny",
+			"note": "hard-block, non-overridable"}))
+		emitDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s. "+
+			"Tags: %s.", d.Rule, d.Message, tagSummary(d.FiredTags)))
+		os.Exit(0)
+	}
+	if gd.Mode == engine.HardBlock {
+		stageRule(gd.Rule)
+		stageLayer(string(gd.Layer))
+		logLine(map[string]any{"command": command, "rule": gd.Rule, "guard": gd.Rule,
+			"mode": string(gd.Mode), "decision": "deny", "prompt": "auto"})
+		emitDeny(staticDenialReason(gd))
+		os.Exit(0)
+	}
+
+	// 2. Warns. Each rule that warned is logged once, from whichever tier saw it first,
+	// and named in the allow reason; a warn never stages a rule or ends the pipeline.
+	var warned []string
+	if engineRan && d.Mode == engine.WarnAndProceed {
+		logLine(mergeMap(observed, map[string]any{"decision": "allow",
+			"note": "warn-and-proceed"}))
+		warned, _ = noteWarn(warned, d.Rule)
+	}
+	for _, rule := range engine.FiredWarns(gd, alone.Policy) {
+		var fresh bool
+		if warned, fresh = noteWarn(warned, rule); fresh {
+			logLine(map[string]any{"command": command, "rule": rule, "guard": rule,
+				"mode": string(engine.WarnAndProceed), "decision": "allow",
+				"note": "warn-and-proceed", "tier": "static", "all_fired": gd.AllFired})
 		}
-		exitAllow("no rule matched") // static + stateful both clear -> silent allow
 	}
-	allowed := false
-	promptMode := "auto" // deny (HardBlock) takes no prompt
-	reason := ""
-	if gd.Mode != engine.HardBlock {
-		allowed, promptMode, reason = askHuman(in.SessionID, in.Runtime, gd.Rule, "ask",
-			"Guarded operation ("+gd.Rule+")", command, gd.Rule, "")
+
+	// 3. ONE prompt for every confirm-class rule that fired, engine tier first. The
+	// inbox request carries one rule — the first, which is also the one staged — and the
+	// message names the others. Allow does NOT un-taint; it is an attributed override.
+	confirmed := ""
+	engineAsks := engineRan && d.Mode == engine.ConfirmAndRecord
+	if engineAsks || gd.Mode == engine.ConfirmAndRecord {
+		var asking []string
+		if engineAsks {
+			asking = ruleIDs(eng.Seen.Asking())
+		}
+		if gd.Mode == engine.ConfirmAndRecord {
+			for _, id := range ruleIDs(alone.Seen.Asking()) {
+				if !slices.Contains(asking, id) {
+					asking = append(asking, id)
+				}
+			}
+		}
+		also := alsoAsking(asking[1:])
+		var allowed bool
+		var mode, reason string
+		if engineAsks {
+			stageRule(d.Rule)
+			stageLayer(string(d.Layer))
+			bLabel := ""
+			if boundary != nil {
+				bLabel = boundary.Label
+			}
+			allowed, mode, reason = askHuman(in.SessionID, in.Runtime, d.Rule, string(d.Mode),
+				d.Message+also, command, tagSummary(d.FiredTags), bLabel)
+		} else {
+			stageRule(gd.Rule)
+			stageLayer(string(gd.Layer))
+			allowed, mode, reason = askHuman(in.SessionID, in.Runtime, gd.Rule, "ask",
+				"Guarded operation ("+gd.Rule+")"+also, command, gd.Rule, "")
+		}
+		decision := "deny"
+		if allowed {
+			decision = "allow"
+		}
+		// One log line per tier that asked, each in its own shape.
+		if engineAsks {
+			claimed := "(dialog-button; no typed reason)"
+			if reason != "" {
+				claimed = reason + " (ATTRIBUTED, NOT VERIFIED)"
+			}
+			logLine(mergeMap(observed, map[string]any{"decision": decision,
+				"override": mode, "claimed": claimed, "untainted": false, "asked": asking}))
+		}
+		if gd.Mode == engine.ConfirmAndRecord {
+			entry := map[string]any{"command": command, "rule": gd.Rule, "guard": gd.Rule,
+				"mode": string(gd.Mode), "decision": decision, "prompt": mode, "asked": asking}
+			if reason != "" {
+				entry["claimed"] = reason + " (ATTRIBUTED, NOT VERIFIED)"
+			}
+			logLine(entry)
+		}
+		if !allowed {
+			if engineAsks {
+				emitDeny(fmt.Sprintf("Blocked by rule %s: %s. Tags: %s. Confirm to override "+
+					"(recorded, does not un-taint the session).", d.Rule, d.Message,
+					tagSummary(d.FiredTags)))
+			} else {
+				emitDeny(staticDenialReason(gd))
+			}
+			os.Exit(0)
+		}
+		confirmed = "confirmed by user"
+		if engineAsks {
+			confirmed = "override: " + mode
+		}
 	}
-	decision := "deny"
-	if allowed {
-		decision = "allow"
+
+	// 4. The STATEFUL tier (Phase 3) — decisions over the session's/target's live state
+	// that only the daemon holds — is consulted after every static allow AND after every
+	// confirmed static ask: a confirm never skips a state rule. FAIL-OPEN: a nil verdict
+	// (no daemon, timeout, nothing fired) means proceed, so a daemon problem never
+	// blocks a tool call.
+	sv, statefulUndecided := consultStateful(in)
+	if sv != nil {
+		enforceStateful(in, sv, command, confirmed) // never returns
 	}
-	entry := map[string]any{"command": command, "rule": gd.Rule, "guard": gd.Rule,
-		"mode": string(gd.Mode), "decision": decision, "prompt": promptMode}
-	if reason != "" {
-		entry["claimed"] = reason + " (ATTRIBUTED, NOT VERIFIED)"
+	reason := proceedReason(warned) // nothing gated: proceed, naming any warns
+	if confirmed != "" {
+		reason = confirmed
+		if len(warned) > 0 { // a warn beside a confirmed ask is still named
+			reason += "; " + proceedReason(warned)
+		}
 	}
-	logLine(entry)
-	if allowed {
-		exitAllow("confirmed by user") // allow: emit nothing, the tool proceeds
+	if statefulUndecided > 0 {
+		reason += fmt.Sprintf("; %d stateful deny/ask rule(s) not decided (this call has no single target)", statefulUndecided)
 	}
-	emitDeny(staticDenialReason(gd))
-	os.Exit(0)
+	exitAllow(reason)
+}
+
+func ruleIDs(rules []engine.Rule) []string {
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+// alsoAsking names the other confirm-class rules a single prompt covers, bounded so the
+// inbox's message limit is never the reason an ask fails closed.
+func alsoAsking(rest []string) string {
+	const shown = 3
+	if len(rest) == 0 {
+		return ""
+	}
+	rest = slices.Clone(rest)
+	more := ""
+	if len(rest) > shown {
+		more = fmt.Sprintf(" (+%d more)", len(rest)-shown)
+		rest = rest[:shown]
+	}
+	for i, id := range rest {
+		if len(id) > 96 {
+			rest[i] = id[:96] + "…"
+		}
+	}
+	return " Also asking: " + strings.Join(rest, ", ") + more + "."
 }
 
 // collectionHookEmitters makes the collection-only dispatch independently
@@ -1135,8 +1599,13 @@ func hasFlag(args []string, flag string) bool {
 // enforceStateful applies a daemon stateful verdict through the SAME funnels as the
 // static tier — emitDeny (which honors `enforce off`) for deny, askHuman for ask — so
 // the two tiers block identically and a stateful deny is subject to the same override
-// and enforcement-switch rules. A deny never returns; an ask that is confirmed does.
-func enforceStateful(in hookInput, sv *statefulVerdict, command string) {
+// and enforcement-switch rules. Nothing returns: a deny exits through emitDeny and a
+// confirmed ask exits through exitAllow naming the rule. confirmed is the static
+// tiers' own override when one was already given for this call; the prompt here takes
+// what is left of the invocation's one approval budget (askHuman).
+func enforceStateful(in hookInput, sv *statefulVerdict, command, confirmed string) {
+	stageRule(sv.rule)
+	stageLayer(string(engine.Layer(sv.layer)))
 	msg := sv.message
 	if msg == "" {
 		msg = "blocked by a stateful rule over this session's live state"
@@ -1154,7 +1623,13 @@ func enforceStateful(in hookInput, sv *statefulVerdict, command string) {
 		logLine(map[string]any{"command": command, "rule": sv.rule, "tier": "stateful",
 			"decision": decision, "override": mode, "claimed": claimed})
 		if allowed {
-			return // confirmed — fall back to the caller's exitAllow
+			// The resolution names its rule in prose as well as in the staged field, so the
+			// stored row never reads "no rule matched" beside a rule_id.
+			reason := "confirmed by user (stateful rule " + sv.rule + ")"
+			if confirmed != "" {
+				reason += "; static tier: " + confirmed
+			}
+			exitAllow(reason)
 		}
 		emitDeny(fmt.Sprintf("Blocked by stateful rule %s: %s. Confirm to override (recorded).", sv.rule, msg))
 		os.Exit(0)
@@ -1162,6 +1637,24 @@ func enforceStateful(in hookInput, sv *statefulVerdict, command string) {
 	logLine(map[string]any{"command": command, "rule": sv.rule, "tier": "stateful", "decision": "deny"})
 	emitDeny(fmt.Sprintf("Blocked by stateful rule %s: %s. %s", sv.rule, msg, sv.reason))
 	os.Exit(0)
+}
+
+// noteWarn records that rule warned on this action; fresh is false when an earlier
+// tier already warned it, so the caller does not log the same warn twice.
+func noteWarn(warned []string, rule string) (_ []string, fresh bool) {
+	if slices.Contains(warned, rule) {
+		return warned, false
+	}
+	return append(warned, rule), true
+}
+
+// proceedReason is the recorded reason of an action no tier stopped: the warned
+// rules by id, so the stored row never reads "no rule matched" after a warn fired.
+func proceedReason(warned []string) string {
+	if len(warned) == 0 {
+		return "no rule matched"
+	}
+	return "warn-and-proceed: rule " + strings.Join(warned, ", ")
 }
 
 // guardMessage prefers the rule's authored message, falling back to its id so a
@@ -1184,20 +1677,34 @@ func staticDenialReason(d engine.Decision) string {
 }
 
 func cmdCheck(command string) {
-	v, err := CheckCommand(command)
+	dets, detErr := ActiveDetectors()
+	if detErr != nil {
+		fmt.Fprintln(os.Stderr, "detectors unloadable; rules reading detector facts are not decided:", detErr)
+		dets = nil
+	}
+	v, unjudged, err := CheckCommandStatic(command, dets)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	if v.Decision == "allow" {
+	switch v.Decision {
+	case "allow":
 		fmt.Printf("allow    (no rule matched)   %q\n", command)
-		return
+	case "deny":
+		fmt.Printf("DENY     %s   %q\n", v.Rule, command)
+	default:
+		fmt.Printf("ASK      %s   %q\n", v.Rule, command)
 	}
-	verdict := "ASK "
-	if v.Decision == "deny" {
-		verdict = "DENY"
+	if unjudged.StateRules > 0 {
+		fmt.Printf("note: %d deny/ask state rule(s) not evaluated here — the daemon's stateful tier decides them\n", unjudged.StateRules)
 	}
-	fmt.Printf("%s     %s   %q\n", verdict, v.Rule, command)
+	if unjudged.Undecided > 0 {
+		why := "they read the tool, a path or a destination, and a command preview names none"
+		if dets == nil {
+			why = "they read a detector fact or the tool, and the detector document did not load"
+		}
+		fmt.Printf("note: %d deny/ask rule(s) could not be decided here — %s\n", unjudged.Undecided, why)
+	}
 }
 
 // cmdTags runs the SHARED engine (the same classify → water-mark → decide the hook,
@@ -1236,12 +1743,22 @@ func cmdTags(eventJSON string) {
 	fmt.Printf("water-mark: %s\n", markOrWeak(engine.WaterMark(tags)))
 	if supplement, supplementErr := rulebook.LoadInvocationPolicy(); supplementErr == nil && supplement.Available {
 		if pol := supplement.Policy; pol != nil {
-			d := engine.Decide(tags, pol)
+			// A bare event names no invocation: a command or tool term is undecided here.
+			st := StaticDecide(tags, pol, engine.UnknownInvocation)
+			d, static, excluded := st.Decision, st.Policy, st.StateRules
 			fmt.Printf("decision: %s", strings.ToUpper(d.Decision))
 			if d.Rule != "" {
 				fmt.Printf("  [%s] rule=%s — %s", d.Mode, d.Rule, d.Message)
 			}
 			fmt.Println()
+			if excluded > 0 {
+				// This file is the invocation policy, which the daemon never reads —
+				// so unlike `check`, no tier evaluates these (a known limitation).
+				fmt.Printf("note: %d deny/ask state rule(s) in this policy are not evaluated by any tier (the daemon's stateful tier reads only the user rulebook)\n", excluded)
+			}
+			if st.Undecided > 0 {
+				fmt.Printf("note: %d deny/ask rule(s) could not be decided here — they read the raw command or the tool identity, which a tags dry run does not have\n", st.Undecided)
+			}
 			for _, m := range d.Menu {
 				flag := "•"
 				if !m.Live {
@@ -1250,9 +1767,9 @@ func cmdTags(eventJSON string) {
 				fmt.Printf("    [%s] %-20s %s\n", flag, m.Action, m.Why)
 			}
 			if d.Rule != "" { // allow decisions carry no rule
-				for _, r := range pol.Rules {
+				for _, r := range static.Rules {
 					if r.ID == d.Rule {
-						b := engine.Boundary(r, dets, engine.ReachDryRun)
+						b := engine.Boundary(r, dets, store.StateProducersFor(nil, 0), engine.ReachDryRun)
 						fmt.Printf("boundary: %s\n", b.Label)
 						break
 					}
@@ -1262,48 +1779,199 @@ func cmdTags(eventJSON string) {
 	}
 }
 
-// cmdCoverage prints the compiled honest label for every rule in the engine
-// policy (P-COMPILE-2): boundary = detection-coverage ∧ enforcement-reach,
-// derived mechanically — never asserted. The legacy regex layer gets its
-// static config-grade label alongside.
+// cmdCoverage prints the compiled honest label for every rule the live tiers load
+// (P-COMPILE-2): boundary = detection-coverage ∧ enforcement-reach, derived
+// mechanically — never asserted.
 func cmdCoverage() {
+	cwd, _ := os.Getwd()
+	if err := writeCoverage(os.Stdout, cwd); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// writeCoverage labels the rule sets the live tiers load, each at the reach of the
+// tiers that load it (stateful-tier reach plan D-4): the active rulebook as the hook's
+// standalone tier layers it for cwd — its user rules are also the daemon's stateful
+// tier's, armed or not by this platform's capability record — then, when this
+// environment resolves one, the invocation compatibility file, which only the hook's
+// engine tier loads. A rulebook that cannot load is an error: the hook fails closed on
+// it. An unreadable invocation file is a note: no tier evaluates it.
+func writeCoverage(w io.Writer, cwd string) error {
 	loadedDetectors, err := activeDetectorDocument()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "load detectors:", err)
-		os.Exit(1)
+		return fmt.Errorf("load detectors: %w", err)
 	}
 	dets := loadedDetectors.Detectors
-	supplement, err := rulebook.LoadInvocationPolicy()
-	if err != nil || !supplement.Available {
-		fmt.Fprintln(os.Stderr, "load policy:", err)
-		os.Exit(1)
+	doc, err := rulebook.LoadDocument()
+	if err != nil {
+		return fmt.Errorf("load rulebook: %w", err)
 	}
-	pol := supplement.Policy
-	for _, b := range engine.CompileBoundaries(pol, dets, engine.ReachStop) {
-		fmt.Printf("%-24s [%s]  %s\n", b.Rule, b.Mode, b.DetectionLabel)
-		fmt.Printf("    %s\n", b.Label)
+	layered, err := rulebook.LoadLayeredFull(cwd, dataDir())
+	if err != nil {
+		return fmt.Errorf("load rulebook: %w", err)
+	}
+	sp := coverageStateProducers()
+	invocation, invocationErr := rulebook.LoadInvocationPolicy()
+	hookEngine := hookEngineRules(invocation, invocationErr, layered, nil)
+	user := engine.LiveRuleSet{Kind: engine.SetUser, Tier: engine.StatefulUnarmed, HookEngine: engineLoad(hookEngine.User)}
+	armed := "NOT armed on this platform (" + runtime.GOOS + ")"
+	if platform.Current().StatefulEnforcementReady() {
+		user.Tier, armed = engine.StatefulArmed, "armed on this platform — evaluated by the daemon when it runs and resolves this same rulebook (same HOME / CG_RULES)"
+	}
+	fmt.Fprintf(w, "rulebook %s (%s, digest %s)\n", doc.Path, doc.Origin, doc.Digest)
+	fmt.Fprintf(w, "  stateful tier: %s\n", armed)
+	fmt.Fprintf(w, "  hook engine tier: %s\n", hookEngineStatus(invocation, invocationErr, hookEngine.User, false))
+	for _, reason := range layered.Reasons {
+		fmt.Fprintf(w, "  team layers: %s\n", reason)
+	}
+	rules := layered.Policy.Rules
+	if layered.UserRuleCount == 0 {
+		fmt.Fprintln(w, "  no rules")
+	}
+	writeBoundaries(w, engine.CompileLiveBoundaries(&engine.Policy{Rules: rules[:layered.UserRuleCount]}, dets, sp, user))
+	if team := rules[layered.UserRuleCount:]; len(team) > 0 {
+		// The stateful tier loads the adopted team layers for a session in this
+		// checkout (stateful-tier-layered-policy plan), so they sit at the user
+		// rulebook's tier; the audit still loads only the user rulebook.
+		fmt.Fprintf(w, "team layers for %s (the stateful tier loads them for sessions in this checkout)\n", cwd)
+		fmt.Fprintf(w, "  hook engine tier: %s\n", hookEngineStatus(invocation, invocationErr, hookEngine.Team, true))
+		writeBoundaries(w, engine.CompileLiveBoundaries(&engine.Policy{Rules: team}, dets, sp,
+			engine.LiveRuleSet{Kind: engine.SetTeam, Tier: user.Tier, HookEngine: engineLoad(hookEngine.Team)}))
+	}
+	switch {
+	case invocationErr != nil:
+		fmt.Fprintf(w, "invocation file %s unreadable: %v — no tier evaluates it\n", rulebook.InvocationPolicyPath(), invocationErr)
+	case !invocation.Available:
+	case isRulebookFile(invocation, doc.Path, doc.Digest):
+		fmt.Fprintf(w, "invocation file %s (%s) is the rulebook itself — labeled above\n", invocation.Path, invocation.Origin)
+	default:
+		fmt.Fprintf(w, "invocation file %s (%s; only the hook's engine tier loads it, for hooks that resolve this same file)\n",
+			invocation.Path, invocation.Origin)
+		writeBoundaries(w, engine.CompileLiveBoundaries(invocation.Policy, dets, sp,
+			engine.LiveRuleSet{Kind: engine.SetInvocation}))
+	}
+	return nil
+}
+
+// engineLoad maps whether the hook's engine tier includes a rule set, in this process's
+// environment, onto the label's input.
+func engineLoad(loads bool) engine.EngineLoad {
+	if loads {
+		return engine.EngineLoads
+	}
+	return engine.EngineSkips
+}
+
+// hookEngineStatus is the section header line saying whether the hook's engine tier
+// loads a rule set here, and why — the invocation file this environment resolves. The
+// engine tier loads the team layers whenever that file loads, and the user rulebook only
+// when it has no rules or is the rulebook itself (hookEngineRules).
+func hookEngineStatus(inv *rulebook.InvocationPolicy, invErr error, loads, team bool) string {
+	set, when := "this rulebook", "only when it has no rules or is the rulebook itself"
+	if team {
+		set, when = "the team layers", "whenever it loads"
+	}
+	switch {
+	case invErr != nil:
+		return "does not run here — invocation file " + rulebook.InvocationPolicyPath() + " is unreadable"
+	case !inv.Available:
+		return "does not run here — no invocation file at " + inv.Path + " (" + inv.Origin + "); a hook that resolves one loads " + set + " " + when
+	case loads:
+		return "loads " + set + " here — invocation file " + inv.Path + " (" + inv.Origin + ")"
+	default:
+		return "does not load " + set + " here — invocation file " + inv.Path + " (" + inv.Origin + ") has its own rules"
+	}
+}
+
+// isRulebookFile reports whether the invocation file is the file the user rulebook
+// loaded its rules from: the same file AND the same content. A path match alone is not
+// enough — an unselected install reports the legacy path while deciding over the
+// baseline (postwork PW-5).
+func isRulebookFile(inv *rulebook.InvocationPolicy, userPath, userDigest string) bool {
+	return inv.Digest != "" && inv.Digest == userDigest && sameFile(inv.Path, userPath)
+}
+
+// sameFile reports whether two paths name one file, resolving relative paths and links.
+func sameFile(a, b string) bool {
+	ai, errA := os.Stat(a)
+	bi, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ai, bi)
+}
+
+// writeBoundaries prints each rule's label and its per-term coverage rows.
+func writeBoundaries(w io.Writer, bs []engine.RuleBoundary) {
+	for _, b := range bs {
+		fmt.Fprintf(w, "%-24s [%s]  %s\n", b.Rule, b.Mode, b.DetectionLabel)
+		fmt.Fprintf(w, "    %s\n", b.Label)
+		if len(b.Tiers) > 0 {
+			var parts []string
+			for _, v := range b.Tiers {
+				part := v.Tier + ": " + v.DetectionLabel
+				if v.Loads != "yes" {
+					part += " (loads: " + v.Loads + ")"
+				}
+				parts = append(parts, part)
+			}
+			fmt.Fprintf(w, "    tiers: %s\n", strings.Join(parts, "; "))
+		}
 		for _, tc := range b.Detection {
 			neg := ""
 			if tc.Negated {
 				neg = "NOT "
 			}
 			switch {
+			case tc.Unverified:
+				fmt.Fprintf(w, "    - %s%s=%s: UNVERIFIED — %s\n", neg, tc.Tag, tc.Value, tc.Note)
+			case tc.Undetectable && tc.Note != "":
+				fmt.Fprintf(w, "    - %s%s=%s: UNDETECTABLE — %s\n", neg, tc.Tag, tc.Value, tc.Note)
+			case tc.Undetectable && len(b.Tiers) > 0:
+				fmt.Fprintf(w, "    - %s%s=%s: UNDETECTABLE — no tier that loads this rule has a producer for it\n", neg, tc.Tag, tc.Value)
 			case tc.Undetectable:
-				fmt.Printf("    - %s%s=%s: UNDETECTABLE — no detector produces this tag\n", neg, tc.Tag, tc.Value)
+				fmt.Fprintf(w, "    - %s%s=%s: UNDETECTABLE — no detector or declared state producer emits this tag\n", neg, tc.Tag, tc.Value)
 			case !tc.Enumerable:
-				fmt.Printf("    - %s%s=%s: UNKNOWABLE gaps  (detectors: %s)\n", neg, tc.Tag, tc.Value, strings.Join(tc.Detectors, ", "))
+				fmt.Fprintf(w, "    - %s%s=%s: UNKNOWABLE gaps  (producers: %s)%s\n", neg, tc.Tag, tc.Value, strings.Join(tc.Detectors, ", "), termTiers(tc))
+				if len(tc.Limits) > 0 {
+					fmt.Fprintf(w, "      known limits (not exhaustive): %s\n", strings.Join(tc.Limits, "; "))
+				}
 			default:
-				fmt.Printf("    - %s%s=%s: enumerable  (detectors: %s; gaps: %s)\n",
-					neg, tc.Tag, tc.Value, strings.Join(tc.Detectors, ", "), strings.Join(tc.Gaps, "; "))
+				fmt.Fprintf(w, "    - %s%s=%s: enumerable  (producers: %s; gaps: %s)%s\n",
+					neg, tc.Tag, tc.Value, strings.Join(tc.Detectors, ", "), strings.Join(tc.Gaps, "; "), termTiers(tc))
 			}
 		}
 	}
-	if loaded, err := rulebook.LoadDocument(); err == nil && len(loaded.Policy.Rules) > 0 {
-		fmt.Printf("%-24s [legacy]  best-effort [config]\n", "rules.json guards")
-		fmt.Println("    regex guards on shell-command text; per-tool hook registration;")
-		fmt.Printf("    active=%s selection=%s digest=%s\n", loaded.Origin, loaded.Selection, loaded.Digest)
-		fmt.Println("    coverage not canary-probed — a hard guarantee needs a non-bypassable backstop")
+}
+
+// termTiers is a term row's suffix naming the tiers in which the term has a producer.
+func termTiers(tc engine.TermCoverage) string {
+	if len(tc.Tiers) == 0 {
+		return ""
 	}
+	return "  (tiers: " + strings.Join(tc.Tiers, ", ") + ")"
+}
+
+// coverageStateProducers reads the non-detector producers `coverage` labels with: the
+// direct-fact catalog, and the model-claim producers from the governance store the
+// hook's daemon writes (read-only, as `entities` reads it). The note names the store
+// it read, so a label computed from a store that is not the daemon's is visible; when
+// no store can be read, agent: terms stay unverified rather than a guessed INERT.
+func coverageStateProducers() engine.StateProducers {
+	path := store.IndexPath("", homeDir())
+	if _, err := os.Stat(path); err != nil {
+		sp := store.StateProducersFor(nil, 0)
+		sp.AgentClaimsNote = "no governance store at " + path
+		return sp
+	}
+	ix, err := store.OpenRO(path)
+	if err != nil {
+		sp := store.StateProducersFor(nil, 0)
+		sp.AgentClaimsNote = "the governance store at " + path + " could not be opened: " + err.Error()
+		return sp
+	}
+	defer ix.Close()
+	sp := store.StateProducersFor(ix, time.Now().Unix())
+	sp.AgentClaimsNote += " (" + path + ")"
+	return sp
 }
 
 func markOrWeak(m string) string {
@@ -1316,6 +1984,11 @@ func markOrWeak(m string) string {
 func tagSummary(tags []engine.Tag) string {
 	var parts []string
 	for _, t := range tags {
+		if t.Key == engine.CommandTagKey {
+			// The raw command is its own field of every log line and prompt; in this
+			// comma-joined summary it would split into false tags at the inbox.
+			continue
+		}
 		parts = append(parts, t.Key+"="+t.Value)
 	}
 	if len(parts) == 0 {
@@ -1494,34 +2167,46 @@ func cmdDetectors(args []string) {
 			fmt.Fprintln(os.Stderr, "usage: detectors lint <file>")
 			os.Exit(1)
 		}
-		dets, err := engine.LoadDetectors(args[1])
+		count, problems, err := lintDetectorFile(args[1])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "INVALID:", err)
 			os.Exit(1)
 		}
-		bad := 0
-		for _, d := range dets {
-			if d.ID == "" {
-				fmt.Println("  ✗ a detector has no id (the merge key)")
-				bad++
-			}
-			if d.Disabled {
-				continue // a tombstone is just id+disabled; it declares nothing else
-			}
-			if !d.Coverage.Enumerable && len(d.Coverage.Gaps) == 0 {
-				fmt.Printf("  ✗ %s: declares no coverage (not enumerable, no gaps)\n", d.ID)
-				bad++
-			}
+		for _, p := range problems {
+			fmt.Println("  ✗ " + p)
 		}
-		if bad > 0 {
-			fmt.Fprintf(os.Stderr, "%d problem(s)\n", bad)
+		if len(problems) > 0 {
+			fmt.Fprintf(os.Stderr, "%d problem(s)\n", len(problems))
 			os.Exit(1)
 		}
-		fmt.Printf("OK: %d detectors — all compile and declare coverage\n", len(dets))
+		fmt.Printf("OK: %d detectors — all compile and declare coverage\n", count)
 	default:
 		fmt.Fprintln(os.Stderr, "usage: detectors [status | list | preview | select | unselect | init [path] | lint <file>]")
 		os.Exit(1)
 	}
+}
+
+// lintDetectorFile is `detectors lint`'s check, without the printing and exit: a load
+// error (bad JSON, bad regex, a reserved state-namespace tag key — engine.CompileDetectors)
+// fails the whole document; otherwise each missing id or undeclared coverage is a problem.
+func lintDetectorFile(path string) (int, []string, error) {
+	dets, err := engine.LoadDetectors(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	var problems []string
+	for _, d := range dets {
+		if d.ID == "" {
+			problems = append(problems, "a detector has no id (the merge key)")
+		}
+		if d.Disabled {
+			continue // a tombstone is just id+disabled; it declares nothing else
+		}
+		if !d.Coverage.Enumerable && len(d.Coverage.Gaps) == 0 {
+			problems = append(problems, d.ID+": declares no coverage (not enumerable, no gaps)")
+		}
+	}
+	return len(dets), problems, nil
 }
 
 func detectorSelectionSource(value string) (string, string) {

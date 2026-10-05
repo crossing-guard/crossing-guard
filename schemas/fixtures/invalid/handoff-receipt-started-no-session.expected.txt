@@ -1,0 +1,2 @@
+error-contains: missing required property "session"
+A started receipt names the session that claimed the ticket; without it the delivery row cannot link two sessions.

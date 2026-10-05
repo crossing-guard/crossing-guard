@@ -3,7 +3,8 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,15 +73,10 @@ func (codexSkills) Coverage(sk *Skill) CoverageCell {
 // JSON-RPC. Seconds-scale — only ever user-triggered.
 func (codexSkills) Probe() *ProbeInfo {
 	pi := &ProbeInfo{At: time.Now().UTC().Format(time.RFC3339)}
-	bin := "codex"
-	if _, err := exec.LookPath(bin); err != nil {
-		bundled := "/Applications/ChatGPT.app/Contents/Resources/codex"
-		if _, err := os.Stat(bundled); err == nil {
-			bin = bundled
-		} else {
-			pi.Err = "codex binary not found"
-			return pi
-		}
+	bin, err := codexBinary("")
+	if err != nil {
+		pi.Err = err.Error()
+		return pi
 	}
 	cmd := exec.Command(bin, "app-server")
 	stdin, err := cmd.StdinPipe()
@@ -99,47 +95,105 @@ func (codexSkills) Probe() *ProbeInfo {
 	}
 	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
 
-	send := func(v any) { b, _ := json.Marshal(v); fmt.Fprintf(stdin, "%s\n", b) }
-	send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
-		"params": map[string]any{"clientInfo": map[string]any{"name": "consoleprobe", "title": "consoleprobe", "version": "0.0.1"}}})
-
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
-	deadline := time.After(8 * time.Second)
-	lines := make(chan string, 64)
+	lines := make(chan []byte, 64)
 	go func() {
 		for sc.Scan() {
-			lines <- sc.Text()
+			lines <- append([]byte(nil), sc.Bytes()...)
 		}
 		close(lines)
 	}()
+	rpc := &codexAppServer{stdin: stdin, lines: lines, deadline: time.After(8 * time.Second)}
+	result, err := rpc.initializeAndCall("consoleprobe", "skills/list", map[string]any{})
+	switch {
+	case errors.Is(err, errCodexAppServerTimeout):
+		pi.Err = "timeout waiting for app-server response"
+		return pi
+	case errors.Is(err, errCodexAppServerClosed):
+		pi.Err = "app-server closed without a skills/list response"
+		return pi
+	case err != nil:
+		pi.Err = "skills/list error: " + err.Error()
+		return pi
+	}
+	var decoded any
+	_ = json.Unmarshal(result, &decoded)
+	collectNames(decoded, pi)
+	pi.OK = true
+	return pi
+}
+
+// codexAppServer speaks the app-server's newline-delimited JSON-RPC over a
+// stdin writer and a line stream. The caller owns the process: the skills
+// probe its own pipes, model discovery the framework's bounded runner session.
+type codexAppServer struct {
+	stdin    io.Writer
+	lines    <-chan []byte
+	deadline <-chan time.Time // nil: the line stream's own end bounds the exchange
+	done     <-chan struct{}  // optional: the caller's context
+	nextID   int
+}
+
+var (
+	errCodexAppServerClosed  = errors.New("app-server closed")
+	errCodexAppServerTimeout = errors.New("app-server timed out")
+)
+
+func (c *codexAppServer) send(message map[string]any) error {
+	message["jsonrpc"] = "2.0"
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	_, err = c.stdin.Write(append(encoded, '\n'))
+	return err
+}
+
+// call sends one request and returns its result; notifications and replies to
+// other ids are skipped. A JSON-RPC error returns its message.
+func (c *codexAppServer) call(method string, params any) (json.RawMessage, error) {
+	c.nextID++
+	id := c.nextID
+	if err := c.send(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+		return nil, errCodexAppServerClosed
+	}
 	for {
 		select {
-		case <-deadline:
-			pi.Err = "timeout waiting for app-server response"
-			return pi
-		case line, ok := <-lines:
+		case <-c.deadline:
+			return nil, errCodexAppServerTimeout
+		case <-c.done:
+			return nil, errCodexAppServerTimeout
+		case line, ok := <-c.lines:
 			if !ok {
-				pi.Err = "app-server closed without a skills/list response"
-				return pi
+				return nil, errCodexAppServerClosed
 			}
-			var obj map[string]any
-			if json.Unmarshal([]byte(line), &obj) != nil {
+			var reply struct {
+				ID     any             `json:"id"`
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(line, &reply) != nil || reply.ID != float64(id) {
 				continue
 			}
-			switch obj["id"] {
-			case float64(1):
-				send(map[string]any{"jsonrpc": "2.0", "method": "initialized", "params": map[string]any{}})
-				send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "skills/list", "params": map[string]any{}})
-			case float64(2):
-				if errObj, isErr := obj["error"].(map[string]any); isErr {
-					pi.Err = "skills/list error: " + anyString(errObj["message"])
-					return pi
-				}
-				collectNames(obj["result"], pi)
-				pi.OK = true
-				return pi
+			if reply.Error != nil {
+				return nil, errors.New(reply.Error.Message)
 			}
+			return reply.Result, nil
 		}
 	}
+}
+
+// initializeAndCall performs the initialize handshake, then one call.
+func (c *codexAppServer) initializeAndCall(client, method string, params any) (json.RawMessage, error) {
+	if _, err := c.call("initialize", map[string]any{"clientInfo": map[string]any{
+		"name": client, "title": client, "version": "0.0.1"}}); err != nil {
+		return nil, err
+	}
+	if err := c.send(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+		return nil, errCodexAppServerClosed
+	}
+	return c.call(method, params)
 }

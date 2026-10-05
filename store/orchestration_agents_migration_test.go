@@ -213,6 +213,7 @@ func TestKindRepairRunsOnStampedV24StoreMissingKindColumn(t *testing.T) {
 	}
 	family := strings.Replace(orchestrationManagedSchemaV25,
 		"  kind TEXT NOT NULL DEFAULT '' CHECK(kind IN ('','reply','correction','delegate')),\n", "", 1)
+	family = strings.Replace(family, "  thinking_effort TEXT NOT NULL DEFAULT 'null',\n", "", 1)
 	family = strings.Replace(family,
 		"  watch_natural INTEGER NOT NULL DEFAULT 0 CHECK(watch_natural IN (0,1)),\n", "", 1)
 	// Historical v24 stores predate the v25 provider-outage shape too: no

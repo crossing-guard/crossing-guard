@@ -10,7 +10,9 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,16 +58,30 @@ type SessionRef struct {
 // honesty is bounded by ~1.5 s. Measured trigger: the console boot fires the rail
 // plus every expanded repository page at once, and each request re-ran the full
 // vendor-store scan — ~6 concurrent scans, minutes of aggregate CPU after a restart.
+//
+// It also carries typed per-runtime outcomes with last-good presentation state
+// (opencode-session-visibility-and-status plan D4): a successful scan becomes
+// that runtime's in-memory last-good list; a later error pairs it with degraded
+// health. The current view serves exact/mutable callers; the presentation view
+// serves the rail with qualified last-good rows.
+//
+// The problem is why the scan's change-evidence enrichment could not read the
+// store, stored in the same critical section as the rows it qualifies, so a
+// reader never pairs one scan's rows with another scan's reason by more than one
+// completed scan.
 type scanCoalescer struct {
-	mu      sync.Mutex
-	waiting chan struct{}
-	result  []SessionSummary
-	done    time.Time
+	mu       sync.Mutex
+	waiting  chan struct{}
+	result   []SessionSummary
+	problem  string
+	outcomes []harvest.RuntimeScanOutcome
+	done     time.Time
+	lastGood map[string]harvest.RuntimeScanOutcome
 }
 
 const scanReuseWindow = 1500 * time.Millisecond
 
-func (c *scanCoalescer) get(scan func() []SessionSummary) []SessionSummary {
+func (c *scanCoalescer) get(scan func() ([]SessionSummary, string)) []SessionSummary {
 	c.mu.Lock()
 	if c.result != nil && time.Since(c.done) < scanReuseWindow {
 		out := c.result
@@ -83,13 +99,53 @@ func (c *scanCoalescer) get(scan func() []SessionSummary) []SessionSummary {
 	}
 	ch := make(chan struct{})
 	c.waiting = ch
+	existingLastGood := c.lastGood
 	c.mu.Unlock()
-	out := scan()
+	out, problem, outcomes := scanWithOutcomes(scan, existingLastGood)
 	c.mu.Lock()
-	c.result, c.done, c.waiting = out, time.Now(), nil
+	c.result, c.problem, c.outcomes, c.done, c.waiting = out, problem, outcomes, time.Now(), nil
+	if c.lastGood == nil {
+		c.lastGood = map[string]harvest.RuntimeScanOutcome{}
+	}
+	for _, o := range outcomes {
+		if o.Health.Status == "available" {
+			c.lastGood[o.Runtime] = o
+		}
+	}
 	c.mu.Unlock()
 	close(ch)
 	return append([]SessionSummary(nil), out...)
+}
+
+// lastCompleted returns the most recent completed scan without starting one;
+// nil before the first. It is for a reader that may use the catalog but must
+// not pay for a scan (search).
+func (c *scanCoalescer) lastCompleted() []SessionSummary {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]SessionSummary(nil), c.result...)
+}
+
+// runtimeHealth returns the current per-runtime health outcomes for the rail
+// API. It returns nil when no scan has completed yet. The outcomes persist
+// beyond the scanReuseWindow because health is the most recent fact we have,
+// not a cached value that goes stale — a degraded source stays degraded until
+// the next successful scan clears it.
+func (c *scanCoalescer) runtimeHealth() []harvest.RuntimeScanOutcome {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.outcomes == nil {
+		return nil
+	}
+	return append([]harvest.RuntimeScanOutcome(nil), c.outcomes...)
+}
+
+// changeEvidenceProblem is why the latest completed scan listed no sessions from
+// recorded change evidence, or "" when the store was read (or not created yet).
+func (c *scanCoalescer) changeEvidenceProblem() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.problem
 }
 
 var sessionScanCoalescer = &scanCoalescer{}
@@ -101,30 +157,78 @@ func ScanSessions() []SessionSummary {
 	return sessionScanCoalescer.get(scanSessionsUncoalesced)
 }
 
-func scanSessionsUncoalesced() []SessionSummary {
+// scanWithOutcomes runs the enriched summary scan and the typed health scan
+// together so the coalescer stores both in one pass. The typed scan runs
+// concurrently with the summary scan to avoid doubling latency.
+func scanWithOutcomes(scan func() ([]SessionSummary, string), lastGood map[string]harvest.RuntimeScanOutcome) ([]SessionSummary, string, []harvest.RuntimeScanOutcome) {
+	var summaries []SessionSummary
+	var problem string
+	var typed harvest.ScanOutcomes
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); summaries, problem = scan() }()
+	go func() { defer wg.Done(); typed = harvest.ScanSessionsTyped() }()
+	wg.Wait()
+	outcomes := buildPresentationOutcomes(typed, lastGood)
+	return summaries, problem, outcomes
+}
+
+// buildPresentationOutcomes builds presentation outcomes from the typed scan
+// and the coalescer's last-good map. When lastGood is nil (called outside the
+// coalescer), it returns raw outcomes without degraded pairing.
+func buildPresentationOutcomes(typed harvest.ScanOutcomes, lastGood map[string]harvest.RuntimeScanOutcome) []harvest.RuntimeScanOutcome {
+	presentation := make([]harvest.RuntimeScanOutcome, 0, len(typed.Outcomes))
+	for _, outcome := range typed.Outcomes {
+		if outcome.Health.Status == "available" {
+			presentation = append(presentation, outcome)
+		} else if lastGood != nil {
+			if lg, ok := lastGood[outcome.Runtime]; ok {
+				degraded := outcome
+				degraded.Records = lg.Records
+				degraded.Health.Status = "degraded"
+				degraded.Health.LastGoodAt = lg.Health.LastGoodAt
+				presentation = append(presentation, degraded)
+			} else {
+				presentation = append(presentation, outcome)
+			}
+		} else {
+			presentation = append(presentation, outcome)
+		}
+	}
+	return presentation
+}
+
+// scanSessionsUncoalesced returns the vendor rows merged with the sessions the
+// store knows from change evidence, and why that merge could not run (a store
+// that is not created yet is no problem: nothing was recorded). The vendor rows
+// are returned either way; only the evidence-derived part is missing, and the
+// problem says so rather than letting a shorter list read as the whole one.
+// Per-row metadata misses and the id cap stay silent.
+func scanSessionsUncoalesced() ([]SessionSummary, string) {
 	// No enrichment merge. The branch/commits/PR chips came from sessions.db, an
 	// EXPERIMENT's output that stopped being written on 2026-07-16 — so they were
 	// frozen decoration rendered as current fact. Deriving them from our own store
 	// is Phase 5's work-artifact extraction; until then the honest state is absent,
 	// not stale (INV-22).
 	out := harvest.ScanSessions()
-	if _, err := os.Stat(indexPath()); err != nil {
-		return out
+	ix, err := openIndexForRead()
+	if errors.Is(err, errIndexNotCreated) {
+		return out, ""
 	}
-	ix, err := store.OpenRO(indexPath())
 	if err != nil {
-		return out
+		return out, err.Error()
 	}
 	defer ix.Close()
 	ids, err := ix.EnvelopeSessionIDs(500)
 	if err != nil {
-		return out
+		return out, err.Error()
 	}
+	// An envelope keyed by a thread id marks the thread's own rows, never a
+	// subagent rollout that merely carries that id.
 	seen := map[string]int{}
 	for i, s := range out {
-		seen[s.ID] = i
-		if s.ThreadID != "" {
-			seen[s.ThreadID] = i
+		for _, id := range sessionIdentities(s) {
+			seen[id] = i
 		}
 	}
 	for _, id := range ids {
@@ -149,7 +253,7 @@ func scanSessionsUncoalesced() []SessionSummary {
 		out = append(out, SessionSummary{Runtime: runtime, ID: id, Title: title, TitleSource: "envelope-claim", Modified: time.Unix(0, recs[0].RecordedAt), Cwd: recs[0].CheckoutRoot, Project: filepath.Base(recs[0].CheckoutRoot), HasChangeEvidence: true})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
-	return out
+	return out, ""
 }
 
 // catalogSessionExists validates the exact row identity already owned by the harvest
@@ -171,7 +275,7 @@ func LoadSession(runtime, id string) (*SessionDetail, error) {
 	// Collect EVERY match, not the first. MatchID resolves a codex thread id to all
 	// of its rollout segments; picking whichever the scan happened to yield first was
 	// silent and non-deterministic.
-	matches := harvest.FindAll(runtime, id)
+	matches, listErr := harvest.FindAllChecked(runtime, id)
 	if len(matches) > 0 {
 		// Newest wins — the segment a human asking about a thread almost always means.
 		primary := 0
@@ -190,22 +294,32 @@ func LoadSession(runtime, id string) (*SessionDetail, error) {
 				}
 			}
 			var err error
-			d.Events, d.Unparsed, d.Usage, err = harvest.NormalizeSummary(s, false)
-			// zero turns = no telemetry observed; show "unknown", not zeros
-			if d.Usage != nil && d.Usage.Turns == 0 {
-				d.Usage = nil
-			}
+			// Usage is left to the session route, which adds the recorded figures
+			// (plan D-6): the live stream, audit and handoff load sessions every
+			// tick or in bulk and never show usage (code red-team C-7).
+			d.Events, d.Unparsed, _, err = harvest.NormalizeSummary(s, false)
 			d.Facts = FactsFor(&d.SessionSummary)
 			return d, err
 		}
 	}
-	if _, err := os.Stat(indexPath()); err == nil {
-		ix, e := store.OpenRO(indexPath())
-		if e == nil {
-			defer ix.Close()
-			if detail := sessionWithoutTranscript(ix, runtime, id); detail != nil {
-				return detail, nil
-			}
+	if listErr != nil {
+		// The runtime's session store could not be read, so "not found" would
+		// be a guess. The fallback below answers "no transcript file was found"
+		// and would dress an empty or kept transcript as the session.
+		return nil, fmt.Errorf("session store unreadable: %s/%s: %w", runtime, id, listErr)
+	}
+	// The store may still know the session from change evidence or a kept
+	// transcript; a store that cannot be read is said, not read as "not found"
+	// (memory-store-unavailable-reads plan, postwork RT-P4).
+	ix, err := openIndexForRead()
+	switch {
+	case errors.Is(err, errIndexNotCreated):
+	case err != nil:
+		return nil, fmt.Errorf("session store unreadable: %s/%s: %w", runtime, id, err)
+	default:
+		defer ix.Close()
+		if detail := sessionWithoutTranscript(ix, runtime, id); detail != nil {
+			return detail, nil
 		}
 	}
 	return nil, fmt.Errorf("session not found: %s/%s", runtime, id)
@@ -246,18 +360,21 @@ func sessionWithoutTranscript(ix *store.Index, runtime, id string) *SessionDetai
 	return detail
 }
 
-func BuildUsageReport() *harvest.UsageReport { return harvest.BuildUsageReport() }
-
 // --- search (the bounded relational projection only) ---
 
 type SearchHit struct {
 	Runtime  string `json:"runtime"`
 	ID       string `json:"id"`
 	ResumeID string `json:"resume_id,omitempty"`
-	Title    string `json:"title"`
-	Project  string `json:"project"`
-	Kind     string `json:"kind"`
-	Snippet  string `json:"snippet"`
+	// NativeOpen is the session's desktop-app link, copied from its summary.
+	NativeOpen harvest.NativeOpenLink `json:"native_open,omitzero"`
+	Title      string                 `json:"title"`
+	Project    string                 `json:"project"`
+	// Cwd is the session's declared working directory; the rail shortens it,
+	// never the project label (session-view plan §A5).
+	Cwd     string `json:"cwd,omitempty"`
+	Kind    string `json:"kind"`
+	Snippet string `json:"snippet"`
 }
 
 // SearchResult wraps indexed hits with the latest completed reconciliation coverage.
@@ -265,7 +382,13 @@ type SearchResult struct {
 	Source   string                   `json:"source"`
 	Coverage transcriptindex.Coverage `json:"coverage"`
 	Hits     []SearchHit              `json:"hits"`
+	// EventLimit is how many matching events were read before hits were
+	// grouped one per session; a caller filtering hits filters after it.
+	EventLimit int `json:"event_limit"`
 }
+
+// searchEventLimit is the CLI's default event-hit budget, shared by the route.
+const searchEventLimit = 20
 
 // SearchAll queries only the maintained FTS projection. Coverage, including an
 // incomplete zero, remains explicit; request-time raw transcript scans are forbidden.
@@ -273,9 +396,32 @@ func SearchAll(q string, coverage transcriptindex.Coverage) SearchResult {
 	hits, err := searchViaIndex(q)
 	if err != nil {
 		return SearchResult{Source: "fts5 [index]",
-			Coverage: transcriptindex.UnavailableCoverage(err), Hits: []SearchHit{}}
+			Coverage: transcriptindex.UnavailableCoverage(err), Hits: []SearchHit{}, EventLimit: searchEventLimit}
 	}
-	return SearchResult{Source: "fts5 [index]", Coverage: coverage, Hits: hits}
+	linkSearchHits(hits, sessionScanCoalescer.lastCompleted())
+	return SearchResult{Source: "fts5 [index]", Coverage: coverage, Hits: hits, EventLimit: searchEventLimit}
+}
+
+// linkSearchHits gives each hit its session's desktop-app link. The index row
+// cannot say whether a session is a subagent, and only the runtime adapter may
+// decide that, so the link comes from the scanned catalog row with the same
+// runtime and catalog id. A hit whose session the last scan did not hold gets
+// none; search never starts a scan to find out.
+func linkSearchHits(hits []SearchHit, sessions []SessionSummary) {
+	if len(hits) == 0 || len(sessions) == 0 {
+		return
+	}
+	links := make(map[string]harvest.NativeOpenLink, len(sessions))
+	for _, session := range sessions {
+		if session.NativeOpen != (harvest.NativeOpenLink{}) {
+			links[session.Runtime+"/"+session.ID] = session.NativeOpen
+		}
+	}
+	for i := range hits {
+		if link, ok := links[hits[i].Runtime+"/"+hits[i].ID]; ok {
+			hits[i].NativeOpen = link
+		}
+	}
 }
 
 func searchMetadataByIdentity(sessions []SessionSummary) map[string]SessionSummary {
@@ -297,8 +443,10 @@ func searchMetadataByIdentity(sessions []SessionSummary) map[string]SessionSumma
 func enrichSearchHitIdentity(hit SearchHit, session SessionSummary) SearchHit {
 	hit.ID = session.ID
 	hit.ResumeID = session.ResumeID
+	hit.NativeOpen = session.NativeOpen
 	hit.Title = session.Title
 	hit.Project = session.Project
+	hit.Cwd = session.Cwd
 	return hit
 }
 
@@ -324,6 +472,27 @@ func indexPath() string {
 	return resolvedIndexPath
 }
 
+// errIndexNotCreated means the store does not exist and this process never
+// opened it: nothing has been recorded yet, so a read answers empty.
+var errIndexNotCreated = errors.New("the store has not been created yet")
+
+// openIndexForRead opens the store read-only for an API read, telling "not
+// created yet" (errIndexNotCreated, read as empty) from "cannot be read" (any
+// other error, answered as unavailable with its reason). A missing file is
+// "not created" only while no governor holds the store: the governor creates it
+// before the listener, so a file missing under a running governor was deleted or
+// its volume is gone. Lstat, so a dangling symlink reaches OpenRO and fails there.
+func openIndexForRead() (*store.Index, error) {
+	path := indexPath()
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		if governor == nil {
+			return nil, errIndexNotCreated
+		}
+		return nil, fmt.Errorf("the index %s is missing (deleted, or its volume is gone)", path)
+	}
+	return store.OpenRO(path)
+}
+
 func searchViaIndex(q string) ([]SearchHit, error) {
 	if len(strings.TrimSpace(q)) < 2 {
 		return []SearchHit{}, nil
@@ -337,7 +506,7 @@ func searchViaIndex(q string) ([]SearchHit, error) {
 		return nil, err
 	}
 	defer ix.Close()
-	events, err := ix.SearchEvents(q, 20) // the CLI's default event-hit budget
+	events, err := ix.SearchEvents(q, searchEventLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +537,7 @@ func searchViaIndex(q string) ([]SearchHit, error) {
 			Runtime: ev.Vendor, ID: ev.SessionID, Kind: ev.Kind,
 			Snippet: truncate(ev.Text, 180),
 		}, SessionSummary{ID: catalogID, ResumeID: resumeID,
-			Title: ev.Title, Project: ev.Project})
+			Title: ev.Title, Project: ev.Project, Cwd: ev.CWD})
 		hits = append(hits, h)
 		if len(hits) >= 50 {
 			break

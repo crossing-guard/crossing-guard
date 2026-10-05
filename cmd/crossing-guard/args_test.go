@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"crossing-guard/internal/daemon"
+	"crossing-guard/internal/platform"
 )
 
 func TestParseOpenArgs(t *testing.T) {
@@ -23,21 +23,30 @@ func TestParseOpenArgs(t *testing.T) {
 }
 
 func TestParseInitArgs(t *testing.T) {
-	dry, yes, err := parseInitArgs([]string{"-n", "--yes"})
-	if err != nil || !dry || !yes {
-		t.Fatalf("parseInitArgs = (%v, %v, %v), want true, true, nil", dry, yes, err)
+	dry, yes, recall, err := parseInitArgs([]string{"-n", "--yes"})
+	if err != nil || !dry || !yes || recall != "" {
+		t.Fatalf("parseInitArgs = (%v, %v, %q, %v), want true, true, \"\", nil", dry, yes, recall, err)
 	}
-	if _, _, err := parseInitArgs([]string{"--dry-run=true", "extra"}); err == nil {
+	if _, _, _, err := parseInitArgs([]string{"--dry-run=true", "extra"}); err == nil {
 		t.Error("unexpected positional argument must be a usage error")
+	}
+	if _, _, recall, _ := parseInitArgs([]string{"--recall"}); recall != "yes" {
+		t.Errorf("--recall = %q", recall)
+	}
+	if _, _, recall, _ := parseInitArgs([]string{"--no-recall"}); recall != "no" {
+		t.Errorf("--no-recall = %q", recall)
+	}
+	if _, _, _, err := parseInitArgs([]string{"--recall", "--no-recall"}); err != errRecallConflict {
+		t.Errorf("--recall --no-recall = %v, want a usage error", err)
 	}
 }
 
 func TestInitPlatformWarningUsesCapabilityRecord(t *testing.T) {
-	if warning := initPlatformWarning(daemon.PlatformSupportFor("darwin")); warning != "" {
+	if warning := initPlatformWarning(platform.For("darwin")); warning != "" {
 		t.Fatalf("demonstrated platform warned: %q", warning)
 	}
 	for _, goos := range []string{"linux", "windows"} {
-		support := daemon.PlatformSupportFor(goos)
+		support := platform.For(goos)
 		warning := initPlatformWarning(support)
 		for _, want := range []string{goos, "Stateful enforcement will NOT arm", string(support.Service), support.Note} {
 			if !strings.Contains(warning, want) {

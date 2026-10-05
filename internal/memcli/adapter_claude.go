@@ -15,61 +15,106 @@ func init() { registerAdapter(claudeAdapter{}) }
 // claudeAdapter integrates memory hooks into a Claude settings.json.
 type claudeAdapter struct{}
 
-func (claudeAdapter) Name() string       { return "claude" }
-func (claudeAdapter) ConfigFlag() string { return "settings" }
+func (claudeAdapter) Name() string { return "claude" }
+func (claudeAdapter) EncodeMemoryIndex(block string) ([]byte, error) {
+	return []byte(block), nil
+}
+
+func (claudeAdapter) MatchesLegacyMemoryHook([]byte) bool { return false }
+func (claudeAdapter) ConfigFlag() string                  { return "settings" }
 func (claudeAdapter) DefaultConfigPath() string {
 	return filepath.Join(home(), filepath.FromSlash(vendorpaths.ClaudeSettingsRelative))
 }
 
-// Attach merges SessionStart/Stop hooks into a Claude settings.json, preserving
-// everything already there.
-func (claudeAdapter) Attach(settingsPath, selfPath string) error {
+// claudeMemoryHookCommand is the one command shape the memory hook is installed
+// with. Its spelling is pinned by a test: the installed command line is a
+// contract with every settings file already written.
+func claudeMemoryHookCommand(selfPath string) string { return selfPath + " memory index" }
+
+// readClaudeHooks reads a settings file and its hooks object, refusing a shape
+// it would have to replace.
+func readClaudeHooks(settingsPath string) (vendorconfig.Snapshot, map[string]any, map[string]any, error) {
 	snapshot, err := vendorconfig.Read(settingsPath)
 	if err != nil {
-		return err
+		return snapshot, nil, nil, err
 	}
 	cfg := map[string]any{}
 	if snapshot.Exists {
 		if err := json.Unmarshal(snapshot.Data, &cfg); err != nil {
-			return fmt.Errorf("parse %s: %w", settingsPath, err)
+			return snapshot, nil, nil, fmt.Errorf("parse %s: %w", settingsPath, err)
 		}
 	}
 	rawHooks, hooksPresent := cfg["hooks"]
 	hooks, hooksOK := rawHooks.(map[string]any)
 	if hooksPresent && !hooksOK {
-		return fmt.Errorf("%s: hooks must be a JSON object; refusing to replace it", settingsPath)
+		return snapshot, nil, nil, fmt.Errorf("%s: hooks must be a JSON object; refusing to replace it", settingsPath)
 	}
 	if !hooksPresent {
 		hooks = map[string]any{}
 	}
-	changed := false
-	added, err := ensureHookEntry(hooks, "SessionStart", "startup|resume|clear|compact", selfPath+" memory index")
+	return snapshot, cfg, hooks, nil
+}
+
+// Attach merges SessionStart/Stop hooks into a Claude settings.json, preserving
+// everything already there.
+func (claudeAdapter) Attach(settingsPath, selfPath string) (bool, error) {
+	snapshot, cfg, hooks, err := readClaudeHooks(settingsPath)
 	if err != nil {
-		return fmt.Errorf("%s: %w", settingsPath, err)
+		return false, err
 	}
-	if added {
-		changed = true
+	added, err := ensureHookEntry(hooks, "SessionStart", "startup|resume|clear|compact", claudeMemoryHookCommand(selfPath))
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", settingsPath, err)
 	}
 	// Stop is no longer written here. guardcli is the ONE writer of vendor
 	// lifecycle hooks (2026-09-01, amends E22); memory sync on turn end is
 	// dropped — the lifecycle hooks already deliver the source hints the
 	// index needs, and two features writing one hook event was a defect.
-	if !changed {
+	if !added {
 		fmt.Println("already installed:", settingsPath)
-		return nil
+		return false, nil
 	}
 	cfg["hooks"] = hooks
 	out, _ := json.MarshalIndent(cfg, "", "  ")
 	backup, err := vendorconfig.Replace(settingsPath, snapshot, append(out, '\n'))
 	if err != nil {
-		return err
+		return false, err
 	}
 	fmt.Println("installed SessionStart hook →", settingsPath)
 	if backup != "" {
 		fmt.Println("backup (immediate prior) →", backup)
 	}
 	fmt.Println("verify: start a fresh claude session, then run: crossing-guard doctor")
-	return nil
+	return true, nil
+}
+
+// Detach removes the SessionStart hook whose command is exactly the one an
+// Attach for selfPath wrote. The entry carries no marker, so the exact command
+// is the only thing that identifies it; an entry with any other command — a
+// hand-added one, another build's — is left alone, as is everything else in
+// the file.
+func (claudeAdapter) Detach(settingsPath, selfPath string) (bool, error) {
+	snapshot, cfg, hooks, err := readClaudeHooks(settingsPath)
+	if err != nil || !snapshot.Exists {
+		return false, err
+	}
+	removed, err := removeHookCommand(hooks, "SessionStart", claudeMemoryHookCommand(selfPath))
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	if !removed {
+		return false, nil
+	}
+	if len(hooks) == 0 {
+		delete(cfg, "hooks")
+	} else {
+		cfg["hooks"] = hooks
+	}
+	out, _ := json.MarshalIndent(cfg, "", "  ")
+	if _, err := vendorconfig.Replace(settingsPath, snapshot, append(out, '\n')); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // MemoryHookBinary reads settings.json for our SessionStart memory hook.

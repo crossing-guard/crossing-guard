@@ -17,6 +17,21 @@ import (
 var runtimeTasks *TaskApplicationService
 var runtimeTaskIndex *store.Index
 
+// runtimeTasksProblem says why the task service never opened (the
+// taskInputsProblem shape). Written once by Main before the listener exists and
+// only read afterwards; closing the service does not clear it.
+var runtimeTasksProblem string
+
+// runtimeTasksUnavailable is the 503 text for a route that needs the task
+// service: its subject plus the start-up reason, so the console pill and the
+// composer say why (degraded-surfaces-state-the-reason plan §2.1).
+func runtimeTasksUnavailable(subject string) string {
+	if runtimeTasksProblem == "" {
+		return subject
+	}
+	return subject + ": " + runtimeTasksProblem
+}
+
 func initRuntimeTaskService(path string, workspace taskWorkspace) error {
 	index, err := store.Open(path)
 	if err != nil {
@@ -47,13 +62,20 @@ func closeRuntimeTaskService() {
 	runtimeTasks = nil
 }
 
+// runtimeTaskRefusal is a typed refusal of a task create: a data code the browser
+// branches on, and a sentence.
+type runtimeTaskRefusal struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func handleRuntimeTaskCreate(w http.ResponseWriter, r *http.Request) {
 	if runtimeTasks == nil {
-		http.Error(w, "runtime task service unavailable", http.StatusServiceUnavailable)
+		http.Error(w, runtimeTasksUnavailable("runtime task service unavailable"), http.StatusServiceUnavailable)
 		return
 	}
 	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeManagedJSON(w, r, &req, 0); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -63,9 +85,21 @@ func handleRuntimeTaskCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	task, created, err := runtimeTasks.Create(req, key)
 	if err != nil {
+		if writeEffortError(w, err) {
+			return
+		}
 		var inputErr *taskinput.Error
 		if errors.As(err, &inputErr) {
 			writeTaskInputServiceError(w, err)
+			return
+		}
+		var handoffErr *handoffLaunchError
+		if errors.As(err, &handoffErr) {
+			// The same typed shape as session_in_use: the composer branches on the
+			// code ("the sender withdrew this handoff" is handoff_withdrawn).
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(runtimeTaskRefusal{Code: handoffErr.Code, Message: handoffErr.Message})
 			return
 		}
 		if errors.Is(err, ErrSessionInUse) {
@@ -92,9 +126,14 @@ func handleRuntimeTaskCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, task)
 }
 
+// handleRuntimeTaskList is the console's opening task snapshot. Its only 503 is
+// the nil-service branch, which lasts for the life of the process: the event
+// stream client relies on that to open the stream without the snapshot instead
+// of retrying it (degraded-surfaces-state-the-reason plan §2.2). Any transient
+// failure added here must not be a 503.
 func handleRuntimeTaskList(w http.ResponseWriter, r *http.Request) {
 	if runtimeTasks == nil {
-		http.Error(w, "runtime task service unavailable", http.StatusServiceUnavailable)
+		http.Error(w, runtimeTasksUnavailable("runtime task service unavailable"), http.StatusServiceUnavailable)
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -129,7 +168,7 @@ func handleRuntimeTaskList(w http.ResponseWriter, r *http.Request) {
 
 func handleRuntimeTaskInterrupt(w http.ResponseWriter, r *http.Request) {
 	if runtimeTasks == nil {
-		http.Error(w, "runtime task service unavailable", http.StatusServiceUnavailable)
+		http.Error(w, runtimeTasksUnavailable("runtime task service unavailable"), http.StatusServiceUnavailable)
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("task"))
@@ -151,7 +190,7 @@ func handleRuntimeTaskInterrupt(w http.ResponseWriter, r *http.Request) {
 
 func handleRuntimeTaskStream(w http.ResponseWriter, r *http.Request) {
 	if runtimeTasks == nil {
-		http.Error(w, "runtime task service unavailable", http.StatusServiceUnavailable)
+		http.Error(w, runtimeTasksUnavailable("runtime task service unavailable"), http.StatusServiceUnavailable)
 		return
 	}
 	flusher, ok := w.(http.Flusher)

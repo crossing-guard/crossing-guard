@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"crossing-guard/internal/sessionactivity"
+	"crossing-guard/store"
 )
 
 func init() {
@@ -45,6 +46,12 @@ var errSessionStatusOwner = errors.New("session status owner unavailable")
 // identity it folds is the NATIVE id (the hooks' and the task service's key);
 // the catalog id only widens the task lookup when the two differ.
 func foldSessionStatus(now time.Time, runtime, catalogID, nativeID string) (sessionStatusFrame, error) {
+	return foldSessionStatusWith(now, runtime, catalogID, nativeID, nil)
+}
+
+// foldSessionStatusWith folds with one sampler pass's owner-attention read;
+// a nil batch reads this session's attention alone (an event refold).
+func foldSessionStatusWith(now time.Time, runtime, catalogID, nativeID string, batch *ownerAttentionBatch) (sessionStatusFrame, error) {
 	config := sessionStreamConfig()
 	in := sessionStatusInputs{Now: now, Quiet: config.Quiet()}
 	lookback := config.LookbackRows
@@ -56,18 +63,24 @@ func foldSessionStatus(now time.Time, runtime, catalogID, nativeID string) (sess
 	// Owned tasks: the one fully observed "working", and the owner of task
 	// attention. An active task wins outright; otherwise the newest terminal.
 	taskIDs := map[string]bool{}
+	var sessionTasks []RuntimeTask
+	var turns []store.SessionTurnObservation
+	var turnsErr, tasksErr error
 	if runtimeTasks != nil {
 		tasks, err := runtimeTasks.List(runtime, nativeID, lookback)
 		if err != nil {
+			tasksErr = err
 			failures = append(failures, fmt.Errorf("tasks: %w", err))
 		}
 		if catalogID != "" && catalogID != nativeID {
 			more, err := runtimeTasks.List(runtime, catalogID, lookback)
 			if err != nil {
+				tasksErr = err
 				failures = append(failures, fmt.Errorf("tasks by catalog id: %w", err))
 			}
 			tasks = append(tasks, more...)
 		}
+		sessionTasks = tasks
 		var chosen *RuntimeTask
 		for index := range tasks {
 			task := &tasks[index]
@@ -94,9 +107,9 @@ func foldSessionStatus(now time.Time, runtime, catalogID, nativeID string) (sess
 	}
 	if governor != nil && governor.ix != nil {
 		// Turn boundaries from installed hooks — the observed facts.
-		turns, err := governor.ix.SessionTurnsFor(runtime, nativeID, lookback)
-		if err != nil {
-			failures = append(failures, fmt.Errorf("turn rows: %w", err))
+		turns, turnsErr = governor.ix.SessionTurnsFor(runtime, nativeID, lookback)
+		if turnsErr != nil {
+			failures = append(failures, fmt.Errorf("turn rows: %w", turnsErr))
 		}
 		for _, turn := range turns {
 			in.Facts = append(in.Facts, sessionStatusFact{Kind: turn.Kind, AtMS: turn.ReceivedAtMS, RowID: turn.RowID})
@@ -123,19 +136,29 @@ func foldSessionStatus(now time.Time, runtime, catalogID, nativeID string) (sess
 			in.Facts = append(in.Facts, sessionStatusFact{Kind: "session.ended", AtMS: atMS})
 		}
 		// The newest governed tool call is work in flight — the only boundary
-		// a session without the turn hooks can offer.
-		ts, ok, err := governor.ix.SessionNewestActionAt(nativeID)
+		// a session without the turn hooks can offer. Runtime-qualified so a
+		// native id shared across runtimes cannot cross wires.
+		ts, ok, err := governor.ix.SessionNewestActionAt(runtime, nativeID)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("newest action: %w", err))
 		} else if ok {
 			in.Facts = append(in.Facts, sessionStatusFact{Kind: "action.observed", AtMS: ts * 1000})
 		}
 	}
+	// Owner attention is peripheral and isolated: its failure degrades only
+	// the ask fields, and the ladders' failure does not hide an ask.
+	readErr := turnsErr
+	if readErr == nil {
+		readErr = tasksErr
+	}
+	owner := foldOwnerAttention(now, runtime, catalogID, nativeID, batch, turns, readErr, sessionTasks)
 	if len(failures) > 0 {
-		return sessionStatusFrame{Execution: "unknown", Authority: "none", Attention: "none"},
+		return sessionStatusFrame{Execution: "unknown", Authority: "none", Attention: "none", Owner: owner},
 			fmt.Errorf("%w: %w", errSessionStatusOwner, errors.Join(failures...))
 	}
-	return decideSessionStatus(in), nil
+	frame := decideSessionStatus(in)
+	frame.Owner = owner
+	return frame, nil
 }
 
 func absMS(v int64) int64 {
@@ -184,18 +207,23 @@ func applySessionStatus(item sessionactivity.Item, frame sessionStatusFrame) ses
 	item.SinceMS = frame.SinceMS
 	item.Progress = frame.Progress
 	item.ProgressTool = frame.ProgressTool
+	item.AskID, item.AskText, item.AskAgent = frame.Owner.AskID, frame.Owner.AskText, frame.Owner.AskAgent
+	item.AskCount, item.DraftCount, item.DraftText = frame.Owner.AskCount, frame.Owner.DraftCount, frame.Owner.DraftText
+	item.AskState = frame.Owner.State
 	return item
 }
 
-// decorateSessionStatus folds every presence item the sampler produced, so a
+// decorateSessionStatusWith folds every presence item the sampler produced, so a
 // full sampler pass and an event-driven replace carry identical frames.
 // (Recorded deviation: the plan said "only changed sessions"; the sampler
 // rebuilds the whole snapshot, so every item is folded — bounded by the rail
 // cap, and identical to the event path by construction.)
-func decorateSessionStatus(now time.Time, items []sessionactivity.Item) []sessionactivity.Item {
+// Every item is folded against one owner-attention read for the whole pass
+// (escalation-delivery plan RT-12).
+func decorateSessionStatusWith(now time.Time, items []sessionactivity.Item, batch *ownerAttentionBatch) []sessionactivity.Item {
 	for index := range items {
 		item := items[index]
-		frame, err := foldSessionStatus(now, item.Runtime, item.CatalogSessionID, item.NativeSessionID)
+		frame, err := foldSessionStatusWith(now, item.Runtime, item.CatalogSessionID, item.NativeSessionID, batch)
 		if err != nil {
 			logSessionStatusFailure(item.Runtime, item.NativeSessionID, err)
 		}
@@ -211,7 +239,8 @@ var (
 
 // logSessionStatusFailure reports an owner failure once per session key, so a
 // broken store is visible in the log without flooding it every tick.
-func logSessionStatusFailure(runtime, nativeID string, err error) {
+// It reports whether this call was the first for the key.
+func logSessionStatusFailure(runtime, nativeID string, err error) bool {
 	key := runtime + "\x00" + nativeID
 	sessionStatusLoggedMu.Lock()
 	seen := sessionStatusLogged[key]
@@ -220,6 +249,7 @@ func logSessionStatusFailure(runtime, nativeID string, err error) {
 	if !seen {
 		log.Printf("session status for %s %s unavailable — rendering unknown: %v", runtime, nativeID, err)
 	}
+	return !seen
 }
 
 // Event-driven refold, coalesced per session so a burst of hook rows costs one

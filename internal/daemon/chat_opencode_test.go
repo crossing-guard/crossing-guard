@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,49 +18,25 @@ import (
 
 func TestOpenCodeMapsFilesInOrderAndGuardsVisionModelMode(t *testing.T) {
 	inputs := []taskinput.ResolvedInput{
-		{Input: taskinput.Input{Kind: taskinput.KindText}, Path: "/private/opaque/one.txt"},
-		{Input: taskinput.Input{Kind: taskinput.KindImage}, Path: "/private/opaque/two.png"},
+		{Input: taskinput.Input{Kind: taskinput.KindText, Name: "one.txt", MediaType: "text/plain"}, Path: "/private/opaque/one.txt"},
+		{Input: taskinput.Input{Kind: taskinput.KindImage, Name: "two.png", MediaType: "image/png"}, Path: "/private/opaque/two.png"},
 	}
 	driver := openCodeChatDriver{}
 	if err := driver.ValidateChatInputs(ChatRequest{Model: "ollama/qwen2.5-coder:7b"}, inputs); err == nil {
 		t.Fatal("text-only model silently accepted image")
 	}
-	req := ChatRequest{Binary: testChatExecutable(t), Cwd: t.TempDir(), Prompt: "inspect",
-		Model: "ollama/qwen2.5vl:3b", Mode: "vision-proof"}
+	req := ChatRequest{Cwd: t.TempDir(), Prompt: "inspect", Model: "ollama/qwen2.5vl:3b", Mode: openCodeVisionMode}
 	if err := driver.ValidateChatInputs(req, inputs); err != nil {
 		t.Fatal(err)
 	}
-	cmd, err := driver.BuildCmd(req, ChatLaunchContext{Inputs: inputs})
-	if err != nil {
-		t.Fatal(err)
+	protocol := &openCodeServerProtocol{request: req, launch: ChatLaunchContext{Inputs: inputs}}
+	body := protocol.promptBody()
+	parts := body["parts"].([]map[string]any)
+	if len(parts) != 3 || parts[0]["url"] != "file:///private/opaque/one.txt" || parts[1]["url"] != "file:///private/opaque/two.png" || parts[2]["text"] != "inspect" || body["agent"] != openCodeVisionMode {
+		t.Fatalf("attachment mapping changed: %#v", body)
 	}
-	args := cmd.Args
-	first := slices.Index(args, "/private/opaque/one.txt")
-	second := slices.Index(args, "/private/opaque/two.png")
-	// --file is variadic in OpenCode 1.18: the prompt survives only behind "--".
-	if first < 1 || second != first+2 || args[len(args)-2] != "--" || args[len(args)-1] != "inspect" ||
-		second != len(args)-3 || !slices.Contains(args, "vision-proof") {
-		t.Fatalf("OpenCode attachment mapping changed: %q", args)
-	}
-	if env := cmd.Env; len(env) == 0 || env[len(env)-1] != "OPENCODE_DISABLE_PROJECT_CONFIG=1" {
-		t.Fatal("the vision-proof run is not pinned to global configuration")
-	}
-}
-
-func TestOpenCodeKeepsExtraArgsBeforeThePromptBoundary(t *testing.T) {
-	req := ChatRequest{Binary: testChatExecutable(t), Cwd: t.TempDir(), Prompt: "-looks like a flag",
-		ExtraArgs: "--variant high"}
-	inputs := []taskinput.ResolvedInput{{Input: taskinput.Input{Kind: taskinput.KindText}, Path: "/private/opaque/one.txt"}}
-	cmd, err := openCodeChatDriver{}.BuildCmd(req, ChatLaunchContext{Inputs: inputs})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tail := cmd.Args[len(cmd.Args)-6:]
-	if !slices.Equal(tail, []string{"--file", "/private/opaque/one.txt", "--variant", "high", "--", "-looks like a flag"}) {
-		t.Fatalf("argv tail = %q", tail)
-	}
-	if slices.Contains(cmd.Env, "OPENCODE_DISABLE_PROJECT_CONFIG=1") && os.Getenv("OPENCODE_DISABLE_PROJECT_CONFIG") != "1" {
-		t.Fatal("a default-mode run was pinned to global configuration")
+	if got := body["model"]; !reflect.DeepEqual(got, map[string]string{"providerID": "ollama", "modelID": "qwen2.5vl:3b"}) {
+		t.Fatalf("model = %#v", got)
 	}
 }
 
@@ -199,23 +174,21 @@ func TestOpenCodeAgentCheckIsBounded(t *testing.T) {
 	}
 }
 
-func TestOpenCodeRefusesExtraArgsThatOwnTheAgentOrPrompt(t *testing.T) {
+func TestOpenCodeRefusesAllExtraArgsBeforeSpawn(t *testing.T) {
 	bin, log := fakeOpenCode(t, agentListing("vision-proof (primary)"))
 	driver := openCodeChatDriver{}
-	for _, extra := range []string{"--no-agent", "--agent.x=y", "--command review", "--attach http://127.0.0.1:4096", "--agent build", "--pure"} {
-		if _, err := driver.CanonicalizeChatRequest(ChatRequest{Binary: bin, Mode: "vision-proof", ExtraArgs: extra}); err == nil ||
-			!strings.Contains(err.Error(), "mode") {
-			t.Fatalf("vision-proof admitted extra args %q: %v", extra, err)
+	for _, extra := range []string{"--variant high", "--agent plan", "--thinking", "--auto", "--attach http://127.0.0.1:4096", "--pure"} {
+		req := ChatRequest{Binary: bin, Cwd: t.TempDir(), Prompt: "p", ExtraArgs: extra}
+		_, err := driver.CanonicalizeChatRequest(req)
+		if err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Fatalf("extra args %q: %v", extra, err)
+		}
+		if _, buildErr := driver.BuildCmd(req, ChatLaunchContext{}); buildErr == nil || buildErr.Error() != err.Error() {
+			t.Fatalf("BuildCmd did not preserve refusal for %q: %v", extra, buildErr)
 		}
 	}
-	if _, err := driver.CanonicalizeChatRequest(ChatRequest{Binary: bin, ExtraArgs: "--variant high -- trailing"}); err == nil {
-		t.Fatal("a bare -- in extra args was admitted")
-	}
-	if _, err := driver.CanonicalizeChatRequest(ChatRequest{Binary: bin, ExtraArgs: "--agent plan"}); err != nil {
-		t.Fatalf("default mode lost its agent passthrough: %v", err)
-	}
 	if calls := readCalls(t, log); len(calls) != 0 {
-		t.Fatalf("the agent check ran for a refused or default-mode request: %q", calls)
+		t.Fatalf("a refused request ran OpenCode: %q", calls)
 	}
 }
 
@@ -246,106 +219,52 @@ func jsonString(t *testing.T, value string) string {
 	return string(encoded)
 }
 
-// The auto-approve switch has three spellings in 1.18 (two hidden) and yargs
-// accepts each camel-cased, negated, dotted, `=` and repeated, so only the
-// allowlisted shapes may reach argv. Refusals happen before any process runs.
-func TestOpenCodeExtraArgsAreAllowlisted(t *testing.T) {
-	bin, log := fakeOpenCode(t, "")
-	driver := openCodeChatDriver{}
-	for _, extra := range []string{"", "--agent plan", "--agent=plan", "--variant high", "--variant=high",
-		"--title x", "--title=--auto", "--thinking", "--agent plan --variant=high --title x --thinking"} {
-		req := ChatRequest{Binary: bin, ExtraArgs: extra}
-		got, err := driver.CanonicalizeChatRequest(req)
-		if err != nil || !reflect.DeepEqual(got, req) {
-			t.Fatalf("extra args %q: request changed or refused: %v", extra, err)
-		}
-	}
-	refused := map[string]string{
-		"--auto": "not accepted", "--auto=true": "not accepted", "--yolo": "not accepted",
-		"--dangerously-skip-permissions": "not accepted", "--dangerouslySkipPermissions": "not accepted",
-		"--dangerously-skip-permissions=true": "not accepted", "--no-auto": "not accepted",
-		"-i": "not accepted", "-ic": "not accepted", "-h": "not accepted", "--help": "not accepted",
-		"--pure": "not accepted", "--log-level DEBUG": "not accepted", "--share": "not accepted",
-		"--attach http://x": "not accepted", "--port 1": "not accepted",
-		"--dir /tmp": "not accepted", "--format default": "not accepted", "--model a/b": "not accepted",
-		"-m a/b": "not accepted", "--session s": "not accepted", "-c": "not accepted",
-		"--command x": "not accepted", "--file f": "not accepted",
-		"--": `bare "--"`, "hello": "not accepted", "--agent plan hello": "argument 3 is not accepted",
-		"--agent": "need a value", "--agent --auto": "need a value", "--agent --": "need a value",
-		"--agent=":            "need a value",
-		"--agent a --agent b": "argument 3 repeats", "--agent=a --agent b": "argument 2 repeats",
-		"--thinking=true": "not accepted", "--no-thinking": "not accepted",
-		"--agent.x=y": "not accepted", "--Agent plan": "not accepted",
-		"--title=a\x00b":                          "control characters",
-		"--title=\x1b[31mred":                     "control characters",
-		"--title " + strings.Repeat("x", 201):     "too long",
-		"--variant=" + string([]byte{0xff, 0xfe}): "not UTF-8",
-		"--thinking --thinking":                   "argument 2 repeats",
-		"--title -x":                              "need a value",
-	}
-	for extra, want := range refused {
-		_, err := driver.CanonicalizeChatRequest(ChatRequest{Binary: bin, ExtraArgs: extra})
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("extra args %q: want refusal containing %q, got %v", extra, want, err)
-		}
-		msg := err.Error()
-		for _, routed := range []string{"mode", "task input", "working directory"} {
-			if strings.Contains(msg, routed) {
-				t.Fatalf("extra args %q: refusal %q would route to a console field (%q)", extra, msg, routed)
-			}
-		}
-		if want != `bare "--"` && !strings.Contains(msg, "Settings") {
-			t.Fatalf("extra args %q: refusal %q does not say where the value lives", extra, msg)
-		}
-		if _, buildErr := driver.BuildCmd(ChatRequest{Binary: bin, Cwd: t.TempDir(), Prompt: "p", ExtraArgs: extra}, ChatLaunchContext{}); buildErr == nil ||
-			buildErr.Error() != msg {
-			t.Fatalf("BuildCmd did not refuse extra args %q with the admission refusal: %v", extra, buildErr)
-		}
-	}
-	if calls := readCalls(t, log); len(calls) != 0 {
-		t.Fatalf("a default-mode extra-args check ran the binary: %q", calls)
-	}
-}
-
-func TestOpenCodeExtraArgsLandBetweenFilesAndThePrompt(t *testing.T) {
-	inputs := []taskinput.ResolvedInput{
-		{Input: taskinput.Input{Kind: taskinput.KindText}, Path: "/private/opaque/one.txt"},
-		{Input: taskinput.Input{Kind: taskinput.KindText}, Path: "/private/opaque/two.txt"},
-	}
-	req := ChatRequest{Binary: testChatExecutable(t), Cwd: t.TempDir(), Prompt: "p", ExtraArgs: "--agent plan --thinking --title=--auto"}
-	cmd, err := openCodeChatDriver{}.BuildCmd(req, ChatLaunchContext{Inputs: inputs})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tail := cmd.Args[len(cmd.Args)-10:]
-	want := []string{"--file", "/private/opaque/one.txt", "--file", "/private/opaque/two.txt", "--agent", "plan", "--thinking", "--title=--auto", "--", "p"}
-	if !slices.Equal(tail, want) {
-		t.Fatalf("argv tail = %q", tail)
-	}
-}
-
-// BuildCmd enforces the mode rules itself, so a direct caller cannot put a
-// second --agent beside the mode's own (OpenCode would fall back to build).
-func TestOpenCodeBuildCmdRefusesExtraArgsInAgentModes(t *testing.T) {
-	driver := openCodeChatDriver{}
-	for _, extra := range []string{"--agent x", "--thinking"} {
-		req := ChatRequest{Binary: testChatExecutable(t), Cwd: t.TempDir(), Prompt: "p", Mode: "vision-proof", ExtraArgs: extra}
-		if _, err := driver.BuildCmd(req, ChatLaunchContext{}); err == nil || !strings.Contains(err.Error(), "vision-proof mode") {
-			t.Fatalf("BuildCmd admitted %q in vision-proof: %v", extra, err)
-		}
-	}
-	if _, err := openCodeExtraArgs(ChatRequest{Mode: "future-agent", ExtraArgs: "--agent x"}); err == nil ||
-		!strings.Contains(err.Error(), "when a mode selects the agent") {
-		t.Fatalf("--agent admitted beside a mode's own: %v", err)
-	}
-	if _, err := openCodeExtraArgs(ChatRequest{Mode: "future-agent", ExtraArgs: "--thinking"}); err != nil {
-		t.Fatalf("a non-agent option was refused in an agent mode: %v", err)
-	}
-}
-
 func TestOpenCodeDefaultModeDoesNotClaimReadOnly(t *testing.T) {
 	mode := openCodeChatDriver{}.ChatCapability().Modes[0]
-	if mode.ID != "" || mode.Label != "Default" || !strings.Contains(mode.Description, "never auto-approved") {
+	if mode.ID != "" || mode.Label != "Default" || !strings.Contains(mode.Description, "approvals inbox") {
 		t.Fatalf("default mode = %+v", mode)
+	}
+}
+
+// Events built from a nested part carry that part's id as their anchor, the
+// identity the stored transcript carries too. An event with no nested part
+// (the old flat tool_result shape) carries none: a guessed anchor could hide
+// a row the console never drew.
+func TestOpenCodeLiveEventsAnchorOnTheirPartID(t *testing.T) {
+	driver := openCodeChatDriver{}
+	anchorOf := func(events []ChatEvent, kind string) (string, bool) {
+		for _, event := range events {
+			if event["type"] == kind {
+				anchor, ok := event["anchor"].(string)
+				return anchor, ok
+			}
+		}
+		t.Fatalf("no %s event in %+v", kind, events)
+		return "", false
+	}
+	text := driver.ProjectEvent(map[string]any{"type": "text", "sessionID": "ses_x",
+		"part": map[string]any{"id": "prt_text", "type": "text", "text": "hello"}})
+	if anchor, _ := anchorOf(text, "text"); anchor != "prt_text" {
+		t.Fatalf("text anchor = %q", anchor)
+	}
+	thinking := driver.ProjectEvent(map[string]any{"type": "reasoning",
+		"part": map[string]any{"id": "prt_think", "type": "reasoning", "text": "hm"}})
+	if anchor, _ := anchorOf(thinking, "thinking"); anchor != "prt_think" {
+		t.Fatalf("thinking anchor = %q", anchor)
+	}
+	tool := driver.ProjectEvent(map[string]any{"type": "tool_use", "part": map[string]any{"id": "prt_tool", "type": "tool",
+		"tool": "bash", "state": map[string]any{"status": "completed", "input": map[string]any{"command": "ls"}, "output": "a.txt"}}})
+	call, _ := anchorOf(tool, "tool")
+	result, _ := anchorOf(tool, "tool_result")
+	if call != "prt_tool" || result != "prt_tool" {
+		t.Fatalf("a tool call and its result share the part id: call=%q result=%q", call, result)
+	}
+	flat := driver.ProjectEvent(map[string]any{"type": "tool_result", "id": "not-a-part", "text": "out"})
+	if _, ok := anchorOf(flat, "tool_result"); ok {
+		t.Fatalf("an event with no nested part must carry no anchor: %+v", flat)
+	}
+	bare := driver.ProjectEvent(map[string]any{"type": "text", "id": "evt_1", "text": "flat"})
+	if _, ok := anchorOf(bare, "text"); ok {
+		t.Fatalf("a flat text event must carry no anchor: %+v", bare)
 	}
 }

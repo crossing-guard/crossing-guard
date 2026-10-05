@@ -371,6 +371,9 @@ func (ix *Index) CompleteSessionCheckpointWithPayload(checkpointID int64, r *Cha
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
 		return fmt.Errorf("checkpoint completion update affected %d rows: %v", n, err)
 	}
+	if err := enqueueCheckpointFact(tx, checkpointID, sessionID, "complete:"+completionDigest, endedAt); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -436,18 +439,36 @@ func (ix *Index) CheckpointPayloads(checkpointID int64) ([]CheckpointPayload, er
 	return out, rows.Err()
 }
 
-func (ix *Index) LinkedResultEffectsForSession(sessionID string) ([]LinkedResultEffect, error) {
-	rows, err := ix.db.Query(`WITH current AS (
-		SELECT r.id,r.result_id FROM result_reconciliation r JOIN (
-			SELECT result_id,MAX(id) id FROM result_reconciliation GROUP BY result_id
-		) latest ON latest.id=r.id WHERE r.join_class='exact'
-	) SELECT o.id,cand.event_id,e.ordinal,o.completed_at,e.raw_identity,e.operation,e.evidence_source,
+// linkedResultEffectsForSessionCTE selects the effects of one session whose
+// latest reconciliation is exact; "latest" is the highest id, as it was before
+// this shape. The session's results are selected first and each one's latest
+// reconciliation is read by a correlated lookup that
+// result_reconciliation_current serves: resolving the latest reconciliation of
+// every result in the store and filtering afterwards ran once per checkpoint
+// under the daemon's write lock (observe-hook-latency plan §15).
+// The caller appends further `AND` terms on o and e, then closes the CTE.
+const linkedResultEffectsForSessionCTE = `WITH matched AS (
+	SELECT o.id result_id,cand.event_id,e.ordinal,o.completed_at,e.raw_identity,e.operation,e.evidence_source,
 		e.content_digest,e.diff_digest,e.completeness,
-		CASE WHEN e.content_payload IS NULL THEN 0 ELSE 1 END,
-		CASE WHEN e.diff_payload IS NULL THEN 0 ELSE 1 END
-	FROM result_observation o JOIN current c ON c.result_id=o.id
-	JOIN result_reconciliation_candidate cand ON cand.reconciliation_id=c.id AND cand.selected=1
-	JOIN result_effect e ON e.result_id=o.id WHERE o.session_id=? ORDER BY o.completed_at,o.id,e.ordinal`, sessionID)
+		CASE WHEN e.content_payload IS NULL THEN 0 ELSE 1 END content_measured,
+		CASE WHEN e.diff_payload IS NULL THEN 0 ELSE 1 END diff_measured
+	FROM result_observation o
+	JOIN result_reconciliation r ON r.result_id=o.id
+		AND r.id=(SELECT MAX(r2.id) FROM result_reconciliation r2 WHERE r2.result_id=o.id)
+		AND r.join_class='exact'
+	JOIN result_reconciliation_candidate cand ON cand.reconciliation_id=r.id AND cand.selected=1
+	JOIN result_effect e ON e.result_id=o.id WHERE o.session_id=?`
+
+// linkedResultEffectsOrder is total, so a LIMIT keeps the same rows whatever
+// plan the query runs under.
+const linkedResultEffectsOrder = ` ORDER BY completed_at,result_id,ordinal,event_id`
+
+const linkedResultEffectColumns = ` SELECT result_id,event_id,ordinal,completed_at,raw_identity,operation,evidence_source,
+	content_digest,diff_digest,completeness,content_measured,diff_measured FROM matched`
+
+func (ix *Index) LinkedResultEffectsForSession(sessionID string) ([]LinkedResultEffect, error) {
+	rows, err := ix.db.Query(linkedResultEffectsForSessionCTE+`)`+linkedResultEffectColumns+
+		linkedResultEffectsOrder, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -475,17 +496,7 @@ func (ix *Index) LinkedResultEffectsForFile(sessionID string, identities []strin
 		return []LinkedResultEffect{}, 0, nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(identities)), ",")
-	current := `WITH current AS (
-		SELECT r.id,r.result_id FROM result_reconciliation r JOIN (
-			SELECT result_id,MAX(id) id FROM result_reconciliation GROUP BY result_id
-		) latest ON latest.id=r.id WHERE r.join_class='exact'
-	), matched AS (SELECT o.id result_id,cand.event_id,e.ordinal,o.completed_at,e.raw_identity,e.operation,e.evidence_source,
-		e.content_digest,e.diff_digest,e.completeness,
-		CASE WHEN e.content_payload IS NULL THEN 0 ELSE 1 END content_measured,
-		CASE WHEN e.diff_payload IS NULL THEN 0 ELSE 1 END diff_measured
-		FROM result_observation o JOIN current c ON c.result_id=o.id
-		JOIN result_reconciliation_candidate cand ON cand.reconciliation_id=c.id AND cand.selected=1
-		JOIN result_effect e ON e.result_id=o.id WHERE o.session_id=? AND e.raw_identity IN (` + placeholders + `))`
+	current := linkedResultEffectsForSessionCTE + ` AND e.raw_identity IN (` + placeholders + `))`
 	args := []any{sessionID}
 	for _, identity := range identities {
 		args = append(args, identity)
@@ -494,9 +505,8 @@ func (ix *Index) LinkedResultEffectsForFile(sessionID string, identities []strin
 	if err := ix.db.QueryRow(current+` SELECT COUNT(*) FROM matched`, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := ix.db.Query(current+` SELECT result_id,event_id,ordinal,completed_at,raw_identity,operation,evidence_source,
-		content_digest,diff_digest,completeness,content_measured,diff_measured
-		FROM matched ORDER BY completed_at,result_id LIMIT ?`, append(args, limit)...)
+	rows, err := ix.db.Query(current+linkedResultEffectColumns+linkedResultEffectsOrder+` LIMIT ?`,
+		append(args, limit)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -540,7 +550,7 @@ func (ix *Index) FileEventsForSession(sessionID string, identities []string, lim
 		return nil, 0, err
 	}
 	events, err := scanEvents(ix.db.Query(matched+` SELECT event.id,event.ts,event.session_id,event.runtime,event.verb,event.tool,
-		event.target_entity_id,event.tags,event.decision,event.reason,event.origin
+		event.target_entity_id,event.tags,event.decision,event.reason,event.origin,COALESCE(event.rule_id,''),COALESCE(event.layer,'')
 		FROM event JOIN matched ON matched.id=event.id ORDER BY event.ts,event.id LIMIT ?`, append(args, limit)...))
 	return events, total, err
 }
@@ -590,12 +600,18 @@ func (ix *Index) PathReconciliationsForFile(sessionID string, paths []string, li
 	return out, total, rows.Err()
 }
 
+// pathReconciliationSupersedeLookup finds the fact a new one would supersede. It
+// runs once per path under the daemon's write lock, so it must stay a search of
+// path_reconciliation_current: a new checkpoint never matches, and without the
+// index every call read the whole table.
+const pathReconciliationSupersedeLookup = `SELECT id,classification,runtime_effect_digest,git_effect_digest
+	FROM path_reconciliation WHERE current_checkpoint_id=? AND path=? AND algorithm=?
+	ORDER BY id DESC LIMIT 1`
+
 func (ix *Index) AppendPathReconciliation(f PathReconciliation) error {
 	var existingID int64
 	var class, runtimeDigest, gitDigest string
-	err := ix.db.QueryRow(`SELECT id,classification,runtime_effect_digest,git_effect_digest
-		FROM path_reconciliation WHERE current_checkpoint_id=? AND path=? AND algorithm=?
-		ORDER BY id DESC LIMIT 1`, f.CurrentCheckpointID, f.Path, f.Algorithm).
+	err := ix.db.QueryRow(pathReconciliationSupersedeLookup, f.CurrentCheckpointID, f.Path, f.Algorithm).
 		Scan(&existingID, &class, &runtimeDigest, &gitDigest)
 	if err == nil && class == f.Classification && runtimeDigest == f.RuntimeEffectDigest && gitDigest == f.GitEffectDigest {
 		return nil

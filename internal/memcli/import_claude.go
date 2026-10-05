@@ -3,7 +3,7 @@ package memcli
 // import.go — bring the existing curated silos into the store.
 //
 // AUTO-PROMOTION POLICY (provenance-tiered, ADR 0013 D4 refinement):
-//   Tier A  already-curated stores (Claude auto-memory topic files, OMS bank)
+//   Tier A  already-curated stores (Claude auto-memory topic files)
 //           → import DIRECTLY into the store (source: import, origin recorded).
 //           The human curation happened upstream; re-reviewing hundreds of
 //           records one-by-one would kill the import. --pending overrides.
@@ -14,10 +14,10 @@ package memcli
 // Claude auto-memory: ~/.claude/projects/<escaped-cwd>/memory/*.md — one
 // topic file per dossier (MEMORY.md is the vendor's injected index, skipped;
 // the files may carry their own YAML frontmatter, parsed leniently).
-// OMS/Typesense import needs a Passport token against the REST proxy — that
-// is a daemon job (`import oms`), not built yet; noted in usage.
+// Importing from a remote memory service is a daemon job, not built yet.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"crossing-guard/internal/changeenv"
 	"crossing-guard/memory"
+	"crossing-guard/store"
 )
 
 type ImportStats struct {
@@ -37,24 +39,39 @@ func importClaudeMemory(dir string, onlyProject string, toPending bool) (ImportS
 	return st, err
 }
 
-// ImportAutoMemory is the one importer of a vendor's auto-memory topic files (today: Claude Code's per-project memory directories) into a
-// store, shared by the CLI verbs and the daemon (daemon-memory-import plan D1). It
-// returns the ids it wrote so a caller can index exactly those records. Contract:
-// never deletes; rewrites an imported record only when the upstream file's Updated
-// is newer (local edits to imported records are not preserved); honours tombstones.
+// ImportAutoMemory is the one importer of a vendor's auto-memory topic files
+// (today: Claude Code's per-project memory directories) into the STORE,
+// through the one write owner (first-class-records plan §3.3 — record + entity
+// + classification + FTS + outbox in one transaction), shared by the CLI verbs
+// and the daemon (daemon-memory-import plan D1). It returns the ids it wrote.
+// Contract: never deletes; rewrites an imported record only when the upstream
+// file's Updated is newer (local edits to imported records are not preserved);
+// honours tombstones (the store's, which the migration owns).
 func ImportAutoMemory(dir string, onlyProject string, toPending bool) (ImportStats, []string, error) {
 	var st ImportStats
 	var written []string
 	projDirs, _ := filepath.Glob(filepath.Join(home(), ".claude", "projects", "*", "memory"))
-	targetDir := dir
-	if toPending {
-		targetDir = filepath.Join(dir, "pending")
+	ix, err := store.Open(indexDB())
+	if err != nil {
+		return st, nil, err
 	}
+	defer ix.Close()
+	dets := memDetectors()
+	actor := store.MemoryActor{AuthorType: "user", AuthorID: "daemon-import", ActorSource: "daemon"}
+	status := "active"
+	if toPending {
+		status = "pending"
+	}
+	roots, _ := ix.CheckoutRoots(identityUpgradeRoots()) // best-effort: without them every import stays weak
 	for _, pd := range projDirs {
 		repo := repoFromEscapedProject(filepath.Base(filepath.Dir(pd)))
 		if onlyProject != "" && !memory.SameRepositoryScope(repo, onlyProject) {
 			continue
 		}
+		// Repository identity is minted at import when the vendor's project directory
+		// names a checkout this device has seen and that checkout has one origin remote
+		// (team item 5 decision 18); otherwise the record stays weak, by label.
+		scopeID, identity, note := importRepositoryScope(filepath.Base(filepath.Dir(pd)), repo, roots)
 		st.Projects++
 		files, _ := filepath.Glob(filepath.Join(pd, "*.md"))
 		for _, f := range files {
@@ -68,38 +85,53 @@ func ImportAutoMemory(dir string, onlyProject string, toPending bool) (ImportSta
 				st.Skipped++
 				continue
 			}
-			if isTombstoned(dir, rec.ID) {
+			if ix.MemoryTombstoned(rec.ID) {
 				st.Tombstoned++
 				continue
 			}
-			// idempotent: existing imported record only updated when source
-			// file is newer than our copy (keeps local edits unless upstream moved)
-			if old, err := readRecord(filepath.Join(dir, rec.ID+".md")); err == nil {
-				rec.Created = old.Created
-				if old.Updated >= rec.Updated {
+			// idempotent: existing record only updated when the upstream file
+			// is newer than the stored copy (keeps local edits unless upstream
+			// moved)
+			if old, err := ix.MemoryByID(rec.ID); err == nil {
+				// An import never writes over a team record: the vendor's file would
+				// become a revision of the team's record, unreviewed (PW-H1).
+				if store.MemoryIsTeamRecord(old) || old.ShareState == "shared" || old.UpdatedAt >= parseOrZero(rec.Updated) {
 					st.Skipped++
 					continue
 				}
 			}
-			if err := writeRecord(targetDir, rec); err != nil {
+			sr := store.MemoryRecord{
+				ID: rec.ID, Status: status,
+				ScopeType: store.MemoryScopeRepository, ScopeID: scopeID,
+				RepositoryIdentity: identity, IdentityNote: note,
+				Title: rec.Title, Category: rec.Category, Body: rec.Body,
+				Tags: rec.Tags, Aliases: rec.Aliases, Source: rec.Source, Origin: rec.Origin,
+				AuthorType: "user", AuthorID: "import",
+			}
+			if sr.Source == "" {
+				sr.Source = "import"
+			}
+			saved, err := ix.UpsertMemory(sr, nil, dets, actor)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "skip %s: %v\n", base, err)
 				st.Skipped++
 				continue
 			}
+			mirrorRecord(saved)
 			st.Imported++
-			if !toPending {
-				written = append(written, rec.ID)
-			}
+			written = append(written, rec.ID)
 		}
-	}
-	if st.Imported > 0 {
-		mode := "store (tier-A auto-promote)"
-		if toPending {
-			mode = "pending/"
-		}
-		gitCommit(dir, fmt.Sprintf("import claude-memory: %d records into %s", st.Imported, mode))
 	}
 	return st, written, nil
+}
+
+// parseOrZero parses an RFC3339 record timestamp to unix nanos, 0 when absent.
+func parseOrZero(ts string) int64 {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 // repoFromEscapedProject maps "-Users-alice-Documents-Sites-my-repo"
@@ -114,6 +146,29 @@ func repoFromEscapedProject(escaped string) string {
 		}
 	}
 	return strings.ToLower(strings.Trim(escaped, "-"))
+}
+
+// claudeProjectEscape is how the vendor names a project directory after its folder:
+// every character outside [A-Za-z0-9] becomes '-'.
+var claudeProjectEscape = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+// importRepositoryScope finds the checkout an escaped project directory names among the
+// roots this device's sessions recorded, and mints the repository identity from it. With
+// no such checkout, or no single origin remote, the label stays the weak scope.
+func importRepositoryScope(escaped, label string, roots []string) (scopeID, identity, note string) {
+	for _, root := range roots {
+		if claudeProjectEscape.ReplaceAllString(root, "-") != escaped {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), identityResolveTimeout())
+		id, kind, why := changeenv.MemoryRepositoryScope(ctx, root, "")
+		cancel()
+		if kind == "remote-sha256" {
+			return id, kind, ""
+		}
+		return label, "weak", why
+	}
+	return label, "weak", "imported by project name; no checkout of it has been seen on this device"
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -251,7 +306,10 @@ func migrateStore(dir string) (MigrateStats, error) {
 			st.Rewritten++
 		}
 	}
-	gitCommit(dir, fmt.Sprintf("migrate(format v1.1): %d rewritten, %d ids de-stuttered", st.Rewritten, st.Renamed))
+	// No git commit: the mirror directory also holds records pulled from a team, and a
+	// whole-directory commit would put their bodies into a history a later deletion
+	// cannot reach (team item 5 decision 5, R2-H9). An existing .git there is legacy
+	// residue from before memory moved into the store; nothing writes to it any more.
 	return st, nil
 }
 

@@ -1,6 +1,8 @@
 // The open session's header: the owner's tags (removable), agents' tags, the
-// owner's most recently used tags as one-click toggles, what detectors saw, and
-// one line of note. It lives in its own host inside the header and repaints
+// owner's most recently used tags as one-click toggles, and the note when it
+// has one or the owner opens it (⋯ → Note…). What detectors saw is not here:
+// derived facts are evidence and render in the session.evidence header, so they
+// are never mistaken for tags the owner chose. It lives in its own host inside the header and repaints
 // only that host — tagging never redraws the conversation below it.
 import { el } from '../core.js';
 import { changeSessionTags, loadSessionTags, loadTagVocabulary, saveSessionNote } from './organization-api.js';
@@ -35,6 +37,8 @@ export async function refreshHeaderTags(host, session) {
     // A session the daemon cannot place (a chat not yet saved, say) simply has
     // no tag line. Anything else is said, in the daemon's words.
     if (!host.isConnected) return;
+    // A session the daemon cannot place cannot hold a note either.
+    if (err?.status === 404) host.dataset.placeable = 'false';
     host.replaceChildren(...(err?.status === 404 ? [] : [el('div', 'tag-pop-problem', err.message || String(err))]));
   }
 }
@@ -66,13 +70,20 @@ function paintHeaderTags(host, session, vocabulary) {
   add.onclick = () => openTagPopover(add, [session], changed);
   line.appendChild(add);
   const parts = [line];
-  if ((session.facts || []).length) {
-    const facts = el('div', 'tagline tagline-facts');
-    for (const fact of session.facts) facts.appendChild(tagChip(fact));
-    parts.push(facts);
-  }
-  parts.push(noteField(session, changed));
+  if (session.note || host.dataset.noteOpen === 'true') parts.push(noteField(session, changed));
   host.replaceChildren(...parts);
+}
+
+// openHeaderNote shows the open session's note field and focuses it; the
+// session header's ⋯ menu calls it.
+export function openHeaderNote() {
+  const host = document.querySelector('.session-tags');
+  if (!host) return;
+  host.dataset.noteOpen = 'true';
+  const existing = host.querySelector('.session-note input');
+  if (existing) { existing.focus(); return; }
+  refreshHeaderTags(host, { runtime: host.dataset.runtime, id: host.dataset.sessionId })
+    .then(() => host.querySelector('.session-note input')?.focus());
 }
 
 // recentToggles are the owner's most recently used tags this session lacks.

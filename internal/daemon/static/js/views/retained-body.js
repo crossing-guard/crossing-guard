@@ -3,7 +3,9 @@ import { renderDiff } from '../diff/diff-viewer.js';
 import { parseUnifiedDiff } from '../diff/unified-diff.js';
 import { sessionQuery } from './session-evidence.js';
 
-const selectionRoot = ctx => ctx?.selection?.cwd || ctx?.selection?.project || ctx?.selection?.root || '';
+// Only a declared working directory is a path; a project without one is a label
+// (session-view plan §A5).
+const selectionRoot = ctx => ctx?.selection?.cwd || ctx?.selection?.root || '';
 
 // rendersAsDiff is the whole rule for which retained bodies reach the parser.
 // Exported so it can be pinned without a DOM: everything else on this path needs

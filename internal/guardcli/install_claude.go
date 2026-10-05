@@ -133,8 +133,26 @@ var claudeContextEncoding = func() hookContextEncoding {
 	return hookContextEncoding{events: events, capBytes: claudeHookContextCap}
 }()
 
+func (claudeInstaller) hookContextCap() int { return claudeHookContextCap }
+
 func (claudeInstaller) EncodeHookContext(rawEvent, context string) ([]byte, bool) {
 	return claudeContextEncoding.encode(rawEvent, context)
+}
+
+// HookRunsInSubagent: Claude hooks fired inside a sub-agent (Agent/Task tool,
+// foreground or background) carry the parent's session_id and transcript_path
+// plus agent_id; main-thread hooks, including a `--agent` main thread, carry no
+// agent_id (probed on 2.1.280, 2026-09-25; testdata/claude_2_1_280_*.json).
+// The vendor's own schema says the same: "Absent for the main thread, even in
+// --agent sessions. Use this field (not agent_type)".
+func (claudeInstaller) HookRunsInSubagent(agentID string) bool { return agentID != "" }
+
+// NestedCallKinds: the same probe saw agent_id on a sub-agent's tool hooks
+// (pre and post), and a sub-agent fires no prompt event at all (measured on
+// 2.1.289, 2026-10-03), so a nested call is told apart at every kind that
+// carries context.
+func (claudeInstaller) NestedCallKinds() []string {
+	return []string{"turn.started", "tool.started", "tool.completed"}
 }
 
 func (claudeInstaller) EncodeHookDeny(rawEvent, reason string) []byte {

@@ -21,7 +21,7 @@ func handleChainVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		writeGovernorUnavailable(w)
 		return
 	}
 	report, err := governor.ChainVerify(session)

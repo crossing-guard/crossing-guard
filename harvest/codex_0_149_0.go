@@ -39,20 +39,17 @@ type codexFileMeta struct {
 	agentNickname  string
 }
 
-// codexMeta collects title/cwd/identity/usage from one pass. Codex totals
-// are CUMULATIVE, so per-day buckets take the delta between consecutive
-// events.
-func codexMeta(path string) (meta codexFileMeta, usage *SessionUsage, days map[string]*DayBucket) {
+// codexMeta collects title/cwd/identity/usage from one pass. Usage is folded
+// from the rollout's calls (usage_codex_0_149_0.go), never from the running
+// total Codex writes.
+func codexMeta(path string) (meta codexFileMeta, usage *SessionUsage) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	sc := newLineScanner(f)
-	usage = &SessionUsage{}
-	days = map[string]*DayBucket{}
-	usageObserved := false
-	var prevIn, prevCR, prevOut int64
+	calls := newCodexUsageCalls(path)
 	for sc.Scan() {
 		meta.lines++
 		var obj map[string]any
@@ -63,6 +60,7 @@ func codexMeta(path string) (meta codexFileMeta, usage *SessionUsage, days map[s
 		if !ok {
 			continue
 		}
+		calls.observe(record, obj)
 		switch record.Envelope {
 		case "session_meta":
 			if c, ok := record.Body["cwd"].(string); ok {
@@ -84,43 +82,21 @@ func codexMeta(path string) (meta codexFileMeta, usage *SessionUsage, days map[s
 					if meta.title == "" {
 						meta.title = extractCodexContent(item["content"])
 					}
-				case "AgentMessage":
-					usage.Turns++
-					codexCountTurn(obj, days)
 				}
 			case "user_message":
 				meta.userTurns++
 				if meta.title == "" {
 					meta.title = anyString(record.Body["message"])
 				}
-			case "agent_message":
-				usage.Turns++
-				codexCountTurn(obj, days)
-			case "token_count":
-				usageObserved = codexTokenCount(record.Body, obj, usage, days,
-					&prevIn, &prevCR, &prevOut) || usageObserved
 			}
 		case "user_message": // flatter variants observed in some versions
 			meta.userTurns++
 			if meta.title == "" {
 				meta.title = anyString(record.Body["message"])
 			}
-		case "agent_message":
-			usage.Turns++
-			codexCountTurn(obj, days)
-		case "token_count":
-			usageObserved = codexTokenCount(record.Body, obj, usage, days,
-				&prevIn, &prevCR, &prevOut) || usageObserved
-		case "turn_context":
-			if m := anyString(record.Body["model"]); m != "" {
-				usage.Model = m
-			}
 		}
 	}
-	finishUsage(usage)
-	if !usageObserved {
-		usage, days = nil, nil
-	}
+	usage = calls.fold()
 	return
 }
 
@@ -165,52 +141,6 @@ func codexThreadNames() map[string]string {
 	return names
 }
 
-// codexTokenCount folds one cumulative token_count event into usage + days.
-func codexTokenCount(inner, obj map[string]any, usage *SessionUsage, days map[string]*DayBucket,
-	prevIn, prevCR, prevOut *int64) bool {
-	info, ok := inner["info"].(map[string]any)
-	if !ok {
-		return false
-	}
-	tot, ok := info["total_token_usage"].(map[string]any)
-	if !ok {
-		return false
-	}
-	allIn, cr, out := asInt64(tot["input_tokens"]), asInt64(tot["cached_input_tokens"]), asInt64(tot["output_tokens"])
-	usage.InputTokens = allIn - cr
-	usage.CacheRead = cr
-	usage.OutputTokens = out
-	if last, ok := info["last_token_usage"].(map[string]any); ok {
-		usage.Context = asInt64(last["input_tokens"]) + asInt64(last["output_tokens"])
-	}
-	if w := asInt64(info["model_context_window"]); w > 0 {
-		usage.ContextWindow = w
-	}
-	if ts := anyString(obj["timestamp"]); len(ts) >= 10 {
-		b := days[ts[:10]]
-		if b == nil {
-			b = &DayBucket{}
-			days[ts[:10]] = b
-		}
-		b.Input += max(0, (allIn-cr)-*prevIn)
-		b.CacheRead += max(0, cr-*prevCR)
-		b.Output += max(0, out-*prevOut)
-	}
-	*prevIn, *prevCR, *prevOut = allIn-cr, cr, out
-	return true
-}
-
-func codexCountTurn(obj map[string]any, days map[string]*DayBucket) {
-	if ts := anyString(obj["timestamp"]); len(ts) >= 10 {
-		bucket := days[ts[:10]]
-		if bucket == nil {
-			bucket = &DayBucket{}
-			days[ts[:10]] = bucket
-		}
-		bucket.Turns++
-	}
-}
-
 func normalizeCodex(path string, caps textCaps) ([]CanonicalEvent, int, *SessionUsage, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -222,10 +152,7 @@ func normalizeCodex(path string, caps textCaps) ([]CanonicalEvent, int, *Session
 
 func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, int, *SessionUsage, error) {
 	var events []CanonicalEvent
-	usage := &SessionUsage{}
-	usageObserved := false
-	var prevIn, prevCR, prevOut int64
-	days := map[string]*DayBucket{}
+	calls := &codexUsageCalls{}
 	unparsed, seq := 0, 0
 	flatProtocolObserved := false
 	flatTranscriptObserved := false
@@ -254,6 +181,7 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 			continue
 		}
 		turnAnchor = codexTurnAnchorFromRecord(record)
+		calls.observe(record, obj)
 
 		if record.Flat {
 			switch record.Envelope {
@@ -264,9 +192,7 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 			case "response_item":
 				flatProtocolObserved = true
 			case "turn_context":
-				if model := anyString(record.Body["model"]); model != "" {
-					usage.Model = model
-				}
+				// Model and effort are call facts; calls.observe above reads them.
 			case "compacted":
 				if text := codexPublicText(record.Body); text != "" {
 					emitClip("summary", "", text, caps.system)
@@ -297,30 +223,19 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 							emitClip(draft.Kind, draft.Name, draft.Text, caps.tool)
 						}
 					}
-					if anyString(item["type"]) == "AgentMessage" {
-						usage.Turns++
-						codexCountTurn(obj, days)
-					}
 				case "user_message":
 					flatTranscriptObserved = true
 					emit("user", "", anyString(record.Body["message"]))
 				case "agent_message":
 					flatTranscriptObserved = true
 					emit("assistant", "", anyString(record.Body["message"]))
-					usage.Turns++
-					codexCountTurn(obj, days)
 				case "agent_reasoning":
 					flatTranscriptObserved = true
 					if text := anyString(record.Body["text"]); strings.TrimSpace(text) != "" {
 						emitClip("thinking", "", text, caps.thinking)
 					}
-				case "token_count":
-					usageObserved = codexTokenCount(record.Body, obj, usage, days,
-						&prevIn, &prevCR, &prevOut) || usageObserved
-				case "task_started", "task_complete", "thread_settings_applied", "turn_aborted":
-					if model := anyString(record.Body["model"]); model != "" && usage.Model == "" {
-						usage.Model = model
-					}
+				case "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted":
+					// Usage facts; calls.observe above folds them.
 				default:
 					unparsed++
 				}
@@ -330,16 +245,13 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 			case "agent_message":
 				flatTranscriptObserved = true
 				emit("assistant", "", anyString(record.Body["message"]))
-				usage.Turns++
-				codexCountTurn(obj, days)
 			case "agent_reasoning":
 				flatTranscriptObserved = true
 				if text := anyString(record.Body["text"]); strings.TrimSpace(text) != "" {
 					emitClip("thinking", "", text, caps.thinking)
 				}
 			case "token_count":
-				usageObserved = codexTokenCount(record.Body, obj, usage, days,
-					&prevIn, &prevCR, &prevOut) || usageObserved
+				// Usage facts; calls.observe above folds them.
 			default:
 				unparsed++
 			}
@@ -359,14 +271,12 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 				emit("user", "", anyString(record.Body["message"]))
 			case "agent_message":
 				emit("assistant", "", anyString(record.Body["message"]))
-				usage.Turns++
 			case "agent_reasoning":
 				if text := anyString(record.Body["text"]); strings.TrimSpace(text) != "" {
 					emitClip("thinking", "", text, caps.thinking)
 				}
 			case "token_count":
-				usageObserved = codexTokenCount(record.Body, obj, usage, days,
-					&prevIn, &prevCR, &prevOut) || usageObserved
+				// Usage facts; calls.observe above folds them.
 			case "task_started", "task_complete":
 			default:
 				unparsed++
@@ -377,9 +287,6 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 				role := anyString(record.Body["role"])
 				if role == "user" || role == "assistant" {
 					emit(role, "", extractCodexContent(record.Body["content"]))
-					if role == "assistant" {
-						usage.Turns++
-					}
 				}
 			case "function_call", "local_shell_call", "custom_tool_call":
 				name := anyString(record.Body["name"])
@@ -398,9 +305,7 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 				unparsed++
 			}
 		case "turn_context":
-			if model := anyString(record.Body["model"]); model != "" {
-				usage.Model = model
-			}
+			// Model and effort are call facts; calls.observe above reads them.
 		case "compacted":
 			if text := codexPublicText(record.Body); text != "" {
 				emitClip("summary", "", text, caps.system)
@@ -418,12 +323,7 @@ func normalizeCodexReader(reader io.Reader, caps textCaps) ([]CanonicalEvent, in
 		// compatibility gap rather than returning a silently empty conversation.
 		unparsed++
 	}
-	if usageObserved {
-		finishUsage(usage)
-	} else {
-		usage = nil
-	}
-	return events, unparsed, usage, nil
+	return events, unparsed, calls.fold(), nil
 }
 
 type codexEventDraft struct {
@@ -689,9 +589,9 @@ func collectCodexJobs(strict bool) ([]fileJob, error) {
 	return jobs, err
 }
 
-func (codexRuntime) Summarize(j fileJob) (SessionSummary, *SessionUsage, map[string]*DayBucket, bool) {
+func (codexRuntime) Summarize(j fileJob) (SessionSummary, bool) {
 	s := SessionSummary{Runtime: j.runtime, ID: stem(j.path), Project: j.project, Modified: j.mod, Path: j.path, HasTranscript: true}
-	m, usage, days := codexMeta(j.path)
+	m, usage := codexMeta(j.path)
 	s.Title = truncate(m.title, titleMaxLen)
 	s.Lines = m.lines
 	s.ThreadID = m.threadID
@@ -704,7 +604,7 @@ func (codexRuntime) Summarize(j fileJob) (SessionSummary, *SessionUsage, map[str
 	if usage != nil {
 		s.Context, s.Model, s.Turns = usage.Context, usage.Model, usage.Turns
 	}
-	return s, usage, days, s.Lines > 0
+	return s, s.Lines > 0
 }
 
 func (codexRuntime) NormalizeFull(path string) ([]CanonicalEvent, int, *SessionUsage, error) {

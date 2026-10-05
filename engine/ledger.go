@@ -52,7 +52,10 @@ type Observation struct {
 	SessionTags []Tag    `json:"session_tags"`
 	Watermark   string   `json:"watermark"`
 	Decision    Decision `json:"decision"`
-	WeakNeg     bool     `json:"weak_negative"`
+	// UndecidedRules are the rules the ledger could not judge over a session's tags (a
+	// term reads the single invocation it does not have). They did not fire.
+	UndecidedRules []string `json:"undecided_rules,omitempty"`
+	WeakNeg        bool     `json:"weak_negative"`
 }
 
 func NewLedger(path string, dets []Detector, pol *Policy) (*Ledger, error) {
@@ -151,7 +154,7 @@ func (l *Ledger) Observe(session string, ev Event) Observation {
 	// library (fail-OPEN — the whole session watermark stuck at zero). Default the
 	// role here so no /observe caller can disarm session governance by omission.
 	if ev.Role == "" {
-		ev.Role = "tool_call"
+		ev.Role = LiveEventRole
 	}
 	tags := Classify(ev, l.dets)
 	for _, t := range tags {
@@ -159,8 +162,15 @@ func (l *Ledger) Observe(session string, ev Event) Observation {
 		l.addSessionTag(session, t)
 	}
 	sess := l.tags[session]
+	// The session's accumulated tags carry no single invocation: a command or tool term
+	// is undecided here, never read as absent.
+	d, seen := DecideSeeing(sess, StaticTier(l.pol), UnknownInvocation)
+	var undecided []string
+	for _, r := range seen.Undecided {
+		undecided = append(undecided, r.ID)
+	}
 	return Observation{Session: session, Tags: tags, SessionTags: sess,
-		Watermark: WaterMark(sess), Decision: Decide(sess, l.pol),
+		Watermark: WaterMark(sess), Decision: d, UndecidedRules: undecided,
 		WeakNeg: len(sess) == 0}
 }
 

@@ -1,8 +1,10 @@
 package sessionquery
 
 import (
+	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"crossing-guard/engine"
 )
@@ -12,6 +14,9 @@ import (
 // name tags that exist — there is no pattern language at match time.
 type Vocabulary struct {
 	pairs []tagPair
+	// ownerPairs are the projected pairs the owner himself has applied. Only
+	// Notes reads them: a mine: term can reach nothing else.
+	ownerPairs map[tagPair]bool
 }
 
 // tagPair is a projected (key, value). engine.Tag carries a slice and so
@@ -21,9 +26,13 @@ type tagPair struct{ Key, Value string }
 // NewVocabulary collects the tags of the given rows.
 func NewVocabulary(rows []Row) Vocabulary {
 	seen := map[tagPair]struct{}{}
+	ownerPairs := map[tagPair]bool{}
 	for _, row := range rows {
 		for _, tag := range projectTags(row.Tags, false) {
 			seen[tagPair{tag.Key, tag.Value}] = struct{}{}
+		}
+		for _, tag := range projectTags(row.Tags, true) {
+			ownerPairs[tagPair{tag.Key, tag.Value}] = true
 		}
 	}
 	pairs := make([]tagPair, 0, len(seen))
@@ -36,7 +45,7 @@ func NewVocabulary(rows []Row) Vocabulary {
 		}
 		return pairs[i].Value < pairs[j].Value
 	})
-	return Vocabulary{pairs: pairs}
+	return Vocabulary{pairs: pairs, ownerPairs: ownerPairs}
 }
 
 // boundTerm is a term ready to test: tag terms carry their predicate.
@@ -196,8 +205,19 @@ func (b Bound) holds(t boundTerm, row Row, all, owner []engine.Tag) bool {
 		return t.Age.holds(b.now, row.TouchedAt)
 	case fieldTagged:
 		return taggedWithin(t.Age, b.now, row.Tags)
+	case fieldCalls:
+		return t.Number.holds(row.Calls)
+	case fieldLines:
+		return t.Number.holds(row.Lines)
 	}
 	return false
+}
+
+func (n numberBound) holds(count int) bool {
+	if n.More {
+		return count > n.Count
+	}
+	return count < n.Count
 }
 
 // statusWord gives a session the decider never published a frame for the word
@@ -266,4 +286,93 @@ func earliestMatch(group []boundTerm, tags []Tag) int64 {
 		}
 	}
 	return earliest
+}
+
+// Note is advice about one term of a query that parses and binds but, over
+// the tags that exist, can only ever be false because it was probably meant
+// as something else. A note never changes what the query matches.
+type Note struct {
+	Term    string `json:"term"`    // the term exactly as typed
+	Suggest string `json:"suggest"` // the term the owner probably meant
+	Problem string `json:"problem"` // one sentence, shown beside the query
+}
+
+// Notes reports each keyless tag term whose word is a tag key and never a tag
+// value. A keyless term matches a value under any key and never a key, so
+// tag:flow over sessions tagged flow=building selects nothing; tag:flow=* is
+// the key term. A mine: term is judged on the owner's own tags only, because
+// that is all mine: can reach: an agent's value flow does not make mine:flow
+// select anything, and a detector's key flow is not a key mine: can name.
+// The projection key of keyless tags is never offered: the owner never wrote
+// it. Notes come back in query order.
+func (q Query) Notes(vocabulary Vocabulary) []Note {
+	var notes []Note
+	for _, t := range q.terms {
+		if !noteable(t) {
+			continue
+		}
+		ownerOnly := t.Field == fieldMine
+		if t.Value == KeylessTagKey || vocabulary.has(ownerOnly, func(p tagPair) bool { return p.Value == t.Value }) ||
+			!vocabulary.has(ownerOnly, func(p tagPair) bool { return p.Key == t.Value }) {
+			continue
+		}
+		notes = append(notes, keyTermNote(t))
+	}
+	return notes
+}
+
+// MayHaveNotes reports a query with a term Notes could speak about, so a
+// caller can skip building a vocabulary for one that has none.
+func (q Query) MayHaveNotes() bool {
+	for _, t := range q.terms {
+		if noteable(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteable is a keyless, glob-free tag: or mine: term. A glob is a pattern,
+// never a mistaken key.
+func noteable(t term) bool {
+	return (t.Field == fieldTag || t.Field == fieldMine) && t.Key == "" && !strings.Contains(t.Value, "*")
+}
+
+// has reports whether any pair (the owner's only, when asked) satisfies the
+// test. An exact value test is what tagPredicate's expansion of a glob-free
+// term reduces to (empty values are never pairs), without its overflow error.
+func (v Vocabulary) has(ownerOnly bool, test func(tagPair) bool) bool {
+	if ownerOnly {
+		for pair := range v.ownerPairs {
+			if test(pair) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, pair := range v.pairs {
+		if test(pair) {
+			return true
+		}
+	}
+	return false
+}
+
+func keyTermNote(t term) Note {
+	prefix := ""
+	if t.Negated {
+		prefix = "-"
+	}
+	value := t.Value + "=*"
+	if strings.ContainsFunc(value, unicode.IsSpace) {
+		value = `"` + value + `"`
+	}
+	suggest := prefix + string(t.Field) + ":" + value
+	whose, which := "the tag value", "is a tag key"
+	if t.Field == fieldMine {
+		whose, which = "your tag value", "is one of your tag keys"
+	}
+	return Note{Term: t.Raw, Suggest: suggest, Problem: fmt.Sprintf(
+		"%s looks for %s %q, and no session has one. %s %s: write %s for any %s tag.",
+		t.Raw, whose, t.Value, t.Value, which, suggest, t.Value)}
 }

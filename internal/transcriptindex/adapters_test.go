@@ -36,7 +36,7 @@ func TestHarvestCatalogPreservesNativeGenerationAndCanonicalMapping(t *testing.T
 	id := writeAdapterClaudeFixture(t)
 	catalog := NewRegisteredHarvestCatalog()
 	discovery, err := catalog.Discover(context.Background(), DefaultLimits())
-	if err != nil || !discovery.Complete {
+	if err != nil || !discovery.Complete || len(discovery.Limitations) != 0 {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
 	var session SourceSession

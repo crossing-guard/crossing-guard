@@ -58,7 +58,7 @@ async function renderAudit(container) {
         + 'default is active; a custom rule file replaces that default.'));
     }
     activeRules.forEach(rule => {
-      const row = el('div'); row.style.cssText = 'padding:4px 0;font-size:12px';
+      const row = el('div'); row.style.cssText = 'padding:4px 0;font-size:var(--fs-8)';
       // Escaped like the finding cards below. Severity is report metadata; action is
       // the one behavioral vocabulary and remains visible even on post-hoc Audit.
       const label = rule.severity || rule.action || 'observe';
@@ -73,7 +73,7 @@ async function renderAudit(container) {
   // run control
   const runRow = el('div', 'row');
   const runBtn = el('button', 'btn primary', 'Run against all sessions →');
-  const summary = el('span'); summary.style.cssText = 'color:var(--dim);font-size:12px';
+  const summary = el('span'); summary.style.cssText = 'color:var(--dim);font-size:var(--fs-8)';
   runRow.append(runBtn, summary);
   main.appendChild(runRow);
 
@@ -216,6 +216,13 @@ function bySession(data) {
 
 // paint writes both halves of the contract for a completed run: the rail is the
 // list of flagged sessions, the centre is the selected one's findings.
+// auditCaveats names what this run could not judge: sessions whose agent tags were
+// unreadable, and armed rules that read the command, tool or target of one call.
+function auditCaveats(data) {
+  return (data.agent_unavailable ? ' · ' + data.agent_unavailable + ' with unreadable agent tags, agent: rules not evaluated' : '')
+    + (data.rules_not_fully_audited ? ' · ' + data.rules_not_fully_audited + ' armed rule(s) read facts a past session does not hold (the command, tool or target of one call) and are only partly audited' : '');
+}
+
 function paint(out, side, summary, data, setCrumb) {
   // Name the armed policy explicitly: findings suffixed "(armed)" are the rules
   // the hook actually enforces, dry-run across history — the whole point is that
@@ -226,7 +233,9 @@ function paint(out, side, summary, data, setCrumb) {
   const failed = Number.isFinite(data.failed) ? data.failed : Math.max(0, data.total - data.evaluated);
   summary.textContent = data.findings.length + ' findings across '
     + data.evaluated + ' / ' + data.total + ' sessions (' + data.with_tags + ' had any tag'
-    + (failed ? ' · ' + failed + ' could not be loaded' : '') + ') · '
+    + (failed ? ' · ' + failed + ' could not be loaded' : '')
+    + auditCaveats(data)
+    + ') · '
     + data.elapsed_ms + 'ms' + armed;
 
   const groups = bySession(data);
@@ -244,8 +253,7 @@ function paint(out, side, summary, data, setCrumb) {
 
   const rows = new Map(); // key -> rail row, so a restored selection can be highlighted
   for (const g of groups) {
-    const runtime = el('span', 'chip ' + (g.session.runtime === 'codex' ? 'codex' : 'claude'),
-      g.session.runtime);
+    const runtime = el('span', 'chip ' + g.session.runtime, g.session.runtime);
     const row = railRow({
       title: g.session.title || g.session.id,
       dim: !g.session.title,
@@ -317,10 +325,10 @@ function renderFinding(out, g) {
   if (bar) out.appendChild(bar);
 
   const head = headRow(6);
-  head.appendChild(el('span', 'chip ' + (session.runtime === 'codex' ? 'codex' : 'claude'), session.runtime));
+  head.appendChild(el('span', 'chip ' + session.runtime, session.runtime));
   const title = el('span', '', session.title || session.id);
-  title.style.cssText = 'font-weight:600;font-size:14px'; head.appendChild(title);
-  const when = el('span'); when.style.cssText = 'color:var(--dim);font-size:11px';
+  title.style.cssText = 'font-weight:600;font-size:var(--fs-11)'; head.appendChild(title);
+  const when = el('span'); when.style.cssText = 'color:var(--dim);font-size:var(--fs-6)';
   when.textContent = (session.modified || '').slice(0, 10); head.appendChild(when);
   const open = el('button', 'btn', 'Open the session →');
   open.onclick = () => {
@@ -339,7 +347,7 @@ function renderFinding(out, g) {
   rules.forEach(f => {
     const card = el('div'); card.style.cssText =
       'border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:8px 0';
-    const line = el('div'); line.style.cssText = 'font-size:12px';
+    const line = el('div'); line.style.cssText = 'font-size:var(--fs-8)';
     line.innerHTML = '<span class="chip ' + (SEV_CHIP[f.severity] || 'st-draft') + '">'
       + escapeHtml(f.severity || '') + '</span> <b>' + escapeHtml(f.rule || '') + '</b>'
       + ' <span style="color:var(--dim)">— ' + escapeHtml(f.message || '') + '</span>';
@@ -347,12 +355,19 @@ function renderFinding(out, g) {
     const tagWrap = el('div'); tagWrap.style.cssText = 'margin:6px 0 0';
     (f.fired || []).forEach(t => {
       const direct = t.detector_kind === 'source' || t.detector_kind === 'destination';
-      const c = el('span', 'chip ' + (direct ? 'cl-observed' : 'st-stale'), t.key + '=' + t.value);
-      c.title = (t.detector_kind || 'unknown') + ' · ' + t.detector
+      const claimed = t.detector_kind === 'model-claimed';
+      const c = el('span', 'chip ' + (claimed ? 'cl-model-claimed' : direct ? 'cl-observed' : 'st-stale'),
+        claimed ? t.key : t.key + '=' + t.value);
+      c.title = (t.detector_kind || 'unknown') + (t.detector ? ' · ' + t.detector : '')
         + (t.evidence ? ' · ' + t.evidence : '');
       c.style.marginRight = '4px'; tagWrap.appendChild(c);
     });
-    if (!(f.fired || []).length) {
+    (f.absent || []).forEach(name => {
+      const c = el('span', 'chip st-draft', 'absent: ' + name);
+      c.title = 'this session has no ' + name;
+      c.style.marginRight = '4px'; tagWrap.appendChild(c);
+    });
+    if (!(f.fired || []).length && !(f.absent || []).length) {
       tagWrap.appendChild(el('span', 'sub', 'No tag was recorded on this finding.'));
     }
     card.appendChild(tagWrap);

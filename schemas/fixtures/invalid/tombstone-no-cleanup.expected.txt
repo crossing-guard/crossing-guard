@@ -1,0 +1,2 @@
+error-contains: minItems
+A tombstone that names no projection to clean up is invalid on the wire: every deletion says what each receiver must erase.

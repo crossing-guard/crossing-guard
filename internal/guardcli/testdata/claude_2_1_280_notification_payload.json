@@ -1,0 +1,12 @@
+{
+ "captured": "Claude Code 2.1.280, 2026-09-25, raw Notification hook stdin from a scratch --settings hook; headless claude -p over stream-json with --permission-prompt-tool stdio, the permission request held past the vendor's 6 s notify delay (notification-type-provenance-fix-plan.md section 5). session_id, transcript_path and cwd are sanitized; every other field is verbatim.",
+ "payload": {
+  "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000002",
+  "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000002.jsonl",
+  "cwd": "/home/user/probe",
+  "prompt_id": "315c3180-aa51-4f37-a799-1804ff387533",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Bash",
+  "notification_type": "permission_prompt"
+ }
+}

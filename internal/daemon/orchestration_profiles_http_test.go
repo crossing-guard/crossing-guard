@@ -25,7 +25,7 @@ func orchestrationProfileHarness(t *testing.T) (http.Handler, string) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	registerOrchestrationProfileRoutes(mux, owner)
+	registerOrchestrationProfileRoutes(mux, owner, func(string) profilefs.PinSource { return nil })
 	return securityMiddleware(mux, "127.0.0.1:3210", "test-token", filepath.Join(dataDir, "api-token")), dataDir
 }
 

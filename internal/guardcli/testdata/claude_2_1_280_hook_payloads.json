@@ -1,0 +1,251 @@
+{
+ "captured": "Claude Code 2.1.280, 2026-09-25, raw hook stdin from a scratch --settings hook (subagent-carrier-boundary-verification.md \u00a71)",
+ "cases": [
+  {
+   "name": "main_user_prompt_submit",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "(probe prompt elided)"
+   }
+  },
+  {
+   "name": "main_pre_tool_use",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo main-before",
+     "description": "Print main-before"
+    },
+    "tool_use_id": "toolu_01W54RQAAQxWhCBCNK4ys5Fd"
+   }
+  },
+  {
+   "name": "main_post_tool_use",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo main-before",
+     "description": "Print main-before"
+    },
+    "tool_response": {
+     "stdout": "main-before",
+     "stderr": "",
+     "interrupted": false,
+     "isImage": false
+    },
+    "tool_use_id": "toolu_01W54RQAAQxWhCBCNK4ys5Fd",
+    "duration_ms": 779
+   }
+  },
+  {
+   "name": "main_pre_tool_use_agent",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Agent",
+    "tool_input": {
+     "description": "Execute bash command and report",
+     "subagent_type": "general-purpose",
+     "run_in_background": false,
+     "prompt": "(probe prompt elided)"
+    },
+    "tool_use_id": "toolu_014586UpjMMrk8a3rABpPZsT"
+   }
+  },
+  {
+   "name": "foreground_subagent_pre_tool_use",
+   "carries": false,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "agent_id": "ae752be6321f5a57b",
+    "agent_type": "general-purpose",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo inside-subagent",
+     "description": "Echo test message"
+    },
+    "tool_use_id": "toolu_016FC8uvsxQiWz744wxiuFCR"
+   }
+  },
+  {
+   "name": "foreground_subagent_post_tool_use",
+   "carries": false,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000001",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000001.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "7c8b4936-d14e-4beb-9b56-421c8e86d1ae",
+    "permission_mode": "default",
+    "agent_id": "ae752be6321f5a57b",
+    "agent_type": "general-purpose",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo inside-subagent",
+     "description": "Echo test message"
+    },
+    "tool_response": {
+     "stdout": "inside-subagent",
+     "stderr": "",
+     "interrupted": false,
+     "isImage": false
+    },
+    "tool_use_id": "toolu_016FC8uvsxQiWz744wxiuFCR",
+    "duration_ms": 13
+   }
+  },
+  {
+   "name": "background_subagent_pre_tool_use",
+   "carries": false,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000002",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000002.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "eb38d284-d80c-4b17-993e-92f8df822632",
+    "permission_mode": "default",
+    "agent_id": "a845abe92f6c80953",
+    "agent_type": "general-purpose",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo inside-background-subagent",
+     "description": "Echo message to indicate subagent is running"
+    },
+    "tool_use_id": "toolu_01TM36mjXPHPxRy66SvN9eB1"
+   }
+  },
+  {
+   "name": "background_subagent_post_tool_use",
+   "carries": false,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000002",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000002.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "eb38d284-d80c-4b17-993e-92f8df822632",
+    "permission_mode": "default",
+    "agent_id": "a845abe92f6c80953",
+    "agent_type": "general-purpose",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo inside-background-subagent",
+     "description": "Echo message to indicate subagent is running"
+    },
+    "tool_response": {
+     "stdout": "inside-background-subagent",
+     "stderr": "",
+     "interrupted": false,
+     "isImage": false
+    },
+    "tool_use_id": "toolu_01TM36mjXPHPxRy66SvN9eB1",
+    "duration_ms": 22
+   }
+  },
+  {
+   "name": "agent_flag_main_pre_tool_use",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000003",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000003.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "98d2edb4-9cd1-44bf-8f8c-1051aa666cc6",
+    "permission_mode": "default",
+    "agent_type": "probe-main",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "echo main-with-agent-flag",
+     "description": "Echo the string main-with-agent-flag"
+    },
+    "tool_use_id": "toolu_019B8yadiUGPxpg75h7oncaV"
+   }
+  },
+  {
+   "name": "agent_flag_main_user_prompt_submit",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000003",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000003.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "98d2edb4-9cd1-44bf-8f8c-1051aa666cc6",
+    "permission_mode": "default",
+    "agent_type": "probe-main",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "(probe prompt elided)"
+   }
+  },
+  {
+   "name": "main_pre_tool_use_during_background_subagent",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000002",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000002.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "eb38d284-d80c-4b17-993e-92f8df822632",
+    "permission_mode": "default",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "for i in $(seq 1 60); do [ -f /home/user/probe-bg/done ] && break; sleep 1; done; echo waited",
+     "description": "Poll for background task completion file"
+    },
+    "tool_use_id": "toolu_01BMtdjNXFTzttEb95yf4sM2"
+   }
+  },
+  {
+   "name": "main_post_tool_use_during_background_subagent",
+   "carries": true,
+   "payload": {
+    "session_id": "abcdef00-aaaa-4bbb-8ccc-000000000002",
+    "transcript_path": "/home/user/.claude/projects/-home-user-probe/abcdef00-aaaa-4bbb-8ccc-000000000002.jsonl",
+    "cwd": "/home/user/probe",
+    "prompt_id": "eb38d284-d80c-4b17-993e-92f8df822632",
+    "permission_mode": "default",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+     "command": "for i in $(seq 1 60); do [ -f /home/user/probe-bg/done ] && break; sleep 1; done; echo waited",
+     "description": "Poll for background task completion file"
+    },
+    "tool_response": {
+     "stdout": "waited",
+     "stderr": "",
+     "interrupted": false,
+     "isImage": false
+    },
+    "tool_use_id": "toolu_01BMtdjNXFTzttEb95yf4sM2",
+    "duration_ms": 2589
+   }
+  }
+ ]
+}

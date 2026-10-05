@@ -42,7 +42,7 @@ func TestAgentsHTTPSurfaceServesRosterDefaultsAndSignals(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"profile_id": preview.ProfileID,
 		"profile_source_digest": preview.SourceDigest, "profile_bundle_digest": preview.BundleDigest,
-		"project_root": root, "runtime": "managed-fixture", "mode": "",
+		"project_root": root, "route_id": testRouteID(host, "managed-fixture", "", nil), "mode": "",
 		"granted_authority": []string{"reply"}, "auto_action": false,
 		"priority": 7, "declared_tags": []string{"needs-review"},
 		"limits":               map[string]any{"max_total": 3, "loop_budget": 2},
@@ -254,7 +254,7 @@ func TestAgentsHTTPAbsentTokensAndMultiIdentityFilters(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"profile_id": preview.ProfileID,
 		"profile_source_digest": preview.SourceDigest, "profile_bundle_digest": preview.BundleDigest,
-		"project_root": root, "runtime": "managed-fixture", "mode": "",
+		"project_root": root, "route_id": testRouteID(host, "managed-fixture", "", nil), "mode": "",
 		"granted_authority": []string{}, "auto_action": false,
 		"expected_state_token": absent[candidateID], "confirmed": true})
 	response := httptest.NewRecorder()
@@ -330,5 +330,93 @@ func TestAgentsHTTPAbsentTokensAndMultiIdentityFilters(t *testing.T) {
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/orchestration/tags?session_id=&session_id=+", nil))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("all-empty session_id status=%d", response.Code)
+	}
+}
+
+// The browser cannot resolve paths, so the daemon publishes folder keys:
+// project_root_key on each agent and cwd_key on the session detail. A place
+// saved under a symlinked spelling has its folder's key and is listed as
+// watching a session recorded under the physical spelling; a rootless binding
+// watches nothing (place-root-folder-identity plan §3.2, PR-11).
+func TestAgentsAndSessionDetailPublishFolderKeys(t *testing.T) {
+	root := t.TempDir()
+	repo, link, _ := symlinkedFolder(t, root)
+	owner, err := profilefs.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := selectManagedProfile(t, owner, helperAgentProfileSource())
+	ix, err := store.Open(filepath.Join(root, "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := newOrchestrationManagedHost(ix, owner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { host.close(); _ = ix.Close() })
+	original := chatDrivers
+	chatDrivers = map[string]ChatDriver{"managed-fixture": managedFixtureDriver{}}
+	t.Cleanup(func() { chatDrivers = original })
+	if _, err := host.putBinding(managedBindingCommand{BindingID: "agent-place", ProfileID: preview.ProfileID,
+		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: link,
+		RouteID: testRouteID(host, "managed-fixture", "", nil), GrantedAuthority: []string{}, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-place")}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerOrchestrationManagedRoutes(mux, host, owner)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/orchestration/agents", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("agents status=%d body=%s", response.Code, response.Body.String())
+	}
+	var roster struct {
+		Agents []struct {
+			BindingID      string `json:"binding_id"`
+			ProjectRoot    string `json:"project_root"`
+			ProjectRootKey string `json:"project_root_key"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &roster); err != nil {
+		t.Fatal(err)
+	}
+	if len(roster.Agents) != 1 || roster.Agents[0].ProjectRoot != link || roster.Agents[0].ProjectRootKey != projectRootKey(repo) {
+		t.Fatalf("agent keeps its spelling and carries its folder's key %q: %+v", projectRootKey(repo), roster.Agents)
+	}
+
+	previous := governor
+	governor = NewGovernor(ix, nil)
+	t.Cleanup(func() { governor = previous })
+	decorate := func(cwd string) sessionDetailWithAgents {
+		detail := &SessionDetail{}
+		detail.Runtime, detail.ID, detail.Cwd = "managed-fixture", "ses-keys", cwd
+		return decorateSessionAgents(detail)
+	}
+	watched := decorate(repo)
+	if watched.CwdKey != projectRootKey(repo) || len(watched.WatchedBy) != 1 || watched.WatchedBy[0].BindingID != "agent-place" {
+		t.Fatalf("session under the physical spelling: cwd_key=%q watched_by=%+v", watched.CwdKey, watched.WatchedBy)
+	}
+	var wire struct {
+		CwdKey string `json:"cwd_key"`
+	}
+	if body, err := json.Marshal(watched); err != nil || json.Unmarshal(body, &wire) != nil || wire.CwdKey != projectRootKey(repo) {
+		t.Fatalf("GET /api/session must carry cwd_key on the wire: %v %+v", err, wire)
+	}
+	if other := decorate(filepath.Join(repo, "..", "sibling")); len(other.WatchedBy) != 0 {
+		t.Fatalf("a sibling-folder session is watched: %+v", other.WatchedBy)
+	}
+	// A binding with no root never triggers (bindingScopeMatches), so it must
+	// not be shown as watching either. The PUT refuses an empty root; older
+	// rows were copied verbatim by a migration, so write one directly.
+	rootless := store.ManagedBinding{BindingID: "agent-rootless", ProfileID: preview.ProfileID,
+		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest,
+		Role: "helper", State: "enabled", Runtime: "managed-fixture"}
+	if _, err := ix.PutManagedBinding(rootless, store.ManagedBindingAbsentToken("agent-rootless"), 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, watch := range decorate(repo).WatchedBy {
+		if watch.BindingID == "agent-rootless" {
+			t.Fatal("a rootless binding is shown as watching")
+		}
 	}
 }

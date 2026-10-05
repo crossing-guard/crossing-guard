@@ -16,17 +16,39 @@ records the product never built.
   path, or `outside_repository` — an absolute path is invalid by pattern), and `chain`
 - `event.schema.json`: one governed action — typed payload (verb, tool, target, frozen
   tags, tags digest, decision, reason, origin) and its per-session chain entry
-- `memory.schema.json`: the shared dossier (ADR 0013). `scope` may be `repository` or
-  `organization` only; a `user`-scoped record is invalid on the wire
-- `handoff.schema.json`: human-edited markdown plus declared governance state; anchors
-  are `sender-local`
-- `tombstone.schema.json`: deletion propagation record
+- `memory.schema.json` (**1.1**): the shared dossier (ADR 0013), one revision per record.
+  `scope` may be `repository` or `organization` only; a `user`-scoped record is invalid on
+  the wire. `content_hash` is the wire hash of the redacted record; `base_content_hash`
+  (1.1) is the wire hash of the revision the edit was made against, absent on a first
+  appearance
+- `handoff.schema.json` (**1.1**): a handoff between members — an immutable document the
+  sender's device builds: `title`, `body_markdown` (the person's edited text), `remaining`
+  (the sender's list), the sender's `session` (wire id, runtime, native id, and the
+  catalog and resume ids), a remote-derived `repository_id` or null, a typed `recipient`
+  (a server user id), `agents` (references, never bodies), declared governance state, and
+  an optional `conversation` excerpt. `content_hash` is the wire hash of the document
+  after the device's path and secret checks (`teamwire.HandoffWireHash`); anchors are
+  `sender-local`. Push kind `handoff`
+- `handoff-receipt.schema.json` (**1.0**): one transition of one handoff reported by one
+  device — `received`, `started`, `opened`, `declined`, `closed`, `withdrawn`. Its id is
+  deterministic over (handoff, transition, device, ticket, native session id), so a retry
+  is byte-identical. `started` and `opened` carry the ticket and the recipient's session.
+  Push kind `handoff_receipt`
+- `tombstone.schema.json`: deletion propagation record. `record_type` is `memory` (the
+  record's global id) or `session_content` (a wire session id; `required_projection_cleanup`
+  `["cache"]`)
 - `device-report.schema.json`: a bounded projection of `doctor --json`
-- `bundle.schema.json`: signed governance and agent-configuration bundle; an unsigned
-  bundle is invalid
+- `bundle.schema.json` (**1.1**; a 1.0 document is still accepted): signed governance and
+  agent-configuration bundle; an unsigned bundle is invalid. 1.1 adds the caps the schema
+  can state — at most 8 `documents`, a `body` of at most 262,144 characters; the two it
+  cannot (at most one `rulebook`; the body cap counted in bytes) are checked by
+  `teamwire.CheckBundleCaps` on the server and on the device. Document kinds are
+  `rulebook`, `profile` (the exact `PROFILE.md` bytes) and `detectors` (carried, not
+  applied by this version)
 
-Only `event` has an encoder today (`engine.EncodeWireEvent`); the others gain theirs with
-the features that produce them.
+`event` is encoded by `engine.EncodeWireEvent`; a handoff document is built by the daemon's
+send (`internal/daemon/team_handoff_send.go`) and a receipt by the store
+(`store.EnqueueHandoffReceiptTx`), each frozen in the outbox row that carries it.
 
 ## Draft schemas — 0.1
 
@@ -59,7 +81,18 @@ replace it later.
   canonical fields.
 - **Immutability begins at the first server deployment or public release, whichever
   comes first.** Until then nothing outside this repository consumes 1.0, and a change
-  needs its fixtures updated and a line here. Changelog: 2026-09-17 — 1.0 defined.
+  needs its fixtures updated and a line here. Changelog: 2026-09-17 — 1.0 defined. 2026-09-17 —
+  `device-report`: `runtimes[].canary {observed_at, rule_active}` added and required (the fleet's
+  third rung had no field); free-text `firing.evidence` removed; `maxItems` on both arrays;
+  `runtimes[].name` and `daemon.version` constrained by pattern (team plan §5.15). 2026-09-29 —
+  team item 4 (additive; the demo server accepts none of these until it runs item 4):
+  `session`, `session-checkpoint-fact`, and `session-content` defined at 1.0 (the push
+  kinds of the item 4 plan §4.3; content chunks capped at 256 KiB); `sandbox-hook` added to
+  `provenance.kind` (§7.1's one-enum reservation — posture B's observations). Recorded
+  late: `event.payload.rule` (item 2a) and `event.payload.layer` (item 3a). 2026-10-02 —
+  team item 5: `memory` → **1.1** (`base_content_hash` added, optional; a server at 1.0
+  refuses 1.1 by `schema_version`); tombstone fixtures added, valid (`session_content`)
+  and invalid (no cleanup, no prior hash); `memory-bad-base` invalid fixture.
 
 ## Fixtures
 

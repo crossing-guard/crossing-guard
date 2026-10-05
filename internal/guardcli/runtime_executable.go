@@ -89,7 +89,18 @@ func searchedDirs() []string {
 			dirs = append(dirs, matches...)
 		}
 	}
-	return dirs
+	// The managed service's PATH already holds the install prefixes (RuntimeAgentPATH), so
+	// without this every one of them would be searched, and reported, twice.
+	seen := map[string]bool{}
+	unique := dirs[:0]
+	for _, d := range dirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		unique = append(unique, d)
+	}
+	return unique
 }
 
 func executable(path string) bool {
@@ -104,10 +115,10 @@ func executable(path string) bool {
 //
 // Order: an explicitly configured binary wins (the user said so); then the
 // ambient PATH; then the known install prefixes. `fallbacks` carries
-// runtime-specific locations that are not directories on PATH at all — the
-// codex binary bundled inside the ChatGPT app is the standing example.
+// runtime-specific locations that are not directories on PATH at all — a CLI
+// shipped inside a desktop app bundle is the standing example.
 //
-// The error names the runtime and every directory searched, so the reader can
+// The error names the runtime and every location searched, so the reader can
 // act on it without reading this file.
 func ResolveRuntimeBinary(name, configured string, fallbacks ...string) (string, error) {
 	if configured != "" {
@@ -125,7 +136,17 @@ func ResolveRuntimeBinary(name, configured string, fallbacks ...string) (string,
 	if p, err := exec.LookPath(name); err == nil {
 		return p, nil
 	}
-	for _, dir := range searchedDirs() {
+	return resolveBinaryIn(name, searchedDirs(), fallbacks)
+}
+
+// resolveBinaryIn is the search itself, a pure function of what it is given: the
+// first executable <dir>/<name>, then the first executable fallback.
+//
+// The recovery it names must work for every caller. A per-turn binary setting
+// reaches chat turns only, and the service's PATH is the one in its service
+// definition, not the reader's shell — so the advice is a location, not a setting.
+func resolveBinaryIn(name string, dirs, fallbacks []string) (string, error) {
+	for _, dir := range dirs {
 		candidate := filepath.Join(dir, name)
 		if executable(candidate) {
 			return candidate, nil
@@ -136,10 +157,14 @@ func ResolveRuntimeBinary(name, configured string, fallbacks ...string) (string,
 			return fb, nil
 		}
 	}
-
+	also := ""
+	if len(fallbacks) > 0 {
+		also = "; also tried: " + strings.Join(fallbacks, ", ")
+	}
 	return "", fmt.Errorf(
-		"%s: executable %q not found; searched: %s; "+
-			"if it is installed elsewhere, set the binary path in the console's Advanced drawer; "+
-			"note: the daemon runs under launchd with a minimal PATH, so a shell that finds %q may not reflect what the service sees",
-		name, name, strings.Join(searchedDirs(), ", "), name)
+		"%s: executable %q not found; searched: %s%s; "+
+			"to fix it for every feature, place or link the executable in one of the searched directories; "+
+			"the binary path in Settings applies to chat turns only; "+
+			"note: when the daemon runs as a service its PATH is the service definition's, so a shell that finds %q may not reflect what the service sees",
+		name, name, strings.Join(dirs, ", "), also, name)
 }

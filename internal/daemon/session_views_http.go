@@ -7,6 +7,7 @@ package daemon
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"crossing-guard/internal/sessionquery"
 )
@@ -26,7 +27,7 @@ func handleSessionViewCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.View.ID = id
-	respondSessionViews(w, request.StateToken, func(views []SavedSessionView) ([]SavedSessionView, error) {
+	respondSessionViews(w, request.StateToken, id, func(views []SavedSessionView) ([]SavedSessionView, error) {
 		return append(views, request.View), nil
 	})
 }
@@ -38,7 +39,7 @@ func handleSessionViewUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("view")
 	request.View.ID = id
-	respondSessionViews(w, request.StateToken, func(views []SavedSessionView) ([]SavedSessionView, error) {
+	respondSessionViews(w, request.StateToken, id, func(views []SavedSessionView) ([]SavedSessionView, error) {
 		for index := range views {
 			if views[index].ID == id {
 				views[index] = request.View
@@ -51,7 +52,7 @@ func handleSessionViewUpdate(w http.ResponseWriter, r *http.Request) {
 
 func handleSessionViewDelete(w http.ResponseWriter, r *http.Request) {
 	id, token := r.PathValue("view"), r.URL.Query().Get("state_token")
-	respondSessionViews(w, token, func(views []SavedSessionView) ([]SavedSessionView, error) {
+	respondSessionViews(w, token, "", func(views []SavedSessionView) ([]SavedSessionView, error) {
 		for index := range views {
 			if views[index].ID == id {
 				return append(views[:index], views[index+1:]...), nil
@@ -66,7 +67,7 @@ func handleSessionViewOrder(w http.ResponseWriter, r *http.Request) {
 	if !decodeSessionOrganizationBody(w, r, &request) {
 		return
 	}
-	respondSessionViews(w, request.StateToken, func(views []SavedSessionView) ([]SavedSessionView, error) {
+	respondSessionViews(w, request.StateToken, "", func(views []SavedSessionView) ([]SavedSessionView, error) {
 		return reorderSessionViews(views, request.Order)
 	})
 }
@@ -93,11 +94,31 @@ func reorderSessionViews(views []SavedSessionView, order []string) ([]SavedSessi
 	return out, nil
 }
 
-func respondSessionViews(w http.ResponseWriter, token string, change func([]SavedSessionView) ([]SavedSessionView, error)) {
-	document, err := mutateSessionViews(sessionViewsDataDir(), sessionOrganizationConfig(), token, change)
+// sessionViewWriteResponse answers a view write: the views document, and for
+// a created or updated view the notes on its query. A note never rejects a
+// write (validateSessionView alone decides that); it tells a writer — the
+// console or a script — that the query it just saved probably selects nothing.
+type sessionViewWriteResponse struct {
+	sessionViewsDocument
+	ViewNotes map[string][]sessionquery.Note `json:"view_notes,omitempty"`
+	// PlacementNotes are the notes on the written board view's placement
+	// rules, as a board read reports them.
+	PlacementNotes []boardRuleNotes `json:"placement_notes,omitempty"`
+}
+
+// respondSessionViews applies one write. written names the view a create or
+// update wrote, whose query is noted; it is empty for a delete or a reorder,
+// whose answer is the document alone.
+func respondSessionViews(w http.ResponseWriter, token, written string, change func([]SavedSessionView) ([]SavedSessionView, error)) {
+	limits := sessionOrganizationConfig()
+	document, err := mutateSessionViews(sessionViewsDataDir(), limits, token, change)
 	switch {
-	case err == nil:
+	case err == nil && written == "":
 		writeJSON(w, document)
+	case err == nil:
+		writeJSON(w, sessionViewWriteResponse{sessionViewsDocument: document,
+			ViewNotes:      writtenViewNotes(document.Views, written, sessionQueryLimits(limits), time.Now()),
+			PlacementNotes: writtenPlacementNotes(document.Views, written, sessionQueryLimits(limits), time.Now())})
 	case errors.Is(err, errSessionViewsStale), errors.Is(err, errSessionViewsRejected):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, errSessionViewNotFound):
@@ -107,4 +128,64 @@ func respondSessionViews(w http.ResponseWriter, token string, change func([]Save
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// writtenViewNotes notes the written view's query over the coalesced tag
+// snapshot (sessionTagSnapshots: the snapshot a recent read took, else a fresh
+// read of the three tag tables) — never a session scan, and no tag read at all
+// for a query with nothing Notes could say. The snapshot holds every tag,
+// including those of folded children and vanished sessions, so a write-time
+// note may differ from the read-time one, which stays authoritative. A
+// snapshot that is unavailable or cut short yields no note, as it yields no
+// count.
+func writtenViewNotes(views []SavedSessionView, written string, limits sessionquery.Limits, now time.Time) map[string][]sessionquery.Note {
+	for _, view := range views {
+		if view.ID != written || view.RecordKind == sessionViewRecordKindMemory {
+			continue
+		}
+		query, err := sessionquery.Parse(view.Query, limits)
+		if err != nil || !query.MayHaveNotes() {
+			return nil
+		}
+		snapshot := sessionTagSnapshots.get(now)
+		if !snapshot.countable() {
+			return nil
+		}
+		if notes := query.Notes(snapshotVocabulary(snapshot)); len(notes) > 0 {
+			return map[string][]sessionquery.Note{written: notes}
+		}
+	}
+	return nil
+}
+
+// writtenPlacementNotes notes the written board view's placement rules over
+// the same snapshot writtenViewNotes reads, under the same gate: no note is
+// better than one taken from tags read in part.
+func writtenPlacementNotes(views []SavedSessionView, written string, limits sessionquery.Limits, now time.Time) []boardRuleNotes {
+	for _, view := range views {
+		if view.ID != written || view.Board == nil || len(view.Board.Placement) == 0 {
+			continue
+		}
+		var vocabulary *sessionquery.Vocabulary
+		var out []boardRuleNotes
+		for index, rule := range view.Board.Placement {
+			query, err := sessionquery.Parse(rule.Query, limits)
+			if err != nil || !query.MayHaveNotes() {
+				continue
+			}
+			if vocabulary == nil {
+				snapshot := sessionTagSnapshots.get(now)
+				if !snapshot.countable() {
+					return nil
+				}
+				read := snapshotVocabulary(snapshot)
+				vocabulary = &read
+			}
+			if notes := query.Notes(*vocabulary); len(notes) > 0 {
+				out = append(out, boardRuleNotes{Rule: index, Column: rule.Column, Notes: notes})
+			}
+		}
+		return out
+	}
+	return nil
 }

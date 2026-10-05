@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:crossing-guard:schema:memory:1.0",
+  "$id": "urn:crossing-guard:schema:memory:1.1",
   "title": "Shared memory dossier (ADR 0013 record on the wire)",
   "type": "object",
   "additionalProperties": false,
@@ -21,7 +21,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "const": "1.1"
     },
     "id": {
       "$ref": "common.schema.json#/$defs/typedId"
@@ -153,6 +153,10 @@
       "$ref": "common.schema.json#/$defs/actor"
     },
     "content_hash": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    },
+    "base_content_hash": {
+      "description": "the wire hash of the revision this one was written against; absent on a first appearance (team item 5, decision 13b)",
       "$ref": "common.schema.json#/$defs/sha256"
     }
   }

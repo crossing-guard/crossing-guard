@@ -73,43 +73,78 @@ func cmdGovernHook(args []string) {
 // staging contract cmdHook uses.
 func governHookPreToolUse(in hookInput) GovernDecision {
 	observeAttempt(in)
-	pol, err := rulebook.Load()
+	// The rules load LAYERED (item 3c): the user layer ++ this checkout's
+	// repository layer ++ the organization layer — the same loader cmdHook's
+	// static tier runs, so both lanes decide through the same tiers. The load
+	// reasons ride the observation (why the team layers did or did not apply).
+	pol, layerReasons, err := rulebook.LoadLayered(in.Cwd, dataDir())
 	if err != nil {
-		observeGovernError(in, "rules unloadable", err)
+		stageLayerReasons(layerReasons)
+		observeGovernError(in, "rules unloadable (user layer)", err)
 		_, deliveries := observeDecision("allow", "governance error (rules unloadable): call allowed and recorded")
 		return GovernDecision{Decision: "allow",
 			Reason:     "crossing-guard governance error (rules): call allowed and recorded",
 			Error:      err.Error(),
 			Deliveries: deliveries}
 	}
-	command := string(in.ToolInput.Command)
-	if d, _, _, _ := engineDecision(in); d != nil && d.Decision != "allow" {
-		switch d.Mode {
-		case engine.HardBlock:
-			return governDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s",
-				d.Rule, d.Message))
-		case engine.ConfirmAndRecord:
-			return governDeny(fmt.Sprintf("Blocked by confirm-class rule %s: %s (this headless lane cannot prompt; re-run in a governed console task to confirm)",
-				d.Rule, d.Message))
-		case engine.WarnAndProceed:
-			// warn = proceed, recorded; the standalone tier below still runs.
-		}
+	// Both static tiers decide over the one action tag set (the same pipeline cmdHook
+	// runs): a hard block from either denies first; a confirm-class rule is a headless
+	// deny, engine tier first; then the stateful consult.
+	engineSet, engineRan := loadEngineTier(in)
+	act := actionOf(in, engineSet.Policy, pol)
+	var eng Static
+	if engineRan {
+		eng, _ = engineDecision(engineSet, act)
 	}
-	if gd := engine.Decide(staticInvocationTags(in.ToolName, command), pol); gd.Decision != "allow" {
-		if gd.Mode == engine.HardBlock {
-			return governDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s",
-				gd.Rule, guardMessage(gd)))
-		}
+	alone := StaticDecide(act.tags, pol, act.unknown)
+	stageLayerReasons(layerReasons)
+	addStagedReasons(undecidedReason("engine tier", eng), undecidedReason("standalone tier", alone))
+	d, gd := eng.Decision, alone.Decision
+	if engineRan && d.Mode == engine.HardBlock {
+		stageRule(d.Rule)
+		stageLayer(string(d.Layer))
+		return governDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s",
+			d.Rule, d.Message))
+	}
+	if gd.Mode == engine.HardBlock {
+		stageRule(gd.Rule)
+		stageLayer(string(gd.Layer))
+		return governDeny(fmt.Sprintf("Blocked by rule %s (Restricted, non-overridable): %s",
+			gd.Rule, guardMessage(gd)))
+	}
+	if engineRan && d.Mode == engine.ConfirmAndRecord {
+		stageRule(d.Rule)
+		stageLayer(string(d.Layer))
+		return governDeny(fmt.Sprintf("Blocked by confirm-class rule %s: %s (this headless lane cannot prompt; re-run in a governed console task to confirm)",
+			d.Rule, d.Message))
+	}
+	if gd.Mode == engine.ConfirmAndRecord {
+		stageRule(gd.Rule)
+		stageLayer(string(gd.Layer))
 		return governDeny(fmt.Sprintf("Blocked by confirm-class rule %s: %s (this headless lane cannot prompt; re-run in a governed console task to confirm)",
 			gd.Rule, guardMessage(gd)))
 	}
-	if sv := consultStateful(in); sv != nil {
+	var warned []string // named in the allow reason; a warn never stages or stops
+	if engineRan && d.Mode == engine.WarnAndProceed {
+		warned, _ = noteWarn(warned, d.Rule)
+	}
+	for _, rule := range engine.FiredWarns(gd, alone.Policy) {
+		warned, _ = noteWarn(warned, rule)
+	}
+	sv, statefulUndecided := consultStateful(in)
+	if sv != nil {
 		if verdict, denied := statefulHeadlessDenial(sv); denied {
+			stageRule(sv.rule)
+			stageLayer(string(engine.Layer(sv.layer)))
 			return governDeny(verdict)
 		}
 	}
-	_, deliveries := observeDecision("allow", "no rule matched")
-	decision := governJSON("allow", "no rule matched")
+	reason := proceedReason(warned)
+	if statefulUndecided > 0 {
+		reason += fmt.Sprintf("; %d stateful deny/ask rule(s) not decided (this call has no single target)", statefulUndecided)
+	}
+	_, deliveries := observeDecision("allow", reason)
+	decision := governJSON("allow", reason)
 	decision.Deliveries = deliveries
 	return decision
 }

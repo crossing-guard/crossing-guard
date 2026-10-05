@@ -25,7 +25,7 @@ async function renderLedger(container) {
       const l = el('div'); l.innerHTML = '<b>anchor:</b> ' + s.anchor
         + '<br><b>honest ceiling:</b> ' + s.honest_ceiling
         + '<br><b>sessions held:</b> ' + s.sessions_held;
-      l.style.fontSize = '12px'; l.style.lineHeight = '1.6'; banner.appendChild(l);
+      l.style.fontSize = 'var(--fs-8)'; l.style.lineHeight = '1.6'; banner.appendChild(l);
     } catch (e) { banner.textContent = '✖ ' + e.message; }
   };
   await loadStatus();
@@ -36,7 +36,7 @@ async function renderLedger(container) {
   const verifyBtn = el('button', 'btn', 'Verify chain');
   row1.append(lblWrap('session', sessIn), verifyBtn);
   main.appendChild(row1);
-  const verifyOut = el('div'); verifyOut.style.cssText = 'margin:2px 0 16px;font-size:12px'; main.appendChild(verifyOut);
+  const verifyOut = el('div'); verifyOut.style.cssText = 'margin:2px 0 16px;font-size:var(--fs-8)'; main.appendChild(verifyOut);
   const doVerify = async () => {
     ledgerSession = sessIn.value.trim() || 'console-demo';
     localStorage.setItem('cp_ledger_session', ledgerSession);
@@ -55,7 +55,7 @@ async function renderLedger(container) {
     'border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:8px';
   card.appendChild(el('div', 'sub', 'Observe an event — the daemon appends it to the '
     + 'chain and decides over the WHOLE session (a compound rule can fire on a tag seen earlier).'));
-  const toolIn = el('input'); toolIn.placeholder = 'tool (e.g. getOrderAddress)'; toolIn.style.width = '190px';
+  const toolIn = el('input'); toolIn.placeholder = 'tool (e.g. getCustomerAddress)'; toolIn.style.width = '190px';
   const destIn = el('input'); destIn.placeholder = 'destination url (optional)'; destIn.style.width = '190px';
   const textIn = el('input'); textIn.placeholder = 'text (optional — e.g. an AKIA… key)'; textIn.style.width = '230px';
   const r2 = el('div', 'row'); r2.append(lblWrap('tool', toolIn), lblWrap('destination', destIn), lblWrap('text', textIn));
@@ -63,10 +63,10 @@ async function renderLedger(container) {
   const r3 = el('div', 'row');
   const obsBtn = el('button', 'btn primary', 'Observe →');
   const presets = el('span'); presets.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
-  [['PII read', { tool: 'getOrderAddress' }], ['vendor cost', { tool: 'getVendorProduct' }],
+  [['PII read', { tool: 'getCustomerAddress' }], ['supplier price', { tool: 'getSupplierPrice' }],
    ['external egress', { destination: 'https://random-saas.com/upload' }],
    ['AWS key', { text: 'AKIAIOSFODNN7EXAMPLE' }]].forEach(([lbl, ev]) => {
-    const b = el('button', 'btn', lbl); b.style.fontSize = '11px';
+    const b = el('button', 'btn', lbl); b.style.fontSize = 'var(--fs-6)';
     b.onclick = () => { toolIn.value = ev.tool || ''; destIn.value = ev.destination || ''; textIn.value = ev.text || ''; };
     presets.appendChild(b);
   });
@@ -98,14 +98,14 @@ function renderObservation(container, obs) {
   container.appendChild(wm);
 
   // this event's tags
-  const tagLine = el('div'); tagLine.style.cssText = 'margin:6px 0;font-size:12px';
+  const tagLine = el('div'); tagLine.style.cssText = 'margin:6px 0;font-size:var(--fs-8)';
   tagLine.appendChild(el('span', '', 'event tags: '));
   if (!obs.tags || !obs.tags.length) tagLine.appendChild(el('span', 'chip st-draft', 'none'));
   else obs.tags.forEach(t => { const c = el('span', 'chip cl-observed', t.key + '=' + t.value); c.title = t.detector + ' · ' + (t.evidence || ''); c.style.marginRight = '4px'; tagLine.appendChild(c); });
   container.appendChild(tagLine);
 
   // session-accumulated tags (why a compound can fire)
-  const st = el('div'); st.style.cssText = 'margin:6px 0 12px;font-size:12px';
+  const st = el('div'); st.style.cssText = 'margin:6px 0 12px;font-size:var(--fs-8)';
   st.appendChild(el('span', '', 'session tags (accumulated): '));
   (obs.session_tags || []).forEach(t => { const c = el('span', 'chip', t.key + '=' + t.value); c.style.cssText = 'background:var(--panel2);color:var(--dim);margin-right:4px'; st.appendChild(c); });
   container.appendChild(st);
@@ -121,13 +121,13 @@ function renderObservation(container, obs) {
   if (d.mode) head.textContent += '  ·  ' + d.mode;
   box.appendChild(head);
   if (d.rule) box.appendChild(el('div', 'sub', d.rule + ' — ' + (d.message || '')));
-  if (d.reach_note) { const rn = el('div'); rn.style.cssText = 'font-size:11px;color:var(--dim);margin-bottom:6px'; rn.textContent = d.reach_note; box.appendChild(rn); }
+  if (d.reach_note) { const rn = el('div'); rn.style.cssText = 'font-size:var(--fs-6);color:var(--dim);margin-bottom:6px'; rn.textContent = d.reach_note; box.appendChild(rn); }
   // resolution menu — greyed items rendered dim (capability honesty)
   if (d.menu && d.menu.length) {
     const m = el('div'); m.style.cssText = 'margin-top:6px';
     m.appendChild(el('div', 'sub', 'resolution menu (greyed = not live on this channel):'));
     d.menu.forEach(item => {
-      const line = el('div'); line.style.cssText = 'font-size:12px;padding:2px 0;' + (item.live ? '' : 'opacity:0.5');
+      const line = el('div'); line.style.cssText = 'font-size:var(--fs-8);padding:2px 0;' + (item.live ? '' : 'opacity:0.5');
       line.textContent = (item.live ? '• ' : '× ') + item.action + ' — ' + item.why;
       m.appendChild(line);
     });

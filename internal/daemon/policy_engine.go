@@ -14,6 +14,7 @@ package daemon
 
 import (
 	"bufio"
+	"crossing-guard/engine"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,6 +162,17 @@ func handlePolicySelectionRollback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"active": active, "archive": archive})
 }
 
+// governorDetectors is the detector set a daemon-side dry run classifies with: the
+// governor's own, never the hook's install profile (which a scratch daemon must not
+// read or create). nil when no governor is configured: the dry run then decides over
+// the invocation's own facts and counts the rest as undecided.
+func governorDetectors() []engine.Detector {
+	if governor == nil {
+		return nil
+	}
+	return governor.dets
+}
+
 func handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Command string `json:"command"`
@@ -169,17 +181,28 @@ func handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "command required", http.StatusBadRequest)
 		return
 	}
-	v, err := guardcli.CheckCommand(req.Command)
+	v, unjudged, err := guardcli.CheckCommandStatic(req.Command, governorDetectors())
 	if err != nil {
 		http.Error(w, "engine error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	res := map[string]any{"decision": v.Decision,
 		// provenance: WHICH evaluator answered — the imported hook code (ADR 0025:
-		// one evaluator, engine.Decide, compiled into both the hook and the daemon).
-		"evaluator": "in-process guardcli (same engine.Decide the hook runs)"}
+		// one evaluator, compiled into both the hook and the daemon).
+		"evaluator": "in-process guardcli (the same engine evaluator the hook runs)"}
 	if v.Rule != "" {
 		res["rule"] = v.Rule
+	}
+	// A dry run has no session state, so it cannot judge a rule over session:/target:/
+	// agent: facts — the daemon's stateful tier decides those at run time. Say how many
+	// deny/ask ones there are, rather than let an ALLOW read as the whole answer.
+	if unjudged.StateRules > 0 {
+		res["state_rules_not_evaluated"] = unjudged.StateRules
+	}
+	// A command preview names no tool, path or destination: a deny/ask rule that reads
+	// one could not be decided here. It did not fire, and the live call may differ.
+	if unjudged.Undecided > 0 {
+		res["rules_undecided"] = unjudged.Undecided
 	}
 	// raw keeps the CLI line shape the UI already renders
 	switch v.Decision {

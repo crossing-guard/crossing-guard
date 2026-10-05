@@ -1,8 +1,8 @@
 package daemon
 
-// initLedger's two arms are the honesty contract for the coverage report: an
+// initLedger's two arms are the honesty contract for the dev ledger: an
 // ABSENT policy-engine.json falls back to the ACTIVE enforcement rules (so the
-// report describes what is actually enforced), and a PRESENT-but-broken file
+// ledger decides over what is actually enforced), and a PRESENT-but-broken file
 // fails loudly (a bad edit must never silently downgrade to different rules).
 // Both were comment-only claims until now; the absent arm additionally hangs on
 // error unwrapping (errors.Is, not os.IsNotExist), which is exactly the kind of
@@ -32,7 +32,7 @@ func TestInitLedgerFallsBackToActiveRulesWhenConfigAbsent(t *testing.T) {
 		t.Fatalf("an absent engine-ledger config must fall back to the active rules, got: %v", err)
 	}
 	if enginePolicy == nil || len(enginePolicy.Rules) == 0 {
-		t.Fatal("fallback produced no rules — the coverage report would describe nothing")
+		t.Fatal("fallback produced no rules — the dev ledger would decide over nothing")
 	}
 	found := false
 	for _, r := range enginePolicy.Rules {

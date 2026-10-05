@@ -27,7 +27,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const GLOBALS = new Set([
   'String', 'Number', 'Boolean', 'Array', 'Object', 'Date', 'Math', 'JSON', 'Map', 'Set', 'WeakMap', 'WeakSet',
   'Promise', 'Error', 'TypeError', 'RangeError', 'RegExp', 'Symbol', 'BigInt', 'Proxy', 'Reflect', 'Intl',
-  'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder', 'Uint8Array', 'Int8Array', 'Int16Array',
+  'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder', 'Uint8Array', 'Uint32Array', 'Int8Array', 'Int16Array',
   'Float32Array', 'Float64Array', 'ArrayBuffer', 'DataView', 'Blob', 'File', 'FormData', 'Headers', 'Request',
   'Response', 'AbortController', 'CustomEvent', 'Event', 'KeyboardEvent', 'MouseEvent', 'PointerEvent',
   'IntersectionObserver', 'ResizeObserver', 'MutationObserver', 'EventSource', 'WebSocket', 'Worker',

@@ -17,13 +17,17 @@ package daemon
 // guess, and a guess here rebuilds a binary nobody runs").
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -173,6 +177,60 @@ func ProbeConsole(l Location) string {
 	return ""
 }
 
+// DaemonPresence is the typed answer to "could a daemon be using this data
+// directory's store". Whole-file store maintenance proceeds only on DaemonAbsent.
+type DaemonPresence int
+
+const (
+	// DaemonAbsent: the directory publishes no address, or the address it
+	// publishes refuses the connection.
+	DaemonAbsent DaemonPresence = iota
+	// DaemonAnswering: something answers HTTP on the published address.
+	DaemonAnswering
+	// DaemonUnknown: the probe could not tell — a timeout, or any other error. A
+	// wedged daemon is still a daemon.
+	DaemonUnknown
+)
+
+// ProbeDataDir asks whether a daemon may be serving the given data directory. It
+// reads the address that directory itself published and connects to it; unlike
+// LocateConsole it takes the directory, and unlike ProbeConsole it answers a
+// value a caller can branch on. Any HTTP response counts as answering, a rejected
+// token included: the listener is then some daemon on the address this directory
+// named, which is not grounds to touch the store. The string says why.
+func ProbeDataDir(dataDir string) (DaemonPresence, string) {
+	raw, err := os.ReadFile(filepath.Join(dataDir, "daemon-addr"))
+	if errors.Is(err, os.ErrNotExist) {
+		return DaemonAbsent, "no daemon-addr in " + dataDir
+	}
+	if err != nil {
+		return DaemonUnknown, "cannot read daemon-addr: " + err.Error()
+	}
+	addr := strings.TrimSpace(string(raw))
+	if addr == "" {
+		return DaemonAbsent, "daemon-addr in " + dataDir + " is empty"
+	}
+	req, err := http.NewRequest("GET", "http://"+addr+"/api/govern/health", nil)
+	if err != nil {
+		return DaemonUnknown, "cannot form a request for " + addr + ": " + err.Error()
+	}
+	if token, tokenErr := readToken(dataDir); tokenErr == nil {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	// No proxy: the question is whether THIS address answers, and a refused proxy
+	// dial must not read as "nothing is listening".
+	client := &http.Client{Timeout: probeTimeout, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return DaemonAbsent, "nothing is listening on " + addr
+		}
+		return DaemonUnknown, "the address " + addr + " did not give a clear answer: " + err.Error()
+	}
+	_ = resp.Body.Close()
+	return DaemonAnswering, "a daemon answers on " + addr + " (" + resp.Status + ")"
+}
+
 var (
 	plistString  = regexp.MustCompile(`<string>([^<]*)</string>`)
 	plistComment = regexp.MustCompile(`(?s)<!--.*?-->`)
@@ -244,18 +302,61 @@ func xmlUnescape(s string) string { return xmlUnescaper.Replace(s) }
 // header, timeout, status check) had been hand-built three times, twice in the
 // same package, and a drift in any copy fails silently as a wrong diagnosis.
 func (l Location) GetJSON(path string, v any) error {
-	req, err := http.NewRequest("GET", "http://"+l.Addr+path, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
+	defer cancel()
+	return l.GetJSONContext(ctx, path, v)
+}
+
+// GetJSONContext is GetJSON under the caller's deadline, for a caller whose
+// route may legitimately run longer than clientTimeout (the recall server's
+// peer route). A non-200 answer carries the daemon's own reason, bounded.
+// The token is sent as a header and never appears in an error.
+func (l Location) GetJSONContext(ctx context.Context, path string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+l.Addr+path, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+l.Token)
-	resp, err := (&http.Client{Timeout: clientTimeout}).Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		text, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if reason := strings.TrimSpace(string(text)); reason != "" {
+			return errors.New(path + ": " + resp.Status + ": " + reason)
+		}
 		return errors.New(path + ": " + resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// PostJSON performs an authenticated POST with a JSON body against this located daemon
+// and decodes the answer. A non-2xx answer returns the body's text as the error, so a
+// verb can show the daemon's own reason.
+func (l Location) PostJSON(path string, body, v any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", "http://"+l.Addr+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+l.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: clientTimeout}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return errors.New(path + ": " + resp.Status + ": " + strings.TrimSpace(string(text)))
+	}
+	if v == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(v)
 }

@@ -21,10 +21,16 @@ type ageBound struct {
 	Seconds int64
 }
 
+// numberBound is "<20" or ">5": fewer or more than a count.
+type numberBound struct {
+	More  bool
+	Count int
+}
+
 var ageUnits = map[byte]int64{'h': 3600, 'd': 86400, 'w': 7 * 86400}
 
 // Parse reads a query. Terms are field:value, -field:value excludes, a value
-// with spaces is quoted (title:"due diligence"), and anything else is a search
+// with spaces is quoted (title:"sprint retro"), and anything else is a search
 // word. A tag's key and value may be joined by = or by : — the second is how a
 // tag reads on screen, so typing what is on screen works.
 func Parse(text string, limits Limits) (Query, error) {
@@ -145,6 +151,12 @@ func parseTerm(tok token) (term, error) {
 			return term{}, err
 		}
 		parsed.Age = bound
+	case fieldCalls, fieldLines:
+		bound, err := parseNumber(tok)
+		if err != nil {
+			return term{}, err
+		}
+		parsed.Number = bound
 	case fieldOpen:
 		if parsed.Value != "yes" && parsed.Value != "no" {
 			return term{}, queryError("%q — write open:yes or open:no", tok.raw)
@@ -175,6 +187,26 @@ func parseAge(tok token) (ageBound, error) {
 		return ageBound{}, problem
 	}
 	return ageBound{Older: value[0] == '>', Seconds: count * unit}, nil
+}
+
+// parseNumber reads a count bound: < or > and digits, nothing else. "<0" is
+// refused because no count is below zero, so the term could never hold.
+func parseNumber(tok token) (numberBound, error) {
+	value := tok.value
+	problem := queryError("%q — write a count like %s:>5 or %s:<20", tok.raw, tok.name, tok.name)
+	if len(value) < 2 || (value[0] != '<' && value[0] != '>') {
+		return numberBound{}, problem
+	}
+	for _, digit := range value[1:] {
+		if digit < '0' || digit > '9' {
+			return numberBound{}, problem
+		}
+	}
+	count, err := strconv.Atoi(value[1:])
+	if err != nil || (value[0] == '<' && count == 0) {
+		return numberBound{}, problem
+	}
+	return numberBound{More: value[0] == '>', Count: count}, nil
 }
 
 // GroupBy is how a result is split into groups.

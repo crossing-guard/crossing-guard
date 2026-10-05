@@ -13,6 +13,7 @@ package memcli
 //     carries one, falling back to the rollout filename stem
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -125,7 +126,13 @@ type Adapter interface {
 	Name() string
 	ConfigFlag() string // the `attach <vendor>` config flag: "settings" | "config"
 	DefaultConfigPath() string
-	Attach(configPath, selfPath string) error
+	// Attach installs the SessionStart memory hook. wrote is false when an entry
+	// for selfPath was already there: nothing was written and the entry is not
+	// this call's.
+	Attach(configPath, selfPath string) (wrote bool, err error)
+	// Detach removes exactly the entry an Attach for selfPath wrote and nothing
+	// else. removed is false when no such entry is there.
+	Detach(configPath, selfPath string) (removed bool, err error)
 	InjectedText(line []byte) (string, bool)
 
 	// MemoryHookBinary returns the binary path of the installed SessionStart memory
@@ -136,6 +143,39 @@ type Adapter interface {
 	// (not a bool) is what separates "not attached" from "attached to a binary that
 	// no longer exists", which is the silent-stop failure on this surface too.
 	MemoryHookBinary(configPath string) string
+}
+
+// MemoryIndexOutput is an optional memory adapter capability. Native envelopes
+// and recognition of old, unattributed hook payloads belong to the adapter.
+type MemoryIndexOutput interface {
+	EncodeMemoryIndex(block string) ([]byte, error)
+	MatchesLegacyMemoryHook(payload []byte) bool
+}
+
+func memoryIndexOutput(runtime string, explicit bool, payload []byte) (MemoryIndexOutput, error) {
+	if explicit {
+		a := adapters[runtime]
+		if runtime == "" || a == nil {
+			return nil, fmt.Errorf("memory index: unknown runtime %q", runtime)
+		}
+		encoder, ok := a.(MemoryIndexOutput)
+		if !ok {
+			return nil, fmt.Errorf("memory index: runtime %q has no memory output capability", runtime)
+		}
+		return encoder, nil
+	}
+	var selected MemoryIndexOutput
+	for _, a := range adapters {
+		encoder, ok := a.(MemoryIndexOutput)
+		if !ok || !encoder.MatchesLegacyMemoryHook(payload) {
+			continue
+		}
+		if selected != nil {
+			return nil, fmt.Errorf("memory index: ambiguous legacy hook; specify --runtime")
+		}
+		selected = encoder
+	}
+	return selected, nil
 }
 
 // memoryHookBinaryFromCommand extracts the binary out of a `<path> memory index`

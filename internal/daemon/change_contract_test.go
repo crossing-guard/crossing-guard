@@ -283,7 +283,7 @@ func TestChangeMapStaticContractKeepsFactsAndEscaping(t *testing.T) {
 			t.Fatalf("sessions view retained duplicate Session Context ownership %q", forbidden)
 		}
 	}
-	for _, required := range [][]byte{[]byte("Session context"), []byte("working directory"), []byte("recorded file paths"), []byte("created path mentions"), []byte("memory reads / writes"), []byte("appendSessionOverview(box, selection)")} {
+	for _, required := range [][]byte{[]byte("Session context"), []byte("working directory"), []byte("recorded file paths"), []byte("created path mentions"), []byte("appendSessionOverview(box, selection)")} {
 		if !bytes.Contains(b, required) {
 			t.Fatalf("change map lost compact session overview %q", required)
 		}

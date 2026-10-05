@@ -75,9 +75,12 @@ type RuntimeConnectionPreview struct {
 	ConsentPresent           bool     `json:"consent_present"`
 	ConsentOrigin            string   `json:"consent_origin,omitempty"`
 	Summary                  []string `json:"summary"`
-	StateDigest              string   `json:"-"`
-	snapshot                 vendorconfig.Snapshot
-	descriptor               RuntimeConnectionDescriptor
+	// RecallConfig names the MCP file a disconnect also edits, when the
+	// recall tools are registered there.
+	RecallConfig string `json:"recall_config,omitempty"`
+	StateDigest  string `json:"-"`
+	snapshot     vendorconfig.Snapshot
+	descriptor   RuntimeConnectionDescriptor
 }
 
 type RuntimeConnectionMutation struct {
@@ -216,6 +219,24 @@ func PreviewRuntimeConnection(runtimeName, operation, executable string) (Runtim
 		preview.ConsentOrigin = "inferred-existing-hook"
 	} else if present {
 		preview.ConsentOrigin = "explicit"
+	}
+	if operation == ConnectionOperationDisconnect {
+		// Named, never hashed: the runtime rewrites its MCP file constantly, so
+		// its bytes in the digest would fail every confirmation. The preview
+		// promises only what the disconnect will do.
+		if file := RecallConfigFor(runtimeName, descriptor.ConfigPath); file != "" {
+			state, err := RecallStatusFor(runtimeName, descriptor.ConfigPath, executable)
+			switch {
+			case err != nil:
+				preview.Limitations = append(preview.Limitations,
+					"the recall tools entry in "+file+" could not be read ("+err.Error()+"); disconnecting will not remove it")
+			case state == RecallCurrent || state == RecallStale:
+				preview.RecallConfig = file
+				preview.Summary = append(preview.Summary, "removes the Crossing Guard recall tools from "+file)
+			case state == RecallForeign:
+				preview.Summary = append(preview.Summary, "leaves the recall tools entry in "+file+" in place: another program owns it")
+			}
+		}
 	}
 	preview.StateDigest = runtimeConnectionDigest(preview, consent)
 	return preview, nil

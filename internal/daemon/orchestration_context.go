@@ -60,6 +60,10 @@ func (reader *managedContextReader) ReadContext(ctx context.Context, request orc
 				empty = len(window.Events) == 0 && window.Omitted == 0
 			} else {
 				body, truncated = boundedContextText(body, selection.MaxBytes)
+				if truncated && selection.Kind == "session.tags" {
+					// A cut tag line reads as a real, shorter tag: keep whole lines.
+					body = body[:strings.LastIndex(body, "\n")+1]
+				}
 			}
 			if !empty {
 				coverage.State = "supplied"
@@ -100,6 +104,50 @@ func boundedContextText(body string, maxBytes int) (string, bool) {
 		}
 	}
 	return string(runes[:low]), body != ""
+}
+
+// managedContextKinds is the context a managed agent's profile may select:
+// exactly the kinds readSelection below supplies (operator.group_notes is
+// always read and never selected). The Agents editor offers only these, so an
+// agent never asks for context this reader cannot give it
+// (agents-settings-redesign plan RT-6). Keep it next to the switch.
+func managedContextKinds() []string {
+	kinds := make([]string, 0, len(managedContextOptions()))
+	for _, option := range managedContextOptions() {
+		kinds = append(kinds, option.Kind)
+	}
+	return kinds
+}
+
+// contextKindOption is one selectable context kind with its plain name.
+type contextKindOption struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+}
+
+func managedContextOptions() []contextKindOption {
+	return []contextKindOption{
+		{Kind: "session.messages", Label: "The session's recent messages"},
+		{Kind: "task.final-response", Label: "The last reply before hand-back"},
+		{Kind: "task.messages", Label: "The console task's messages"},
+		{Kind: "prior-claims", Label: "Its own earlier replies in this session"},
+		{Kind: "session.tags", Label: "The session's tags"},
+	}
+}
+
+// managedAlwaysContext names what every managed run reads without selecting
+// it (the first selection in the reader above), so a run's coverage never
+// shows a bare kind id.
+func managedAlwaysContext() []contextKindOption {
+	return []contextKindOption{{Kind: "operator.group_notes", Label: "Your notes for this conversation"}}
+}
+
+// reviewContextOptions names what the review lane reads (fixed per shape).
+func reviewContextOptions() []contextKindOption {
+	return []contextKindOption{
+		{Kind: "pretool-action", Label: "The exact tool action"},
+		{Kind: "permission-scope", Label: "The approval being asked"},
+	}
 }
 
 func (reader *managedContextReader) readSelection(request orchestration.ContextRequest, selection orchestration.ContextSelection) (label, body, detail string, transcriptSeq int64, err error) {
@@ -157,6 +205,7 @@ func (reader *managedContextReader) readSelection(request orchestration.ContextR
 		label = "session.tags"
 		tags, readErr := reader.ix.ActiveOrchestrationTags(request.SessionID, time.Now().Unix())
 		err = readErr
+		detail += fmt.Sprintf("; %d distinct tags, newest first; oldest cut first under the byte limit", len(tags))
 		for _, tag := range tags {
 			body += "- " + tag.Tag + " (" + tag.AgentKey + ")\n"
 		}

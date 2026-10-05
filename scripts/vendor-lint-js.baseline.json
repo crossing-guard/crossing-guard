@@ -1,0 +1,58 @@
+{
+  "internal/daemon/static/css/app.css": {
+    "tokens": 6,
+    "branches": 0
+  },
+  "internal/daemon/static/css/tokens.css": {
+    "tokens": 12,
+    "branches": 0
+  },
+  "internal/daemon/static/js/orchestration/agent-turn-decorators.test.mjs": {
+    "tokens": 4,
+    "branches": 0
+  },
+  "internal/daemon/static/js/orchestration/agents-api.test.mjs": {
+    "tokens": 7,
+    "branches": 0
+  },
+  "internal/daemon/static/js/orchestration/session-agents-panel.test.mjs": {
+    "tokens": 4,
+    "branches": 0
+  },
+  "internal/daemon/static/js/pane-host.test.mjs": {
+    "tokens": 1,
+    "branches": 0
+  },
+  "internal/daemon/static/js/session-organization/organization.test.mjs": {
+    "tokens": 2,
+    "branches": 0
+  },
+  "internal/daemon/static/js/session/event-stream-client.test.mjs": {
+    "tokens": 3,
+    "branches": 0
+  },
+  "internal/daemon/static/js/session/session-activity-store.test.mjs": {
+    "tokens": 5,
+    "branches": 0
+  },
+  "internal/daemon/static/js/session/session-live-client.test.mjs": {
+    "tokens": 3,
+    "branches": 0
+  },
+  "internal/daemon/static/js/speech/speech-api.test.mjs": {
+    "tokens": 2,
+    "branches": 0
+  },
+  "internal/daemon/static/js/task/session-status.test.mjs": {
+    "tokens": 21,
+    "branches": 1
+  },
+  "internal/daemon/static/js/task/task-projection-store.test.mjs": {
+    "tokens": 7,
+    "branches": 0
+  },
+  "internal/daemon/static/js/views/sessions.js": {
+    "tokens": 3,
+    "branches": 0
+  }
+}

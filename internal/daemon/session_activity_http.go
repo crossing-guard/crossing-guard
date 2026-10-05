@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// handleSessionActivityList is the console's opening activity snapshot. Its only
+// 503 is the nil-service branch, which lasts for the life of the process: the
+// event stream client opens the stream without the snapshot on that 503
+// (degraded-surfaces-state-the-reason plan §2.2). Never add a transient 503 here.
 func handleSessionActivityList(w http.ResponseWriter, _ *http.Request) {
 	if sessionActivityService() == nil {
 		http.Error(w, "native session activity unavailable", http.StatusServiceUnavailable)

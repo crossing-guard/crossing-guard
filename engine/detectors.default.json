@@ -770,6 +770,30 @@
       "evidence": "raw"
     },
     {
+      "_comment": "The data-class producer for credential evidence: the ladder's top rung, the water mark, and any rule on data-class=credential-material. Its regex is the secret.* regexes as alternatives, verbatim (a (?i) flag becomes a (?i:...) group); engine/library_test.go fails if a secret detector changes without this one. It is not a redactor: redaction keys on the secret detectors.",
+      "id": "data.credential",
+      "kind": "pattern",
+      "regex": "(?:AKIA[0-9A-Z]{16})|(?:-----BEGIN [A-Z ]*PRIVATE KEY-----)|(?:\\bgh[pousr]_[A-Za-z0-9]{36}\\b)|(?i:authorization:\\s*bearer\\s+[A-Za-z0-9._-]{10,})",
+      "tag": {
+        "key": "data-class",
+        "value": "credential-material"
+      },
+      "coverage": {
+        "enumerable": false,
+        "gaps": [
+          "novel key formats",
+          "obfuscation",
+          "only the PEM armor header; DER/base64-blob keys with no header",
+          "current GitHub token prefixes/length only; format changes",
+          "split across events",
+          "only the literal 'Authorization: Bearer' header shape",
+          "published example keys and test fixtures match",
+          "disabling a secret.* detector does not disable this one"
+        ]
+      },
+      "scope": "resource"
+    },
+    {
       "id": "secret.aws-key",
       "kind": "pattern",
       "regex": "AKIA[0-9A-Z]{16}",
@@ -841,7 +865,7 @@
       "regex": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
       "tag": {
         "key": "data-class",
-        "value": "personal"
+        "value": "personal-data"
       },
       "coverage": {
         "enumerable": false,

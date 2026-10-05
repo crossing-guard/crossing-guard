@@ -42,3 +42,14 @@ test('pane context identity keeps tab-specific surfaces and distinct catalog ses
     paneContextKey({ surface: 'session', selection: { ...common, id: 'catalog-b', meta_id: 'rollout-b' } }),
   );
 });
+
+test('reveal refuses, rather than doing nothing, when there is no workspace', async () => {
+  const { revealModule, revealPane, canRevealPane, isModuleEnabled, takeModuleIntent, hidePaneHost } = await import('./pane-host.js');
+  assert.equal(isModuleEnabled('session.agents'), false, 'no host: a link that reveals the module must not render');
+  assert.equal(canRevealPane('session.change'), false);
+  assert.equal(revealPane('session.change'), false, 'revealPane never un-hides a workspace it cannot fill');
+  await assert.rejects(revealModule('session.agents', { intent: 'expand-first' }), /no workspace/);
+  assert.equal(takeModuleIntent('session.agents'), null, 'a refused reveal leaves no intent behind');
+  hidePaneHost();
+  assert.equal(takeModuleIntent('session.agents'), null, 'a host change clears pending intents');
+});

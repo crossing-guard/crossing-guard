@@ -385,11 +385,9 @@ func mergeProjectionUsage(total, next *SessionUsage) *SessionUsage {
 	if total == nil {
 		total = &SessionUsage{}
 	}
-	total.InputTokens += next.InputTokens
-	total.OutputTokens += next.OutputTokens
-	total.CacheRead += next.CacheRead
-	total.CacheCreate += next.CacheCreate
-	total.Turns += next.Turns
+	addUsageCounts(total, next)
+	mixed := false
+	addSessionCost(total, next.Cost, &mixed)
 	if next.Context > 0 {
 		total.Context = next.Context
 	}

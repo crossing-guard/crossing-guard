@@ -1,0 +1,11 @@
+{
+  "format_version": 2,
+  "id": "work-log",
+  "name": "Work log",
+  "description": "What the agent did. Its prose folds to one line, long inputs fold, and thinking is counted, not shown.",
+  "rules": [
+    {"match": {"kind": "assistant"}, "display": "collapse"},
+    {"match": {"kind": "thinking"}, "display": "hide"},
+    {"match": {"kind": "user", "min_chars": 400}, "display": "collapse"}
+  ]
+}

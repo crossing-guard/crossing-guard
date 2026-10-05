@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"crossing-guard/store"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -63,7 +65,8 @@ func TestNoShippedCodeAuthorsAViewATagOrANote(t *testing.T) {
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.CompositeLit:
-				if name := typeName(n.Type); name == "SavedSessionView" || name == "SessionOwnerTagValue" {
+				if name := typeName(n.Type); name == "SavedSessionView" || name == "SessionOwnerTagValue" ||
+					name == "SavedViewBoard" || name == "SavedViewPlacement" {
 					if literal := firstCompiledText(n, constants); literal != "" {
 						t.Errorf("%s: a %s is built from compiled-in text %s — views and tags are the owner's, never code", path, name, literal)
 					}
@@ -219,6 +222,81 @@ func TestOwnerTagsNeverReachGovernanceOrAgents(t *testing.T) {
 	}
 }
 
+// The flow files (orchestration-flows pilot) CONSUME owner-tag facts
+// daemon-side — the journal and the active-tag read are how flow membership
+// works, and the plan's invariant 3 permits exactly that. What they must
+// never do is feed tag VALUES into anything an agent sees: the agent
+// context kinds, the prompt builder, or the rail decorators. So their guard
+// is the agent-facing surface, not the store types they legitimately read.
+// The behavioral half lives in TestFlowTagSignalPayloadCarriesNoTagValue.
+func TestFlowFilesNeverTouchAgentVisibleTagSurfaces(t *testing.T) {
+	root := organizationRepositoryRoot(t)
+	forbidden := []string{"sessionTagSnapshot", "sessionTagsRead", "decorateSessions", "ownerRememberedSession",
+		"session.tags", "ContextRequest", "agent_prompt"}
+	guarded := []string{"internal/daemon/orchestration_flow_config.go", "internal/daemon/orchestration_flow_membership.go",
+		"internal/daemon/orchestration_flow_stage.go", "internal/daemon/orchestration_flow_grant.go",
+		"internal/daemon/orchestration_flow_transition.go", "internal/daemon/session_tag_signals.go"}
+	for _, relative := range guarded {
+		source, err := os.ReadFile(filepath.Join(root, relative))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // a flow file this branch does not carry yet
+		}
+		if err != nil {
+			t.Fatalf("%s: %v (a guarded flow file moved; move the guard with it)", relative, err)
+		}
+		for _, name := range forbidden {
+			if strings.Contains(string(source), name) {
+				t.Errorf("%s mentions %s: flow machinery consumes tag facts but must never touch an agent-visible tag surface", relative, name)
+			}
+		}
+	}
+}
+
+// openFlowBoundaryIndex opens a throwaway store for the flow boundary's
+// behavioral half.
+func openFlowBoundaryIndex(t *testing.T) *store.Index {
+	t.Helper()
+	ix, err := store.Open(filepath.Join(t.TempDir(), "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ix.Close() })
+	return ix
+}
+
+// The behavioral half of the flow boundary: a journal row's tag value never
+// leaves the daemon. The translator routes only the change class and the
+// session identity; the routed payload is what bindings and flow membership
+// see, so asserting on it proves the value boundary end to end at the
+// mechanism's seam.
+func TestFlowTagSignalPayloadCarriesNoTagValue(t *testing.T) {
+	ix := openFlowBoundaryIndex(t)
+	target := store.SessionOwnerTarget{Runtime: "claude", SessionID: "s1", Title: "T", Repository: "r", Cwd: "/w", TouchedAt: 1}
+	tag := store.SessionOwnerTagValue{Key: "flow", Value: "supercalifragilistic"}
+	if err := ix.ApplySessionOwnerTags([]store.SessionOwnerTarget{target}, []store.SessionOwnerTagValue{tag}, 1); err != nil {
+		t.Fatal(err)
+	}
+	var routed []naturalSessionSignal
+	err := emitTagChangeSignals(ix, func(signal naturalSessionSignal) error {
+		routed = append(routed, signal)
+		return nil
+	})
+	if err != nil || len(routed) != 1 {
+		t.Fatalf("routed = %+v (%v)", routed, err)
+	}
+	signal := routed[0]
+	if signal.Signal != "session.tag-applied" {
+		t.Fatalf("signal = %s", signal.Signal)
+	}
+	encoded, _ := json.Marshal(signal.Payload)
+	if strings.Contains(string(encoded), tag.Value) || strings.Contains(string(encoded), tag.Key) {
+		t.Fatalf("tag value or key reached the routed payload: %s", encoded)
+	}
+	if signal.At == 0 || signal.EventRowID == 0 {
+		t.Fatalf("identity anchors missing: %+v", signal)
+	}
+}
+
 // The evaluator decides from the action's own tags, the session's folded
 // detector state and the agent-claimed tags. An owner tag — even one spelled
 // exactly like a rule input — must be in neither of the two stores it reads,
@@ -227,11 +305,11 @@ func TestOwnerTagNeverEntersTheStoresTheEvaluatorReads(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
 	f.tag("risk:rm-rf", f.rows[0])
 	f.tag("secret", f.rows[0])
-	state, err := f.ix.SessionState("walmart")
+	state, err := f.ix.SessionState("checkout")
 	if err != nil || len(state) != 0 {
 		t.Fatalf("an owner tag entered the evaluator's folded session state: %+v %v", state, err)
 	}
-	agentTags, err := f.ix.ActiveOrchestrationTags("walmart", 1)
+	agentTags, err := f.ix.ActiveOrchestrationTags("checkout", 1)
 	if err != nil || len(agentTags) != 0 {
 		t.Fatalf("an owner tag appeared among agent tags, which the agent-tag fact and the session.tags context read: %+v %v", agentTags, err)
 	}

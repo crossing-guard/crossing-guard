@@ -29,6 +29,7 @@ type ApprovalResponse struct {
 	Responder ApprovalResponder `json:"responder"`
 	Decision  string            `json:"decision"`
 	Reason    string            `json:"reason,omitempty"`
+	GrantID   string            `json:"grant_id,omitempty"`
 	// Selections is what the responder chose, when the held call was asking
 	// questions. It is recorded separately from Reason: the answer is the act,
 	// the reason is the claim about it.
@@ -50,6 +51,12 @@ func operativeApprovalResponse(approval *Approval) *ApprovalResponse {
 }
 
 var interactiveConsoleResponder = ApprovalResponder{Kind: "interactive", ID: "local-console"}
+
+const serviceApprovalResponderKind = "service"
+
+func automaticApprovalResponder(id string) ApprovalResponder {
+	return ApprovalResponder{Kind: serviceApprovalResponderKind, ID: id}
+}
 
 var responderIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
 
@@ -73,6 +80,7 @@ type approvalResponseCommand struct {
 	decision   string
 	reason     string
 	selections []approvalchoice.ChoiceSelection
+	grantID    string
 	submitted  time.Time
 	capability approvalResponderCapability
 }
@@ -154,6 +162,9 @@ func (capability approvalResponderCapability) permits(decision string) bool {
 func cloneApproval(approval *Approval) Approval {
 	clone := *approval
 	clone.FiredTags = append([]string(nil), approval.FiredTags...)
+	clone.Targets = append([]string(nil), approval.Targets...)
+	clone.RawTargets = append([]string(nil), approval.RawTargets...)
+	clone.GrantOptions = append([]ApprovalGrantOption(nil), approval.GrantOptions...)
 	clone.Responses = append([]ApprovalResponse(nil), approval.Responses...)
 	return clone
 }
@@ -300,8 +311,27 @@ func validateApprovalAnswer(approval *Approval, command approvalResponseCommand)
 	if command.decision == "deny" && len(command.selections) != 0 {
 		return approvalResponseInvalid, "a denial cannot carry an answer"
 	}
+	if command.decision == "deny" && command.grantID != "" {
+		return approvalResponseInvalid, "a denial cannot select a grant"
+	}
 	if command.decision != "allow" {
 		return "", ""
+	}
+	if command.grantID == "" {
+		command.grantID = approvalGrantRequest
+	}
+	selected := false
+	for _, option := range approvalGrantOptions(approval) {
+		if option.ID == command.grantID {
+			selected = true
+			break
+		}
+	}
+	if !selected {
+		return approvalResponseInvalid, "unsupported approval grant"
+	}
+	if command.grantID != approvalGrantRequest && command.responder != interactiveConsoleResponder {
+		return approvalResponseUnauthorized, "only the local interactive responder can widen approval scope"
 	}
 	limits := activeApprovalsConfig().choiceLimits()
 	if err := approvalchoice.ValidateSelections(approval.Prompts, command.selections, limits); err != nil {
@@ -356,6 +386,7 @@ func appendApprovalResponse(approval *Approval, command approvalResponseCommand,
 		Responder:   command.responder,
 		Decision:    command.decision,
 		Reason:      command.reason,
+		GrantID:     command.grantID,
 		Selections:  command.selections,
 		SubmittedAt: command.submitted.UTC().Format(time.RFC3339Nano),
 		AcceptedAt:  accepted.UTC().Format(time.RFC3339Nano),
@@ -368,6 +399,9 @@ func appendApprovalResponse(approval *Approval, command approvalResponseCommand,
 
 func (h *approvalsHub) respond(command approvalResponseCommand) approvalResponseOutcome {
 	command.reason = strings.TrimSpace(command.reason)
+	if command.decision == "allow" && command.grantID == "" {
+		command.grantID = approvalGrantRequest
+	}
 	if invalid := validateApprovalResponseCommand(command); invalid != "" {
 		return approvalResponseOutcome{kind: invalid, detail: "invalid approval response"}
 	}
@@ -456,6 +490,31 @@ func (h *approvalsHub) respond(command approvalResponseCommand) approvalResponse
 	status := "denied"
 	if command.decision == "allow" {
 		status = "allowed"
+		if command.grantID == "" {
+			command.grantID = approvalGrantRequest
+		}
+		for _, option := range approvalGrantOptions(approval) {
+			if option.ID != command.grantID {
+				continue
+			}
+			approval.SelectedGrantID = option.ID
+			approval.AllowLabel = option.Label
+			approval.GrantScope = option.Scope
+			approval.GrantDuration = option.Duration
+			break
+		}
+		if command.grantID == approvalGrantRunExact {
+			token := h.newGrantToken()
+			for h.runtimeGrants[token].Token != "" {
+				token = h.newGrantToken()
+			}
+			approval.GrantToken = token
+			h.runtimeGrants[token] = runtimeApprovalGrant{
+				Token: token, Runtime: approval.Runtime, TaskID: approval.TaskID,
+				NativeSessionID: approval.NativeSessionID, ToolName: approval.ToolName,
+				Targets: append([]string(nil), approval.RawTargets...),
+			}
+		}
 	}
 	delete(h.pending, approval.ID)
 	approval.Status = status

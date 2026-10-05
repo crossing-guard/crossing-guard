@@ -9,9 +9,9 @@ type: helper
 role: follower
 execution: managed-turn
 trigger:
-  event: task.message-completed
+  event: session.tool-completed
 context:
-  - kind: task.messages
+  - kind: session.messages
     required: true
     max-bytes: 16384
   - kind: prior-claims
@@ -41,8 +41,8 @@ failure:
   malformed-output: record-unavailable
 ---
 Follow the source discussion. Read the relevant existing project design documents
-through the read-only tools already available in this session. Start from the project
-README and its documentation index, then read the full relevant passages. Search terms, importance,
+through the read-only tools already available in this session. Use docs/design/README.md
+to locate current owners and read the full relevant passages. Search terms, importance,
 and whether to speak are your judgment, guided by this profile.
 
 Return send_message only when a documented constraint materially helps the current

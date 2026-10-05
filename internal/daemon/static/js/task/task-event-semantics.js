@@ -9,6 +9,7 @@ const VENDOR_TURN_EVENT_TYPES = new Set([
   'tool',
   'tool_result',
   'result',
+  'usage',
   'stderr',
 ]);
 

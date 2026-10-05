@@ -43,17 +43,17 @@ func matching(t *testing.T, text string, rows []Row) string {
 
 func sampleRows() []Row {
 	return []Row{
-		{Title: "walmart", Repository: "/work/example-app", Runtime: "claude", Branch: "feat/walmart-settle",
+		{Title: "checkout", Repository: "/work/example-app", Runtime: "claude", Branch: "feat/checkout-settle",
 			Note: "Waiting on finance", TouchedAt: testNow - 2*day, Tags: []Tag{
-				{Key: "Topic", Value: "Walmart", Owner: true, At: testNow - 2*day},
+				{Key: "Topic", Value: "Checkout", Owner: true, At: testNow - 2*day},
 				{Key: "phase", Value: "plan", At: testNow - 3*day}}},
 		{Title: "routing", Repository: "/work/example-app", Runtime: "claude", TouchedAt: testNow - 9*day, Tags: []Tag{
-			{Key: "topic", Value: "amazon-routing", Owner: true, At: testNow - 9*day},
+			{Key: "topic", Value: "order-routing", Owner: true, At: testNow - 9*day},
 			{Key: "phase", Value: "plan", At: testNow - 9*day}, {Key: "fs", Value: "edit", At: testNow - 8*day}}},
-		{Title: "fba", Repository: "/work/example-app", Runtime: "codex", TouchedAt: testNow - 4*day, Tags: []Tag{
-			{Key: "topic", Value: "amazon-fba", Owner: true, At: testNow - 4*day},
+		{Title: "export", Repository: "/work/example-app", Runtime: "codex", TouchedAt: testNow - 4*day, Tags: []Tag{
+			{Key: "topic", Value: "order-export", Owner: true, At: testNow - 4*day},
 			{Key: "phase", Value: "plan", At: testNow - 5*day}, {Key: "vcs", Value: "commit", At: testNow - 4*day}}},
-		{Title: "due diligence", Repository: "/work/sample-shop", Runtime: "claude", Note: "Lawyer call Thursday",
+		{Title: "sprint retro", Repository: "/work/sample-shop", Runtime: "claude", Note: "Designer call Thursday",
 			TouchedAt: testNow - 7*day, Status: "running", Open: true, Tags: []Tag{
 				{Value: "follow-up", Owner: true, At: testNow - 7*day}, {Value: "plan", At: testNow - 7*day}}},
 		{Title: "bare", Repository: "/work/cart", Runtime: "opencode", TouchedAt: testNow - 20*day},
@@ -63,45 +63,45 @@ func sampleRows() []Row {
 func TestGrammarTable(t *testing.T) {
 	rows := sampleRows()
 	for query, want := range map[string]string{
-		"":                               "walmart,routing,fba,due diligence,bare",
-		"tag:phase=plan":                 "walmart,routing,fba",
-		"tag:phase:plan":                 "walmart,routing,fba", // the on-screen spelling
-		"tag:PHASE=Plan":                 "walmart,routing,fba", // capitals are ignored
-		"tag:topic=amazon*":              "routing,fba",
-		"tag:topic=*":                    "walmart,routing,fba",
-		"tag:topic:walmart":              "walmart",
-		"tag:plan":                       "walmart,routing,fba,due diligence", // keyless: a value under any key
-		"tag:phase":                      "",                                  // never matches a key
-		"mine:plan":                      "",                                  // the owner applied no such tag
-		"mine:follow-up":                 "due diligence",
-		"tag:phase=plan -tag:vcs=commit": "walmart,routing",
-		"tag:phase=plan -tag:fs=edit -tag:vcs=commit": "walmart",
-		"-tag:phase=plan":                        "due diligence,bare",
-		"tag:topic=walmart tag:topic=amazon-fba": "walmart,fba", // one key repeated: either value
-		"tag:phase=plan tag:topic=amazon*":       "routing,fba", // two keys: both required
-		"tag:plan mine:follow-up":                "due diligence",
-		"tag:phase=plan mine:follow-up":          "",
-		"-tag:vcs=commit -tag:fs=edit":           "walmart,due diligence,bare",
-		"-tag:nothing-has-this":                  "walmart,routing,fba,due diligence,bare", // excluded no-match holds
-		"tag:nothing-has-this":                   "",
-		"repo:example-app":                       "walmart,routing,fba",
-		"repo:example-app repo:cart":             "walmart,routing,fba,bare", // a repeated field is either
-		"-repo:example-app":                      "due diligence,bare",
-		"runtime:codex":                          "fba",
-		"branch:feat/":                           "walmart",
-		`title:"due diligence"`:                  "due diligence",
-		"note:lawyer":                            "due diligence",
-		"touched:<5d":                            "walmart,fba",
-		"touched:>8d":                            "routing,bare",
-		"touched:>3d touched:<8d":                "fba,due diligence", // two ages are a range, not alternatives
-		"title:plan title:due":                   "",                  // two required words, not either
-		"status:running status:unknown":          "walmart,routing,fba,due diligence,bare",
-		"tagged:>5d":                             "routing,due diligence",
-		"status:running":                         "due diligence",
-		"status:unknown":                         "walmart,routing,fba,bare", // no frame published = unknown
-		"-status:running":                        "walmart,routing,fba,bare",
-		"open:yes":                               "due diligence",
-		"open:no":                                "walmart,routing,fba,bare",
+		"":                               "checkout,routing,export,sprint retro,bare",
+		"tag:phase=plan":                 "checkout,routing,export",
+		"tag:phase:plan":                 "checkout,routing,export", // the on-screen spelling
+		"tag:PHASE=Plan":                 "checkout,routing,export", // capitals are ignored
+		"tag:topic=order*":               "routing,export",
+		"tag:topic=*":                    "checkout,routing,export",
+		"tag:topic:checkout":             "checkout",
+		"tag:plan":                       "checkout,routing,export,sprint retro", // keyless: a value under any key
+		"tag:phase":                      "",                                     // never matches a key
+		"mine:plan":                      "",                                     // the owner applied no such tag
+		"mine:follow-up":                 "sprint retro",
+		"tag:phase=plan -tag:vcs=commit": "checkout,routing",
+		"tag:phase=plan -tag:fs=edit -tag:vcs=commit": "checkout",
+		"-tag:phase=plan": "sprint retro,bare",
+		"tag:topic=checkout tag:topic=order-export": "checkout,export", // one key repeated: either value
+		"tag:phase=plan tag:topic=order*":           "routing,export",  // two keys: both required
+		"tag:plan mine:follow-up":                   "sprint retro",
+		"tag:phase=plan mine:follow-up":             "",
+		"-tag:vcs=commit -tag:fs=edit":              "checkout,sprint retro,bare",
+		"-tag:nothing-has-this":                     "checkout,routing,export,sprint retro,bare", // excluded no-match holds
+		"tag:nothing-has-this":                      "",
+		"repo:example-app":                          "checkout,routing,export",
+		"repo:example-app repo:cart":                "checkout,routing,export,bare", // a repeated field is either
+		"-repo:example-app":                         "sprint retro,bare",
+		"runtime:codex":                             "export",
+		"branch:feat/":                              "checkout",
+		`title:"sprint retro"`:                      "sprint retro",
+		"note:designer":                             "sprint retro",
+		"touched:<5d":                               "checkout,export",
+		"touched:>8d":                               "routing,bare",
+		"touched:>3d touched:<8d":                   "export,sprint retro", // two ages are a range, not alternatives
+		"title:plan title:due":                      "",                    // two required words, not either
+		"status:running status:unknown":             "checkout,routing,export,sprint retro,bare",
+		"tagged:>5d":                                "routing,sprint retro",
+		"status:running":                            "sprint retro",
+		"status:unknown":                            "checkout,routing,export,bare", // no frame published = unknown
+		"-status:running":                           "checkout,routing,export,bare",
+		"open:yes":                                  "sprint retro",
+		"open:no":                                   "checkout,routing,export,bare",
 	} {
 		if got := matching(t, query, rows); got != want {
 			t.Errorf("%q\n got: %s\nwant: %s", query, got, want)
@@ -130,16 +130,16 @@ func TestMalformedQueriesNameWhatWasTyped(t *testing.T) {
 }
 
 func TestWordsAreKeptForTheSearchLegAndMakeAQueryUndurable(t *testing.T) {
-	query, err := Parse(`repo:example-app repricer "margin floor"`, testLimits)
+	query, err := Parse(`repo:example-app indexer "latency budget"`, testLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(query.Words(), "|"); got != "repricer|margin floor" {
+	if got := strings.Join(query.Words(), "|"); got != "indexer|latency budget" {
 		t.Fatalf("words = %q", got)
 	}
 	for text, durable := range map[string]bool{
 		"tag:phase=plan -tag:approved touched:>3d": true, "": true,
-		"repo:example-app repricer": false, "status:running": false, "-open:yes": false,
+		"repo:example-app indexer": false, "status:running": false, "-open:yes": false,
 	} {
 		query, err := Parse(text, testLimits)
 		if err != nil || query.Durable() != durable {
@@ -170,14 +170,14 @@ func TestEmptyTagValuesNeverWidenATerm(t *testing.T) {
 func TestGlobOverflowIsAnErrorNotATruncation(t *testing.T) {
 	var rows []Row
 	for i := 0; i < testLimits.GlobExpansion+1; i++ {
-		rows = append(rows, Row{Title: "r", Tags: []Tag{{Key: "topic", Value: "amazon-" + strconv.Itoa(i)}}})
+		rows = append(rows, Row{Title: "r", Tags: []Tag{{Key: "topic", Value: "order-" + strconv.Itoa(i)}}})
 	}
-	for _, text := range []string{"tag:topic=amazon*", "-tag:topic=amazon*"} {
+	for _, text := range []string{"tag:topic=order*", "-tag:topic=order*"} {
 		query, err := Parse(text, testLimits)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := query.Bind(NewVocabulary(rows), testLimits, testNow); !errors.Is(err, ErrQuery) || !strings.Contains(err.Error(), "amazon*") {
+		if _, err := query.Bind(NewVocabulary(rows), testLimits, testNow); !errors.Is(err, ErrQuery) || !strings.Contains(err.Error(), "order*") {
 			t.Errorf("%q: want an overflow error naming the term, got %v", text, err)
 		}
 	}
@@ -188,7 +188,7 @@ func TestInViewSinceIsTheAgeOfTheAdmittingFact(t *testing.T) {
 	for query, want := range map[string]int64{
 		"tag:phase=plan":                 testNow - 3*day, // when the detector first saw it
 		"tag:phase=plan tag:topic=*":     testNow - 2*day, // the later of two required facts
-		"mine:topic=walmart":             testNow - 2*day,
+		"mine:topic=checkout":            testNow - 2*day,
 		"repo:example-app":               testNow - 2*day, // no tag term: last activity
 		"tag:phase=plan -tag:vcs=commit": testNow - 3*day, // an exclusion admits nothing
 	} {
@@ -258,5 +258,139 @@ func TestPackageDecidesTagTermsOnlyThroughEngineMatch(t *testing.T) {
 	}
 	if !callsMatch {
 		t.Fatal("no call to engine.Match: tag terms must be decided by the one evaluator")
+	}
+}
+
+func notesFor(t *testing.T, text string, rows []Row) []Note {
+	t.Helper()
+	query, err := Parse(text, testLimits)
+	if err != nil {
+		t.Fatalf("parse %q: %v", text, err)
+	}
+	return query.Notes(NewVocabulary(rows))
+}
+
+func suggestions(notes []Note) string {
+	var out []string
+	for _, note := range notes {
+		out = append(out, note.Term+"→"+note.Suggest)
+	}
+	return strings.Join(out, ",")
+}
+
+// A keyless tag term is a value term. When its word is only ever a key, the
+// term can never hold, and the owner almost certainly meant key=*: the board
+// incident of 2026-09-29 (tag:flow over sessions tagged flow=building).
+func TestNotesNameAKeylessTermWhoseWordIsOnlyAKey(t *testing.T) {
+	flow := []Row{
+		{Title: "a", Tags: []Tag{{Key: "flow", Value: "building", Owner: true}}},
+		{Title: "b", Tags: []Tag{{Key: "Flow", Value: "review", Owner: true}, {Value: "loose"},
+			{Key: "work", Value: "uncommitted"}}},
+	}
+	for text, want := range map[string]string{
+		"tag:flow":                 "tag:flow→tag:flow=*",
+		"-tag:flow":                "-tag:flow→-tag:flow=*",
+		"tag:Flow":                 "tag:Flow→tag:flow=*",
+		"mine:flow":                "mine:flow→mine:flow=*",
+		"tag:flow repo:x tag:work": "tag:flow→tag:flow=*,tag:work→tag:work=*", // query order
+		"tag:flow=x":               "",                                        // keyed
+		"tag:flow=*":               "",
+		"tag:fl*":                  "", // a glob is a pattern, not a mistaken key
+		"tag:building":             "", // a value: the term selects something
+		"tag:nothing":              "", // neither key nor value
+		"tag:tag":                  "", // the keyless projection key is never offered
+		"mine:work":                "", // work is a detector key; mine: cannot reach it
+	} {
+		if got := suggestions(notesFor(t, text, flow)); got != want {
+			t.Errorf("%q: notes %q, want %q", text, got, want)
+		}
+	}
+	withValue := append(flow, Row{Title: "c", Tags: []Tag{{Key: "stage", Value: "flow"}}})
+	if got := notesFor(t, "tag:flow", withValue); len(got) != 0 {
+		t.Errorf("a value flow exists, so tag:flow selects something; got %v", got)
+	}
+	// mine: is judged on the owner's tags only: an agent's keyless value flow
+	// (projected under tag) makes tag:flow select it, but not mine:flow.
+	agentValue := append(flow, Row{Title: "d", Tags: []Tag{{Value: "flow"}}})
+	if got := suggestions(notesFor(t, "mine:flow tag:flow", agentValue)); got != "mine:flow→mine:flow=*" {
+		t.Errorf("owner key flow + agent value flow: notes %q, want only the mine: term", got)
+	}
+	if query, _ := Parse("tag:flow=x mine:a* repo:x", testLimits); query.MayHaveNotes() {
+		t.Error("a query with no keyless, glob-free tag term has nothing to note")
+	}
+	if query, _ := Parse("repo:x -mine:flow", testLimits); !query.MayHaveNotes() {
+		t.Error("-mine:flow may be noted")
+	}
+	note := notesFor(t, "tag:flow", flow)[0]
+	if !strings.Contains(note.Problem, `"flow"`) || !strings.Contains(note.Problem, "tag:flow=*") {
+		t.Errorf("problem sentence %q must name the value looked for and the suggestion", note.Problem)
+	}
+}
+
+// Notes are advice beside the query; they never change what it selects.
+func TestNotesNeverChangeWhatAQueryMatches(t *testing.T) {
+	rows := append(sampleRows(), Row{Title: "flow", Tags: []Tag{{Key: "flow", Value: "building", Owner: true}}})
+	for _, text := range []string{"tag:flow", "-tag:flow", "tag:phase", "mine:topic tag:plan", "tag:flow=*"} {
+		before := matching(t, text, rows)
+		_ = notesFor(t, text, rows)
+		if after := matching(t, text, rows); after != before {
+			t.Errorf("%q: matches changed from %q to %q", text, before, after)
+		}
+	}
+	if got := matching(t, "tag:flow", rows); got != "" {
+		t.Errorf("tag:flow still means the value flow; got %q", got)
+	}
+}
+
+func TestTagKeysNamesEveryKeyedTagTerm(t *testing.T) {
+	query, err := Parse("tag:Flow=building -mine:Stage=done tag:plain repo:app mine:topic=*", Limits{QueryBytes: 600, Terms: 24, GlobExpansion: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(query.TagKeys(), ","); got != "flow,stage,topic" {
+		t.Fatalf("TagKeys = %q", got)
+	}
+}
+
+func TestNumberTermsSelectByCallsAndLines(t *testing.T) {
+	rows := []Row{{Title: "probe", Calls: 1, Lines: 4}, {Title: "short", Calls: 5, Lines: 60},
+		{Title: "long", Calls: 40, Lines: 900}, {Title: "untracked", Calls: 0, Lines: 300}}
+	for query, want := range map[string]string{
+		"calls:>5":            "long",
+		"calls:>0":            "probe,short,long",
+		"calls:<1":            "untracked",
+		"calls:>1 calls:<40":  "short",
+		"-calls:<2":           "short,long",
+		"lines:>50":           "short,long,untracked",
+		"lines:<20":           "probe",
+		"calls:>4 lines:<100": "short",
+	} {
+		if got := matching(t, query, rows); got != want {
+			t.Errorf("%q matched %q, want %q", query, got, want)
+		}
+	}
+}
+
+func TestNumberTermsRefuseWhatTheyCannotDecide(t *testing.T) {
+	for _, text := range []string{"calls:5", "calls:>x", "calls:>-1", "calls:>+5", "calls:<0", "lines:>", "lines:=3", "calls:>5d"} {
+		_, err := Parse(text, testLimits)
+		if !errors.Is(err, ErrQuery) || !strings.Contains(err.Error(), "write a count like") {
+			t.Errorf("%q: %v", text, err)
+		}
+	}
+}
+
+// A size term holds still, so a view using it is counted and a placement
+// rule may use it; it names no tag key; and a caller can tell it is there.
+func TestNumberTermsAreDurableAndNameNoTag(t *testing.T) {
+	query, err := Parse("calls:>5 tag:phase=plan", testLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !query.Durable() || !query.HasNumberTerm() || strings.Join(query.TagKeys(), ",") != "phase" {
+		t.Fatalf("durable %v, number term %v, tag keys %v", query.Durable(), query.HasNumberTerm(), query.TagKeys())
+	}
+	if plain, _ := Parse("tag:phase=plan touched:<7d", testLimits); plain.HasNumberTerm() {
+		t.Fatal("a query without a size term reports one")
 	}
 }

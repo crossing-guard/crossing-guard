@@ -1,11 +1,11 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "id": "mem_01J8ZQ4M7T2V9K3NXW5R6YHBCG",
   "slug": "staging-db-needs-vpn",
   "revision": 2,
   "scope": {
     "type": "user",
-    "id": "patrick"
+    "id": "alex"
   },
   "title": "Staging DB needs the VPN",
   "category": "gotcha",
@@ -26,7 +26,7 @@
   "updated_at": "2026-09-17T14:00:00Z",
   "author": {
     "type": "user",
-    "id": "patrick"
+    "id": "member"
   },
   "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,18 +33,18 @@ func TestIndexedSearchPreservesIdentityKindMetadataAndCanonicalDedupe(t *testing
 	_, err := ix.ReplaceTranscriptProjection(store.TranscriptProjection{
 		Session: store.SessionRow{Vendor: "codex", ID: "native-thread",
 			CatalogID: "rollout-newest", ResumeID: "native-thread",
-			Title: "Due diligence systems", Project: "repository"},
+			Title: "Sprint retro systems", Project: "repository"},
 		Generation: "g1", IndexedAt: indexedAt, SourceCount: 2,
 		Documents: []store.SearchDocument{
-			{Order: 0, Kind: "title", Text: "Due diligence systems"},
-			{Order: 1, Kind: "user", Text: "diligence question"},
-			{Order: 2, Kind: "assistant", Text: "diligence answer"},
+			{Order: 0, Kind: "title", Text: "Sprint retro systems"},
+			{Order: 1, Kind: "user", Text: "retro question"},
+			{Order: 2, Kind: "assistant", Text: "retro answer"},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.IndexMemoryText("memory-diligence", 1, "due diligence memory"); err != nil {
+	if err := ix.IndexMemoryText("memory-retro", 1, "sprint retro memory"); err != nil {
 		t.Fatal(err)
 	}
 	coverage := transcriptindex.Coverage{State: transcriptindex.CoverageCurrent,
@@ -52,11 +54,11 @@ func TestIndexedSearchPreservesIdentityKindMetadataAndCanonicalDedupe(t *testing
 	if title.Coverage.State != transcriptindex.CoverageCurrent || len(title.Hits) != 1 ||
 		title.Hits[0].Kind != "title" || title.Hits[0].ID != "rollout-newest" ||
 		title.Hits[0].ResumeID != "native-thread" ||
-		title.Hits[0].Title != "Due diligence systems" ||
+		title.Hits[0].Title != "Sprint retro systems" ||
 		title.Hits[0].Project != "repository" {
 		t.Fatalf("title search=%+v", title)
 	}
-	transcript := SearchAll("diligence", coverage)
+	transcript := SearchAll("retro", coverage)
 	if len(transcript.Hits) != 1 || transcript.Hits[0].ID != "rollout-newest" ||
 		transcript.Hits[0].Kind == "memory" {
 		t.Fatalf("canonical dedupe=%+v", transcript)
@@ -80,5 +82,28 @@ func TestIndexedSearchQualifiesZeroAndUnavailableWithoutRawFallback(t *testing.T
 	if unavailable.Coverage.State != transcriptindex.CoverageUnavailable ||
 		len(unavailable.Hits) != 0 || unavailable.Source != "fts5 [index]" {
 		t.Fatalf("unavailable response=%+v", unavailable)
+	}
+}
+
+// A session store that cannot be read is named as such, never reported as
+// "session not found" and never answered from the no-transcript fallback
+// (managed turn start identity plan D2). A readable store without the session
+// still says not found.
+func TestLoadSessionNamesAnUnreadableStore(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whose permissions forbid it")
+	}
+	withDaemonSearchIndex(t)
+	dir := t.TempDir()
+	t.Setenv("OPENCODE_DATA_HOME", dir)
+	if _, err := LoadSession("opencode", "ses_absent"); err == nil || !strings.HasPrefix(err.Error(), "session not found: opencode/ses_absent") {
+		t.Fatalf("no store file lists as empty, so the session is not found: %v", err)
+	}
+	database := filepath.Join(dir, "opencode.db")
+	if err := os.WriteFile(database, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSession("opencode", "ses_absent"); err == nil || !strings.HasPrefix(err.Error(), "session store unreadable: opencode/ses_absent: ") {
+		t.Fatalf("an unreadable store must be named: %v", err)
 	}
 }

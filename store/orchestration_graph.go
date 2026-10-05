@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"slices"
+)
 
 // Session-graph reads over the caused (orchestration) side. Kept in their own
 // file so the managed-store owner and this read model can evolve without
@@ -98,29 +101,43 @@ ORDER BY run.admitted_at DESC LIMIT 1`, nativeSessionID).Scan(&runID, &bindingID
 // and the group's root (parent) session identities — everything the rail
 // needs to fold the child under its parent (g4 plan §3a).
 type AgentSessionParent struct {
+	// Runtime is the agent session's own runtime; set only by
+	// AllAgentSessionParents.
+	Runtime              string `json:"runtime,omitempty"`
 	Role                 string `json:"role"`
 	RootRuntime          string `json:"root_runtime"`
 	RootCatalogSessionID string `json:"root_catalog_session_id"`
 	RootNativeSessionID  string `json:"root_native_session_id"`
+	// Profiles are the run profiles seen for this agent session, sorted; set
+	// only by AllAgentSessionParents.
+	Profiles []string `json:"profiles,omitempty"`
 }
 
 // AllAgentSessionParents is AgentSessionParents with no id set: every agent
 // child session and its parent, in one read. A caller that partitions the whole
 // session list would otherwise pay one chunked query per 200 ids.
+//
+// Rows are ordered (id, root, role, profile), so a cut drops the same tail
+// every time, and an agent listed with several roots keeps the first; its
+// profiles are the union (session usage breakdown plan R-7, S-7). The limit
+// counts rows, and one row per distinct profile.
 func (ix *Index) AllAgentSessionParents(limit int) (map[string]AgentSessionParent, bool, error) {
 	rows, err := ix.db.Query(`
 SELECT ct.native_session_id, run.role,
-       COALESCE(grp.root_runtime,''), COALESCE(grp.root_catalog_session_id,''), COALESCE(grp.root_native_session_id,'')
+       COALESCE(grp.root_runtime,''), COALESCE(grp.root_catalog_session_id,''), COALESCE(grp.root_native_session_id,''),
+       run.profile_id, ct.runtime
 FROM orchestration_managed_run run
 JOIN runtime_task ct ON ct.id = run.child_task_id
 JOIN orchestration_group grp ON grp.group_id = run.group_id
 WHERE run.kind = '' AND ct.native_session_id <> ''
 UNION
 SELECT grp.helper_native_session_id, run.role,
-       COALESCE(grp.root_runtime,''), COALESCE(grp.root_catalog_session_id,''), COALESCE(grp.root_native_session_id,'')
+       COALESCE(grp.root_runtime,''), COALESCE(grp.root_catalog_session_id,''), COALESCE(grp.root_native_session_id,''),
+       run.profile_id, grp.helper_runtime
 FROM orchestration_group grp
 JOIN orchestration_managed_run run ON run.group_id = grp.group_id AND run.kind = '' AND run.child_task_id <> ''
 WHERE grp.helper_native_session_id <> ''
+ORDER BY 1, 3, 4, 5, 2, 6, 7
 LIMIT ?`, limit+1)
 	if err != nil {
 		return nil, false, err
@@ -129,15 +146,27 @@ LIMIT ?`, limit+1)
 	out := map[string]AgentSessionParent{}
 	count := 0
 	for rows.Next() {
-		var id string
+		var id, profile string
 		var parent AgentSessionParent
-		if err := rows.Scan(&id, &parent.Role, &parent.RootRuntime, &parent.RootCatalogSessionID, &parent.RootNativeSessionID); err != nil {
+		if err := rows.Scan(&id, &parent.Role, &parent.RootRuntime, &parent.RootCatalogSessionID,
+			&parent.RootNativeSessionID, &profile, &parent.Runtime); err != nil {
 			return nil, false, err
 		}
 		count++
 		if count > limit {
 			return out, true, rows.Err()
 		}
+		kept, seen := out[id]
+		if !seen {
+			kept = parent
+		}
+		if profile != "" && !slices.Contains(kept.Profiles, profile) {
+			kept.Profiles = append(kept.Profiles, profile) // rows arrive sorted, so the set stays sorted per root
+		}
+		out[id] = kept
+	}
+	for id, parent := range out {
+		slices.Sort(parent.Profiles)
 		out[id] = parent
 	}
 	return out, false, rows.Err()

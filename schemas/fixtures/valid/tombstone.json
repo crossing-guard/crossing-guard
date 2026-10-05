@@ -6,7 +6,7 @@
   "deleted_at": "2026-09-17T15:00:00Z",
   "deleted_by": {
     "type": "user",
-    "id": "patrick"
+    "id": "member"
   },
   "reason_class": "correction",
   "prior_content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

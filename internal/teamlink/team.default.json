@@ -1,0 +1,34 @@
+{
+  "format_version": 1,
+  "report_interval": "300s",
+  "pull_interval": "60s",
+  "poll_interval": "5s",
+  "request_timeout": "15s",
+  "enrollment_timeout": "10m",
+  "push_interval": "30s",
+  "push_batch": 50,
+  "push_max_attempts": 20,
+  "push_max_bytes": 1048576,
+  "parked_kind_retry": "1h",
+  "outbox_high_water": 10000,
+  "content_session_cap": 8388608,
+  "pull_apply_batch": 1,
+  "memory_pull_pages": 20,
+  "identity_upgrade_roots": 500,
+  "identity_resolve_timeout": "2s",
+  "deletions_verify_max": 10,
+  "conflicts_page_max": 200,
+  "memory_pull_start_delay": "2s",
+  "not_shareable_window": "168h",
+  "sync": {
+    "content": "off"
+  },
+  "handoff": {
+    "pull_pages": 5
+  },
+  "members_refresh": "15m",
+  "bundle": {
+    "default_expiry": "720h",
+    "default_failure_mode": "fail-open"
+  }
+}

@@ -86,8 +86,10 @@ func TestNormalizeCodexCurrentPresentationLane(t *testing.T) {
 	if events[3].Name != "Bash" || events[5].Name != "memory.search" {
 		t.Fatalf("tool names=%q,%q", events[3].Name, events[5].Name)
 	}
-	if usage == nil || usage.Model != "gpt-test" || usage.Turns != 1 || usage.InputTokens != 80 ||
-		usage.CacheRead != 20 || usage.OutputTokens != 30 || usage.Context != 50 || usage.ContextWindow != 1000 {
+	// One token_count event is one call, counted from last_token_usage: the
+	// running total is never taken as the session's figure (plan §3.3).
+	if usage == nil || usage.Model != "gpt-test" || usage.Turns != 1 || usage.InputTokens != 40 ||
+		usage.CacheRead != 0 || usage.OutputTokens != 10 || usage.Context != 40 || usage.ContextWindow != 1000 {
 		t.Fatalf("usage=%+v", usage)
 	}
 }
@@ -97,16 +99,13 @@ func TestCodexMetaCurrentCountsPublicTurnsNotTokenUpdates(t *testing.T) {
 	if err := os.WriteFile(path, []byte(currentCodexFixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	meta, usage, days := codexMeta(path)
+	meta, usage := codexMeta(path)
 	if meta.threadID != "11111111-1111-1111-1111-111111111111" || meta.cwd != "/work/repo" ||
 		meta.title != "actual human prompt" || meta.userTurns != 1 {
 		t.Fatalf("meta=%+v", meta)
 	}
-	if usage == nil || usage.Turns != 1 || usage.Model != "gpt-test" || usage.InputTokens != 80 {
+	if usage == nil || usage.Turns != 1 || usage.Model != "gpt-test" || usage.InputTokens != 40 {
 		t.Fatalf("usage=%+v", usage)
-	}
-	if day := days["2026-08-28"]; day == nil || day.Turns != 1 || day.Input != 80 || day.CacheRead != 20 || day.Output != 30 {
-		t.Fatalf("day=%+v", day)
 	}
 }
 
@@ -126,7 +125,7 @@ func TestNormalizeCodexLegacyNestedCompatibility(t *testing.T) {
 	if !reflect.DeepEqual(gotKinds, wantKinds) {
 		t.Fatalf("kinds=%v events=%+v", gotKinds, events)
 	}
-	if usage == nil || usage.Turns != 1 || usage.InputTokens != 10 || usage.CacheRead != 2 || usage.OutputTokens != 3 {
+	if usage == nil || usage.Turns != 1 || usage.InputTokens != 7 || usage.CacheRead != 0 || usage.OutputTokens != 3 {
 		t.Fatalf("usage=%+v", usage)
 	}
 	if strings.Contains(events[len(events)-1].Text, "opaque") || events[len(events)-1].Text != "legacy public reasoning" {

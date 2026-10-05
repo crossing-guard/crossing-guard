@@ -42,7 +42,7 @@ func summarizeCodexFixture(t *testing.T, name, body string) SessionSummary {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum, _, _, ok := codexRuntime{}.Summarize(fileJob{runtime: "codex", path: path})
+	sum, ok := codexRuntime{}.Summarize(fileJob{runtime: "codex", path: path})
 	if !ok {
 		t.Fatalf("Summarize(%s) returned ok=false", name)
 	}
@@ -212,7 +212,7 @@ func codexEdgesForFixture(t *testing.T, body string) []Edge {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum, _, _, ok := codexRuntime{}.Summarize(fileJob{runtime: "codex", path: path})
+	sum, ok := codexRuntime{}.Summarize(fileJob{runtime: "codex", path: path})
 	if !ok {
 		t.Fatal("Summarize failed")
 	}
@@ -370,7 +370,7 @@ func writeClaudeParentWithSubagents(t *testing.T, root, slug, parentID, body str
 			t.Fatal(err)
 		}
 	}
-	sum, _, _, ok := claudeRuntime{}.Summarize(fileJob{runtime: "claude", path: path})
+	sum, ok := claudeRuntime{}.Summarize(fileJob{runtime: "claude", path: path})
 	if !ok {
 		t.Fatal("Summarize failed")
 	}
@@ -385,13 +385,20 @@ func TestClaudeLineageEnumeratesSubagentsDirWithoutCataloguing(t *testing.T) {
 	t.Setenv("HOME", home)
 	root := filepath.Join(home, ".claude", "projects")
 	parentID := "eeeeeeee-5555-5555-5555-555555555555"
-	childIDs := []string{"a1111111111111111", "a2222222222222222"}
+	childIDs := []string{"a1111111111111111", "a2222222222222222", "a4444444444444444"}
 	body := `{"type":"user","uuid":"rec-1","sessionId":"` + parentID + `","cwd":"/work/repo","message":{"role":"user","content":"parent prompt"}}` + "\n"
 	sum := writeClaudeParentWithSubagents(t, root, "-work-repo", parentID, body, childIDs)
-	// vendor-published labels ride the sidecar
-	metaPath := filepath.Join(root, "-work-repo", parentID, "subagents", "agent-"+childIDs[0]+".meta.json")
-	if err := os.WriteFile(metaPath, []byte(`{"agentType":"Explore","description":"x","spawnDepth":1}`), 0o600); err != nil {
-		t.Fatal(err)
+	// vendor-published labels ride the sidecar; a nested agent names its launcher
+	longDescription := strings.Repeat("d", titleMaxLen+10)
+	sidecars := map[string]string{
+		childIDs[0]: `{"agentType":"Explore","description":"map the flow","spawnDepth":1}`,
+		childIDs[2]: `{"agentType":"general-purpose","description":"` + longDescription + `","spawnDepth":2,"parentAgentId":"` + childIDs[0] + `"}`,
+	}
+	for childID, sidecar := range sidecars {
+		metaPath := filepath.Join(root, "-work-repo", parentID, "subagents", "agent-"+childID+".meta.json")
+		if err := os.WriteFile(metaPath, []byte(sidecar), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	facts, ok := Lineage(sum)
@@ -405,11 +412,18 @@ func TestClaudeLineageEnumeratesSubagentsDirWithoutCataloguing(t *testing.T) {
 			t.Fatalf("child kind = %q", child.Kind)
 		}
 	}
-	if byID[childIDs[0]].Role != "Explore" || byID[childIDs[0]].Depth != 1 {
-		t.Fatalf("sidecar labels not carried: %+v", byID[childIDs[0]])
+	if got := byID[childIDs[0]]; got.Role != "Explore" || got.Depth != 1 || got.Description != "map the flow" || got.Via != "" {
+		t.Fatalf("sidecar labels not carried: %+v", got)
 	}
-	if byID[childIDs[1]].Role != "" {
-		t.Fatalf("child without sidecar gained a synthesized role: %+v", byID[childIDs[1]])
+	if got := byID[childIDs[1]]; got.Role != "" || got.Description != "" || got.Via != "" {
+		t.Fatalf("child without sidecar gained synthesized labels: %+v", got)
+	}
+	nested := byID[childIDs[2]]
+	if nested.Via != childIDs[0] || nested.Depth != 2 {
+		t.Fatalf("nested agent lost its launcher: %+v", nested)
+	}
+	if nested.Description != strings.Repeat("d", titleMaxLen)+"…" {
+		t.Fatalf("description not capped at the title bound: %q", nested.Description)
 	}
 	// collect-scan semantics unchanged: only the parent is inventoried
 	jobs, err := collectClaudeJobs(true)
@@ -481,7 +495,7 @@ func TestClaudeWorktreeTwinIsNotLineage(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		sum, _, _, ok := claudeRuntime{}.Summarize(fileJob{runtime: "claude", path: path})
+		sum, ok := claudeRuntime{}.Summarize(fileJob{runtime: "claude", path: path})
 		if !ok {
 			t.Fatal("Summarize failed")
 		}
@@ -534,7 +548,7 @@ func TestCapabilityMatrixListsEveryRuntime(t *testing.T) {
 		if !ok {
 			t.Fatalf("runtime %q missing from matrix", name)
 		}
-		for _, capability := range []string{"session_lineage", "edge_source", "turn_anchorer", "resume_handle", "session_source", "deep_normalizer", "repository_grouper"} {
+		for _, capability := range []string{"session_lineage", "edge_source", "turn_anchorer", "resume_handle", "native_open", "session_source", "deep_normalizer", "repository_grouper"} {
 			if _, present := row.Capabilities[capability]; !present {
 				t.Fatalf("runtime %q row lacks explicit %q entry", name, capability)
 			}
@@ -542,9 +556,9 @@ func TestCapabilityMatrixListsEveryRuntime(t *testing.T) {
 	}
 	// spot checks against what the adapters actually implement
 	for runtime, expected := range map[string]map[string]bool{
-		"codex":    {"session_lineage": true, "edge_source": true, "turn_anchorer": true, "resume_handle": true},
-		"claude":   {"session_lineage": true, "edge_source": true, "turn_anchorer": true, "resume_handle": false, "repository_grouper": true},
-		"opencode": {"session_lineage": true, "edge_source": true, "turn_anchorer": false, "session_source": true},
+		"codex":    {"session_lineage": true, "edge_source": true, "turn_anchorer": true, "resume_handle": true, "native_open": true},
+		"claude":   {"session_lineage": true, "edge_source": true, "turn_anchorer": true, "resume_handle": false, "native_open": true, "repository_grouper": true},
+		"opencode": {"session_lineage": true, "edge_source": true, "turn_anchorer": false, "native_open": false, "session_source": true},
 	} {
 		for capability, want := range expected {
 			if got := matrix[runtime].Capabilities[capability]; got != want {

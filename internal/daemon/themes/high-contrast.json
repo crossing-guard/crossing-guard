@@ -1,0 +1,52 @@
+{
+  "format_version": 1,
+  "id": "high-contrast",
+  "name": "High contrast",
+  "scheme": "dark",
+  "tokens": {
+    "bg": "#000000",
+    "panel": "#0b0b0b",
+    "panel2": "#161616",
+    "surface": "#0b0b0b",
+    "border": "#6a6a6a",
+    "text": "#ffffff",
+    "dim": "#cfcfcf",
+    "accent": "#ffe600",
+    "accent-ink": "#000000",
+    "accent-fg": "#ffe600",
+    "accent2": "#6cbcff",
+    "ok": "#3ddc84",
+    "warn": "#ffb000",
+    "bad": "#ff6b6b",
+    "purple": "#c9a7ff",
+    "user-bubble-bg": "#0f1e33",
+    "user-bubble-border": "#6cbcff",
+    "chip-neutral-bg": "#262626",
+    "chip-neutral-fg": "#f0f0f0",
+    "chip-good-bg": "#0d2e1c",
+    "chip-good-fg": "#7dffb3",
+    "chip-warn-bg": "#332600",
+    "chip-warn-fg": "#ffd766",
+    "chip-bad-bg": "#3a0f0f",
+    "chip-bad-fg": "#ffb0a6",
+    "chip-info-bg": "#0f2a3a",
+    "chip-info-fg": "#9fdcff",
+    "chip-purple-bg": "#261a3a",
+    "chip-purple-fg": "#e0ccff",
+    "chip-amber-bg": "#332400",
+    "chip-amber-fg": "#ffd98c",
+    "work-main": "#6cbcff",
+    "work-subagent": "#c9a7ff",
+    "work-agent": "#4fe0c8"
+  },
+  "labels": {
+    "claude": {
+      "bg": "#3a1f10",
+      "fg": "#ffc2a0"
+    },
+    "codex": {
+      "bg": "#0f2340",
+      "fg": "#a8d1ff"
+    }
+  }
+}
