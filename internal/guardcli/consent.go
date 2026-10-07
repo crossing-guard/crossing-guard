@@ -21,6 +21,7 @@ package guardcli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -46,6 +47,16 @@ type VendorConsent struct {
 	// distinct fact because it is weaker evidence, and a surface that reports
 	// consent should be able to say which kind it has.
 	Grandfathered bool `json:"grandfathered,omitempty"`
+	// Recall is a separate yes: registering the recall tools in the runtime's
+	// MCP config (recall-mcp-v1-plan §3.7). Absent means never asked or
+	// declined; a hook yes never implies it, and re-consenting hooks keeps it.
+	Recall *RecallConsent `json:"recall,omitempty"`
+}
+
+// RecallConsent is the yes to register the recall tools, and the file named.
+type RecallConsent struct {
+	Config      string `json:"config"`
+	ConsentedAt string `json:"consented_at"`
 }
 
 func consentPath() string { return filepath.Join(dataDir(), "attached.json") }
@@ -78,8 +89,50 @@ func RecordConsent(vendor, config, binary string, grandfathered bool) error {
 		if existed && prev.ConsentedAt != "" {
 			at = prev.ConsentedAt
 		}
+		// A separate decision: re-recording the hook yes must not erase it —
+		// but only while it still names the same MCP file. A hook yes for
+		// another config (a new CODEX_HOME) never carries recall there.
+		var recall *RecallConsent
+		if prev.Recall != nil && RecallConfigFor(vendor, config) == prev.Recall.Config {
+			recall = prev.Recall
+		}
 		rec.Vendors[vendor] = VendorConsent{Config: config, Binary: binary, ConsentedAt: at,
-			Grandfathered: grandfathered && (!existed || prev.Grandfathered)}
+			Grandfathered: grandfathered && (!existed || prev.Grandfathered),
+			Recall:        recall}
+		return writeConsent(rec)
+	})
+}
+
+// RecordRecallConsent stores the yes to register the recall tools for a vendor
+// whose hooks are already consented; it never creates a hook consent.
+func RecordRecallConsent(vendor, recallConfig string) error {
+	return withConsentLock(func() error {
+		rec := LoadConsent()
+		prev, existed := rec.Vendors[vendor]
+		if !existed {
+			return fmt.Errorf("%s has no hook consent; attach it first", vendor)
+		}
+		at := time.Now().UTC().Format(time.RFC3339)
+		if prev.Recall != nil && prev.Recall.ConsentedAt != "" {
+			at = prev.Recall.ConsentedAt
+		}
+		prev.Recall = &RecallConsent{Config: recallConfig, ConsentedAt: at}
+		rec.Vendors[vendor] = prev
+		return writeConsent(rec)
+	})
+}
+
+// ForgetRecallConsent drops one vendor's recall yes and keeps its hook yes:
+// once the registration is removed, a reinstall must ask again.
+func ForgetRecallConsent(vendor string) error {
+	return withConsentLock(func() error {
+		rec := LoadConsent()
+		prev, ok := rec.Vendors[vendor]
+		if !ok || prev.Recall == nil {
+			return nil
+		}
+		prev.Recall = nil
+		rec.Vendors[vendor] = prev
 		return writeConsent(rec)
 	})
 }

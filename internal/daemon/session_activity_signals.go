@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,7 +48,7 @@ type naturalSessionSignal struct {
 	// and falls back to the hook id.
 	CatalogSessionID string
 	NativeSessionID  string
-	ProjectRoot      string // exact cleaned root, "" when the row had none
+	ProjectRoot      string // the sessions row's cwd as recorded, "" when it had none
 	Producer         string // durable stream kind the row came from
 	EventRowID       int64  // that stream's rowid — idempotency anchor
 	At               int64  // daemon-clock milliseconds
@@ -273,8 +272,9 @@ func (host *orchestrationManagedHost) routeNaturalSignal(signal naturalSessionSi
 		return err
 	}
 	matches := []matchedAgent{}
+	folder := newFolderScope(signal.ProjectRoot)
 	for _, binding := range bindings {
-		if !binding.WatchNatural || !naturalScopeMatches(binding, signal) {
+		if !binding.WatchNatural || !naturalScopeMatches(binding, signal, folder) {
 			continue
 		}
 		if match, ok := host.selectBinding(binding, signal.Signal); ok {
@@ -346,9 +346,10 @@ func naturalTaskID(signal naturalSessionSignal) string {
 
 // naturalScopeMatches is the consent gate: watch_natural opted in (checked by
 // the caller), runtime scope matched, session scope matched when pinned, and
-// the project root is the EXACT cleaned root — a subdirectory or cwd-less
-// session never triggers (the same rule the task path enforces).
-func naturalScopeMatches(binding store.ManagedBinding, signal naturalSessionSignal) bool {
+// the session working in the binding's EXACT folder under any spelling — a
+// subdirectory or cwd-less session never triggers (the same rule the task path
+// enforces). folder is signal.ProjectRoot's scope.
+func naturalScopeMatches(binding store.ManagedBinding, signal naturalSessionSignal, folder *folderScope) bool {
 	if binding.ScopeRuntime != "" && binding.ScopeRuntime != signal.Runtime {
 		return false
 	}
@@ -356,10 +357,7 @@ func naturalScopeMatches(binding store.ManagedBinding, signal naturalSessionSign
 		(signal.NativeSessionID == "" || binding.ScopeSession != signal.NativeSessionID) {
 		return false
 	}
-	if signal.ProjectRoot == "" || binding.ProjectRoot == "" {
-		return false
-	}
-	return filepath.Clean(binding.ProjectRoot) == filepath.Clean(signal.ProjectRoot)
+	return folder.matchesRoot(binding.ProjectRoot)
 }
 
 // launchNaturalAgentRun admits and launches one binding's run off a natural
@@ -385,8 +383,9 @@ func (host *orchestrationManagedHost) launchNaturalAgentRun(match matchedAgent, 
 // every currently-open session the freshly saved binding matches (red-team
 // H4). The session-activity service is the one presence owner: its open
 // items ARE the open sessions. Idempotency: the run key embeds the binding's
-// state token, so one save fires once; a second save is a new token (a
-// deliberate re-attach).
+// state token, so one save fires once. The token excludes the update time, so
+// turning a place off and on again with nothing else changed restores the same
+// token and admits nothing new; the sessions it already joined keep going.
 func (host *orchestrationManagedHost) emitSessionActiveBootstrap(binding store.ManagedBinding) {
 	if sessionActivityService() == nil {
 		return
@@ -408,7 +407,7 @@ func (host *orchestrationManagedHost) emitSessionActiveBootstrap(binding store.M
 		if session, found, err := host.ix.SessionByID(item.Runtime, item.CatalogSessionID); err == nil && found {
 			signal.ProjectRoot = session.CWD
 		}
-		if !naturalScopeMatches(binding, signal) || host.sessionIsTaskOwned(signal) {
+		if !naturalScopeMatches(binding, signal, newFolderScope(signal.ProjectRoot)) || host.sessionIsTaskOwned(signal) {
 			continue
 		}
 		if err := host.routeNaturalSignalToBinding(binding, signal); err != nil {
@@ -469,6 +468,8 @@ func bootstrapNaturalStreamPositions(ix *store.Index) error {
 		{naturalActivityStreamKind, ix.SessionActivityHead},
 		{naturalTurnStreamKind, ix.SessionTurnHead},
 		{naturalResultStreamKind, ix.ResultObservationHead},
+		{naturalTagStreamKind, bootstrapTagJournalHead(ix)},
+		{naturalUncommittedStreamKind, ix.UncommittedWorkFacetHead},
 	} {
 		head, err := stream.head()
 		if err != nil {
@@ -497,6 +498,8 @@ func bootstrapNaturalStreamPositions(ix *store.Index) error {
 // ingest nudge or safety sweep (a held row is typically the LAST row before a
 // pause — the one a helper most wants).
 func (host *orchestrationManagedHost) emitNaturalSignalsOnce() (held bool) {
+	// Delivery expiry rides this cadence whether or not a pass below fails.
+	defer host.expireDeliveriesOnce()
 	passes := []struct {
 		name string
 		run  func(*store.Index, func(naturalSessionSignal) error) error
@@ -504,6 +507,8 @@ func (host *orchestrationManagedHost) emitNaturalSignalsOnce() (held bool) {
 		{"activity", emitNaturalSessionSignals},
 		{"turn", emitNaturalTurnSignals},
 		{"result", emitNaturalResultSignals},
+		{"tag", emitTagChangeSignals},
+		{"uncommitted", emitUncommittedWorkSignals},
 	}
 	for _, pass := range passes {
 		route := func(signal naturalSessionSignal) error {
@@ -511,6 +516,13 @@ func (host *orchestrationManagedHost) emitNaturalSignalsOnce() (held bool) {
 			if errors.Is(err, errNaturalSettle) {
 				held = true
 			}
+			// Flow consumers ride the same pass (orchestration-flows):
+			// tag signals drive membership; transitions evaluate after
+			// membership so a freshly admitted member can move on the same
+			// signal; the flow's journal position advances only after its
+			// membership write.
+			host.flowSignalConsumer(signal)
+			host.flowSignalTransitionConsumer(signal)
 			return err
 		}
 		err := pass.run(host.ix, route)
@@ -523,7 +535,13 @@ func (host *orchestrationManagedHost) emitNaturalSignalsOnce() (held bool) {
 			return held
 		}
 	}
-	host.expireSessionDeliveriesOnce()
+	// Flow enablement/evaluation cadence (orchestration-flows slice B): the
+	// emitter's sweep is the one cadence the flow mechanisms ride —
+	// enablement sync, the one-per-enablement evaluation, and nothing else.
+	if err := host.flowEnablementSync(time.Now().Unix()); err != nil {
+		host.setProblem("Flow enablement sync is failing: " + err.Error())
+	}
+	host.sweepStuckSessionMessageInvocations()
 	return held
 }
 

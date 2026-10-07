@@ -1,6 +1,6 @@
 // Package rulebook owns the active enforcement rule document: where it lives,
 // how legacy documents migrate, how predicates compile, and which default ships.
-// Evaluation remains engine.Decide; this package deliberately has no verdict API.
+// Evaluation remains the engine's (engine.Judge); this package deliberately has no verdict API.
 package rulebook
 
 import (
@@ -17,6 +17,12 @@ import (
 // CanaryMarker is the string the shipped proof rule fires on. No genuine command
 // should contain it; demo and verification use it to prove the real hook path.
 const CanaryMarker = ruledoc.CanaryMarker
+
+// CanaryRuleID is the shipped proof rule's id; see ruledoc.CanaryRuleID.
+const CanaryRuleID = ruledoc.CanaryRuleID
+
+// DemoRuntime is the demo verb's runtime name; see ruledoc.DemoRuntime.
+const DemoRuntime = ruledoc.DemoRuntime
 
 // LoadedDocument is the validated rulebook document that is actually active.
 // Path is the canonical write target even when the embedded fallback is active.

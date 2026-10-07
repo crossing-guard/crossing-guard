@@ -230,10 +230,17 @@ func TestApprovalServiceGrantIsExactAndHumanTakeoverRevokesIt(t *testing.T) {
 	hub := newApprovalsHub()
 	hub.now = func() time.Time { return now }
 	approval, _, _ := admittedResponseTestApproval(t, hub, "ap_delegated", "ask", now.Add(time.Minute))
+	approval.GrantOptions = []ApprovalGrantOption{requestGrantOption, exactRunGrantOption}
 	responder := ApprovalResponder{Kind: "service", ID: "orchestration:reviewer"}
 	serviceCapability, err := hub.grantServiceResponder(approval.ID, responder)
 	if err != nil {
 		t.Fatal(err)
+	}
+	widen := responseTestCommand(approval.ID, responseTestID("O"), "allow", "model claim", now, serviceCapability)
+	widen.responder = responder
+	widen.grantID = approvalGrantRunExact
+	if got := hub.respond(widen); got.kind != approvalResponseUnauthorized {
+		t.Fatalf("service widened grant outcome = %q", got.kind)
 	}
 	interactive, lookup := hub.takeoverInteractiveCapability(approval.ID)
 	if lookup != "" {

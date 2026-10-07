@@ -3,7 +3,19 @@
     --bg: #16161a; --panel: #1e1e24; --panel2: #26262e; --border: #34343e;
     --text: #e8e8ec; --dim: #9a9aa6; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #ddf03a; --accent2: #6b9fff;
     --ok: #4caf7d; --warn: #e0b34d; --bad: #e06c5c; --purple: #a98fe0;
+    --work-main: #6b9fff; --work-subagent: #a98fe0; --work-agent: #45c4b0;
     --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    /* The built-in appearance's type steps and reading widths. /appearance.css
+       overrides them from the selected appearance; these keep the console
+       whole when that sheet is unavailable. */
+    --fs-1: 7px; --fs-2: 8px; --fs-3: 9px; --fs-4: 10px; --fs-5: 10.5px; --fs-6: 11px; --fs-7: 11.5px; --fs-8: 12px;
+    --fs-9: 12.5px; --fs-10: 13px; --fs-11: 14px; --fs-12: 15px; --fs-13: 16px; --fs-14: 17px; --fs-15: 20px;
+    --measure: 880px; --chat-measure: 860px;
+    /* A board column's least width. The session surface reads it to decide
+       whether two columns fit beside each other. */
+    --board-column-min: 240px;
+    --surface: #1e1e24;
     --user-bubble-bg: #262e3a; --user-bubble-border: #34405a;
     --chip-claude-bg: #3d2c24; --chip-claude-fg: #e8a184;
     --chip-codex-bg: #24303d; --chip-codex-fg: #84b3e8;
@@ -20,9 +32,10 @@
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
       color-scheme: light;
-      --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6;
+      --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6; --surface: #ffffff;
       --text: #22222a; --dim: #6b6b76; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #5f6b0a; --accent2: #3b6fc9;
       --ok: #1e7a4a; --warn: #8a6516; --bad: #bf4534; --purple: #7150b8;
+    --work-main: #3b6fc9; --work-subagent: #7150b8; --work-agent: #17917e;
       --user-bubble-bg: #e9eef6; --user-bubble-border: #ccd6e6;
       --chip-claude-bg: #f3ddd2; --chip-claude-fg: #9c4a26;
       --chip-codex-bg: #d8e4f3; --chip-codex-fg: #2d5e94;
@@ -37,9 +50,10 @@
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6;
+    --bg: #f4f4f2; --panel: #ffffff; --panel2: #ebebe8; --border: #dcdcd6; --surface: #ffffff;
     --text: #22222a; --dim: #6b6b76; --accent: #ddf03a; --accent-ink: #141604; --accent-fg: #5f6b0a; --accent2: #3b6fc9;
     --ok: #1e7a4a; --warn: #8a6516; --bad: #bf4534; --purple: #7150b8;
+    --work-main: #3b6fc9; --work-subagent: #7150b8; --work-agent: #17917e;
     --user-bubble-bg: #e9eef6; --user-bubble-border: #ccd6e6;
     --chip-claude-bg: #f3ddd2; --chip-claude-fg: #9c4a26;
     --chip-codex-bg: #d8e4f3; --chip-codex-fg: #2d5e94;

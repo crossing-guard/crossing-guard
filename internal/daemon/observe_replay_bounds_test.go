@@ -118,10 +118,10 @@ func TestReplayGivesUpAfterMaxDeliveryAttempts(t *testing.T) {
 func TestScanCoalescerSharesOneScanWithinWindow(t *testing.T) {
 	var c scanCoalescer
 	calls := 0
-	scan := func() []SessionSummary {
+	scan := func() ([]SessionSummary, string) {
 		calls++
 		time.Sleep(20 * time.Millisecond)
-		return []SessionSummary{{ID: "one"}}
+		return []SessionSummary{{ID: "one"}}, ""
 	}
 	type result struct{ out []SessionSummary }
 	results := make(chan result, 8)

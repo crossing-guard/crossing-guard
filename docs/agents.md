@@ -11,10 +11,11 @@ delivery capabilities have their own compatibility limits.
 The release examples must demonstrate profile preview, selection, deployment, attributed
 results and disabling a binding in a real supported workflow. Valid syntax alone is not proof.
 
-Current implementation evidence supports memory recall at task hand-back and Codex message
-queuing for a subsequent turn boundary. Acceptance differs from consumption; an idle source
-may need its next normal user turn. Claude and OpenCode have no equivalent message transport
-in this candidate. Natural sessions expose lifecycle signals rather than the complete
+A message to a session is handed to that session's own next boundary. Claude Code and
+OpenCode receive it through the installed hook or plugin at the next prompt, tool call or
+tool result; Codex uses its queue by default. Acceptance differs from consumption, and an
+idle session receives nothing until its next boundary. See the
+[examples](../examples/orchestration/README.md) for the delivery states. Natural sessions expose lifecycle signals rather than the complete
 managed-task message/tool stream. Wildcard triggers cannot create missing observation.
 
 ## Spontaneous Memory
@@ -28,4 +29,4 @@ correction requires an explicitly resumed turn, not release of a paused tool cal
 The receiving agent must assess potentially stale memories. Context never overrides
 permissions. Disable a binding when it is no longer needed.
 
-See the [three profile examples](../examples/orchestration/README.md).
+See the [profile examples](../examples/orchestration/README.md).

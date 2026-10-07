@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // These tests PORT the Python testbed probes into Go, so the shared engine is
 // proven to match detect.py / audit.py / checkpoint.py behaviour — the parity the
@@ -27,17 +30,17 @@ func has(tags []Tag, key, val string) bool {
 // classification tags the same sensitivity deterministically. The product thesis.
 func TestPBI_ContentBlindSourceSees(t *testing.T) {
 	d := dets(t)
-	bi := `Q3 board memo — CONFIDENTIAL. Gross margin on GLD-45-1005 fell to 31.2% ` +
-		`after the vendor raised landed cost to $14.90/unit; re-sourcing to protect ` +
-		`the line. Repricer floor stays at $28.99. Do not share outside the exec list.`
+	bi := `Q3 board memo — CONFIDENTIAL. Gross margin on SKU-1001 fell to 30% ` +
+		`after the supplier raised unit cost to $10.00; re-sourcing to protect ` +
+		`the line. Price floor stays at $20.00. Do not share outside the board.`
 	if got := Classify(Event{Text: bi}, d); len(got) != 0 {
 		t.Fatalf("content scan of business intel should find NOTHING, got %v", got)
 	}
 	// same sensitivity, by SOURCE:
-	if tags := Classify(Event{Tool: "listFinancialEvents"}, d); !has(tags, "data-class", "regulated") {
+	if tags := Classify(Event{Tool: "listPayments"}, d); !has(tags, "data-class", "regulated") {
 		t.Fatalf("finance tool should tag regulated by source, got %v", tags)
 	}
-	if tags := Classify(Event{Tool: "getVendorProduct"}, d); !has(tags, "data-class", "internal") {
+	if tags := Classify(Event{Tool: "getSupplierPrice"}, d); !has(tags, "data-class", "internal") {
 		t.Fatalf("vendor-cost tool should tag internal by source, got %v", tags)
 	}
 }
@@ -51,8 +54,8 @@ func TestSourceBeatsContentOnPII(t *testing.T) {
 		t.Fatalf("content should catch the SHAPED pii (email/CUS-id), got %v", content)
 	}
 	// source nails it with zero content inspection:
-	if src := Classify(Event{Tool: "getOrderAddress"}, d); !has(src, "data-class", "personal-data") {
-		t.Fatalf("getOrderAddress should tag personal-data by source, got %v", src)
+	if src := Classify(Event{Tool: "getCustomerAddress"}, d); !has(src, "data-class", "personal-data") {
+		t.Fatalf("getCustomerAddress should tag personal-data by source, got %v", src)
 	}
 }
 
@@ -62,7 +65,7 @@ func TestDestinationFailSafe(t *testing.T) {
 	if tags := Classify(Event{Destination: "https://random-saas.com/up"}, d); !has(tags, "destination-class", "external") {
 		t.Fatalf("unlisted destination must be external, got %v", tags)
 	}
-	if tags := Classify(Event{Destination: "https://pim.example.internal/x"}, d); !has(tags, "destination-class", "in-house") {
+	if tags := Classify(Event{Destination: "https://inventory.example.internal/x"}, d); !has(tags, "destination-class", "in-house") {
 		t.Fatalf("allowlisted host must be in-house, got %v", tags)
 	}
 }
@@ -75,8 +78,8 @@ func TestWaterMarkMonotonic(t *testing.T) {
 	if WaterMark(tags) != "public" {
 		t.Fatalf("want public, got %q", WaterMark(tags))
 	}
-	tags = append(tags, Classify(Event{Tool: "getVendorProduct"}, d)...) // internal
-	tags = append(tags, Classify(Event{Tool: "getOrderAddress"}, d)...)  // personal-data
+	tags = append(tags, Classify(Event{Tool: "getSupplierPrice"}, d)...)   // internal
+	tags = append(tags, Classify(Event{Tool: "getCustomerAddress"}, d)...) // personal-data
 	if WaterMark(tags) != "personal-data" {
 		t.Fatalf("want personal-data after PII, got %q", WaterMark(tags))
 	}
@@ -153,7 +156,7 @@ func routeLive(menu []Resolution) bool {
 // enumerable. The tag itself never carries a score.
 func TestCoverageIsOnDetectorNotTag(t *testing.T) {
 	d := dets(t)
-	src := Classify(Event{Tool: "getOrderAddress"}, d)
+	src := Classify(Event{Tool: "getCustomerAddress"}, d)
 	if len(src) == 0 || !src[0].Coverage.Enumerable {
 		t.Fatalf("source map coverage should be enumerable, got %+v", src)
 	}
@@ -164,5 +167,33 @@ func TestCoverageIsOnDetectorNotTag(t *testing.T) {
 	}
 	if key[0].Coverage.Enumerable {
 		t.Fatal("aws-key pattern coverage must be declared UNKNOWABLE")
+	}
+}
+
+// Gates is the one "does this mode stop the action" predicate every tier reads.
+func TestModeGates(t *testing.T) {
+	for mode, want := range map[Mode]bool{HardBlock: true, ConfirmAndRecord: true,
+		WarnAndProceed: false, SilentLog: false, "": false, "hard-blok": false} {
+		if got := mode.Gates(); got != want {
+			t.Errorf("Mode(%q).Gates() = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+func TestFiredWarnsNamesEveryWarnRuleOnce(t *testing.T) {
+	always := Predicate{Not: &Predicate{Tag: "absent"}}
+	pol := &Policy{Rules: []Rule{
+		{ID: "w1", Mode: WarnAndProceed, If: always},
+		{ID: "quiet", Mode: SilentLog, If: always},
+		{ID: "w2", Mode: WarnAndProceed, If: always},
+		{ID: "w1", Mode: WarnAndProceed, If: always}, // same id from another layer
+	}}
+	d := Decide(nil, pol)
+	if got := FiredWarns(d, pol); !slices.Equal(got, []string{"w1", "w2"}) {
+		t.Fatalf("FiredWarns = %v, want [w1 w2]", got)
+	}
+	pol.Rules = append(pol.Rules, Rule{ID: "stop", Mode: HardBlock, If: always})
+	if got := FiredWarns(Decide(nil, pol), pol); got != nil {
+		t.Fatalf("a gating decision reported warns: %v", got)
 	}
 }

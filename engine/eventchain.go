@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // The event chain: tamper evidence for the append-only event log, per session.
@@ -39,6 +40,17 @@ type EventChainBody struct {
 	Decision   string `json:"decision"`
 	Reason     string `json:"reason"`
 	Origin     string `json:"origin"`
+	// Rule is the rule that produced or asked for the decision (schema 33). It is LAST and
+	// omitempty on purpose: a row chained before the field existed marshals byte-for-byte
+	// as it always did, so its hash still verifies, while every row written since commits
+	// to the rule an admin is later shown.
+	Rule string `json:"rule,omitempty"`
+	// Layer is the distribution tier the winning rule arrived by (schema 38, team plan
+	// §5.16): user, repository, or organization. It is appended AFTER Rule and omitempty
+	// for the same reason, and the declaration order is part of the chain contract from
+	// schema 38 on — frozen; no field may ever be inserted between or after these two
+	// without re-versioning the chain.
+	Layer Layer `json:"layer,omitempty"`
 }
 
 // TagsDigest is the commitment to a frozen tags document: the exact bytes as stored.
@@ -173,5 +185,88 @@ func VerifyEventChain(session string, rows []ChainRow, held *ChainAnchor) ChainR
 		r.DiskSpan = [2]int64{1, lastSeq}
 		r.Detail += "; no held anchor offered — internal consistency only"
 	}
+	return r
+}
+
+// ChainLink is one chained row as a RECEIVER holds it: the ids and hashes the wire
+// carries, without the body. A receiver cannot recompute a row's hash — the body commits
+// to the device-local session string, the absolute target, and the unredacted reason,
+// none of which leave the device (invariants 7, 8) — so what it can verify is linkage.
+type ChainLink struct {
+	ID   string
+	Seq  int64
+	Prev string
+	Hash string
+}
+
+// LinkageVerifiedOverPushed is the receiver's own tier (team item 4 decision 7): the
+// pushed rows link without a break. It is forgeable in totality — a device can present
+// an internally consistent fabricated chain — and says only that what was received is
+// continuous, which catches a history rewritten after it was pushed.
+const LinkageVerifiedOverPushed = "verified-over-pushed"
+
+// LinkageReport is a receiver's verification of a session's pushed rows.
+type LinkageReport struct {
+	// Status: LinkageVerifiedOverPushed | "gap" | "fork" | "none" (no chained rows) | "empty".
+	Status   string `json:"status"`
+	Rows     int    `json:"rows"`
+	Chained  int    `json:"chained"`
+	FirstSeq int64  `json:"first_seq"`
+	LastSeq  int64  `json:"last_seq"`
+	Detail   string `json:"detail"`
+}
+
+// VerifyChainLinkage checks a session's pushed rows for continuity: sorted by seq, each
+// row's prev must equal the hash of the row one seq below it (fork), no seq may repeat
+// with a different hash (fork), and no seq may be missing between the first and last
+// received (gap). The first received row's prev is not checkable: rows before a device
+// linked were never pushed (the outbox is born at head). Legacy rows (no hash) count.
+func VerifyChainLinkage(links []ChainLink) LinkageReport {
+	r := LinkageReport{Rows: len(links)}
+	if len(links) == 0 {
+		r.Status, r.Detail = "empty", "no pushed events for this session"
+		return r
+	}
+	chained := make([]ChainLink, 0, len(links))
+	for _, l := range links {
+		if l.Hash != "" && l.Seq > 0 {
+			chained = append(chained, l)
+		}
+	}
+	r.Chained = len(chained)
+	if len(chained) == 0 {
+		r.Status, r.Detail = "none", "every pushed row predates the chain (legacy); nothing to verify"
+		return r
+	}
+	sort.SliceStable(chained, func(i, j int) bool { return chained[i].Seq < chained[j].Seq })
+	r.FirstSeq, r.LastSeq = chained[0].Seq, chained[len(chained)-1].Seq
+	var gap string
+	for i := 1; i < len(chained); i++ {
+		prev, cur := chained[i-1], chained[i]
+		switch {
+		case cur.Seq == prev.Seq:
+			if cur.Hash != prev.Hash {
+				r.Status = "fork"
+				r.Detail = fmt.Sprintf("seq %d arrived twice with different hashes (%s, %s)", cur.Seq, prev.ID, cur.ID)
+				return r
+			}
+		case cur.Seq == prev.Seq+1:
+			if cur.Prev != prev.Hash {
+				r.Status = "fork"
+				r.Detail = fmt.Sprintf("seq %d (%s) does not link to seq %d: history diverged at seq %d", cur.Seq, cur.ID, prev.Seq, prev.Seq)
+				return r
+			}
+		default:
+			if gap == "" {
+				gap = fmt.Sprintf("seq %d to %d not received", prev.Seq+1, cur.Seq-1)
+			}
+		}
+	}
+	if gap != "" {
+		r.Status, r.Detail = "gap", gap
+		return r
+	}
+	r.Status = LinkageVerifiedOverPushed
+	r.Detail = fmt.Sprintf("seq %d to %d received and continuous", r.FirstSeq, r.LastSeq)
 	return r
 }

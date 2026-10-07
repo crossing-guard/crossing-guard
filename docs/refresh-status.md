@@ -1,4 +1,78 @@
-# Local integration candidate — September 25, 2026
+# Source refresh — October 5, 2026
+
+This repository now holds a filtered export of upstream revision
+`5607e50889b7408560b264a98070c6f3eea907a8`. It replaces the September 25 snapshot
+(`a65d4055`, published as `c26a2cc8`). It is an experimental public source snapshot,
+not a supported installed alpha or binary download.
+
+## What changed in how this tree is made
+
+The September snapshot was assembled by hand and had drifted from upstream: several
+fixes existed only here. Those fixes were ported upstream first, so this tree is now a
+direct export of the upstream source folders plus the publication documents in this
+repository. Sample data in tests and help text was replaced upstream with neutral
+samples before the export.
+
+## What is new since September
+
+- Database schema 46 (was 32).
+- Recall tools over a local MCP server (`crossing-guard mcp`, `init --recall`).
+- A team server client: `crossing-guard link`, a sync outbox, and memory by scope. A
+  linked device sends records to the team server its user names. The server is a
+  separate project and is not in this repository. An unlinked device sends nothing to
+  a team server.
+- Usage history from local session files, session views and boards, model routes,
+  provider-outage handling for managed agents, an Antigravity transcript reader and
+  Antigravity CLI chat through the shared provider contract.
+- The safety-starter rulebook has six rules (adds `team-link-change`).
+- The agent executable resolver (`ResolveRuntimeBinary`) has one home, in
+  `internal/guardcli`. Other lookups of unrelated tools are unchanged.
+
+## Verified for this refresh
+
+- **Local quality gate: PASS**, October 5, on the export of `2c118232`. The pin then
+  moved twice, to `5607e508`. The first move changed only test fixture values and
+  documents. The second added Antigravity CLI chat and a session-presence fix (41
+  files outside design documents). Every lint stage and the tests of the changed
+  packages were rerun and pass; the hosted run covers the whole gate again. The local run covered: formatting, vet,
+  errcheck, staticcheck, browser syntax and unit suites, the shape, module-graph,
+  API-contract, vendor and name lints, and race tests across the main module and both
+  analyzer modules.
+- **Build:** the application and both analyzers build with `-mod=readonly`.
+- **Upgrade trial:** a store created and seeded by the published September build
+  (schema 32: one rulebook selection, four observed tool calls, one session state and
+  checkpoint) was opened by this build. It migrated to schema 46 with every seeded row
+  kept, `export` wrote a schema-46 snapshot, and the September build then refused the
+  upgraded store instead of opening it. The pre-upgrade copy stayed readable at 32.
+- **Scratch daemon:** with a fresh home, `--no-hook-install` and an unused loopback
+  port: `doctor`, `init --dry-run`, `check`, `coverage`; HTTP 200 with the token and 401
+  without it or with a wrong one; in a browser, Sessions, Governance (showing the
+  seeded session and its four events), the not-connected screen for a wrong key, and
+  recovery with the right one.
+
+These are isolated checks on disposable data. They do not establish a natural
+installed-client journey.
+
+## Release gates still open
+
+- A natural installed coding-agent journey (install, recovery, uninstall) on a clean
+  macOS account, on the exact release artifact.
+- Hosted verification of this refresh.
+- A secret scan with a dedicated scanner; none was run for this refresh. A scan for
+  private names, business sample data and captured session ids was run and is clean. GitHub push
+  protection remains enabled.
+- Executable notice closure and package metadata for a distribution archive.
+- Draft schemas remain drafts; inclusion does not make one a wire contract.
+- `crossing-guard init` prints "nothing leaves this machine" beside the data
+  directory. That is true of an unlinked device and is not yet reworded for a linked one.
+
+No provider account, installed hook or live service was changed by this refresh.
+
+---
+
+# Earlier record
+
+## Local integration candidate — September 25, 2026
 
 This separate source snapshot integrates upstream revision
 `a65d4055969c19d6831e091f96527a5c89e2b1c7` with the reviewed local release fixes.
@@ -43,7 +117,7 @@ The public GitHub repository holds this experimental source snapshot. Web commit
 and private vulnerability reporting are enabled. See [release policy](release-policy.md)
 and [data/recovery scope](data-and-recovery.md).
 
-## September 27 public CI repair
+### September 27 public CI repair
 
 The first hosted source check for published revision `c26a2cc8` failed four doctor tests
 and two natural-session tests. The doctor fixture depended on a developer-installed

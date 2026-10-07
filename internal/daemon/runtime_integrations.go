@@ -27,6 +27,7 @@ func registerRuntimeIntegrationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/runtime-integrations/{runtime}/watch", handleRuntimeIntegrationWatchStart)
 	mux.HandleFunc("GET /api/runtime-integrations/{runtime}/watch/{token}", handleRuntimeIntegrationWatchGet)
 	mux.HandleFunc("POST /api/runtime-integrations/{runtime}/watch/{token}/confirm-visible", handleRuntimeIntegrationWatchConfirmVisible)
+	registerRuntimeStatusRoutes(mux)
 }
 
 func handleRuntimeIntegrations(w http.ResponseWriter, _ *http.Request) {
@@ -114,6 +115,9 @@ func handleRuntimeIntegrationCommit(w http.ResponseWriter, r *http.Request, oper
 	} else {
 		result, err = guardcli.DisconnectRuntime(entry.Runtime, executable, entry.Digest)
 	}
+	// A connection changed (or may have, on a partial failure): the runtime
+	// status read must not answer from observations taken before it.
+	dropRuntimeObservationCache()
 	if err != nil {
 		writeGuardConnectionError(w, err, &result)
 		return

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:private-ai-control-plane:schema:model-data-handling:0.1-draft",
+  "$id": "urn:crossing-guard:schema:model-data-handling:0.1-draft",
   "title": "Model data-handling record",
   "description": "One sourced, dated claim about how a specific model, on a specific host/access path, handles inference data. Powers the trade-off explainer. A record is a per-(model, host, condition) posture, not a per-host verdict.",
   "type": "object",

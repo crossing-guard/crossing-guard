@@ -10,6 +10,7 @@ package harvest
 import (
 	"encoding/json"
 	"os"
+	"strings"
 )
 
 // applyCodexSessionMetaLineage reads the observed lineage facts out of one
@@ -101,6 +102,20 @@ func (codexRuntime) Lineage(s SessionSummary) (LineageFacts, bool) {
 // resumable), for a primary its own. Canonical identity diverges for children
 // (CanonicalID above); the resume affordance must not.
 func (codexRuntime) ResumeID(s SessionSummary) string { return s.ThreadID }
+
+// NativeOpen: the desktop app's thread route takes a lowercase thread uuid
+// (measured 2026-10-03, Codex Desktop 26.928.31416). A subagent's thread is
+// its parent's, so a link there would open the parent and say otherwise.
+func (rt codexRuntime) NativeOpen(s SessionSummary) (NativeOpenLink, bool) {
+	if s.LineageKind != "" {
+		return NativeOpenLink{}, false
+	}
+	thread := rt.CanonicalID(s)
+	if !looksLikeUUID(thread) || thread != strings.ToLower(thread) {
+		return NativeOpenLink{}, false
+	}
+	return NativeOpenLink{URL: "codex://threads/" + thread, App: "Codex"}, true
+}
 
 // TurnAnchor: the normalizer already composed the anchor from the flat
 // envelope's turn_id; absent one, this vendor cannot anchor that event.

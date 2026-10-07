@@ -24,6 +24,9 @@ const (
 	InputMediaTypeJSON    = "application/json; charset=utf-8"
 	MaxRetainedInput      = 1 << 20
 	MaxEnvelopeBytes      = 2 << 20
+	// MaxNativeSourceBytes bounds an envelope's native_source provenance; the
+	// daemon rejects a longer one.
+	MaxNativeSourceBytes = 128
 	// Direct capture must expire before the hook's entire delivery budget; otherwise
 	// the hook could release the tool while a later snapshot was still labeled as a
 	// pre-release boundary.
@@ -74,7 +77,23 @@ type SessionEntryEnvelope struct {
 	QueuedAt         int64  `json:"queued_at"`
 	DeliveryAttempts int    `json:"delivery_attempts"`
 	DeliveryMode     string `json:"delivery_mode"`
+	// HandoffTicket is the open ticket the launching process carried in its
+	// environment (HandoffTicketEnv), copied here by the lifecycle hook when
+	// present: the session this entry opens was started by a console Open of a
+	// handoff. Omitted when empty, so an entry without one keeps the digest it
+	// always had.
+	HandoffTicket string `json:"handoff_ticket,omitempty"`
 }
+
+// HandoffTicketEnv is the environment variable a console Open sets on the first
+// turn's process and on nothing else. The lifecycle hook copies it into the
+// session entry; the daemon removes it from its own environment at start-up
+// and from every environment it builds for a runtime process.
+const HandoffTicketEnv = "CG_HANDOFF_TICKET"
+
+// MaxHandoffTicketBytes bounds the copied value: a ticket id is a short typed
+// id, and anything longer is not one.
+const MaxHandoffTicketBytes = 64
 
 // SessionEntryReceipt confirms durable activity storage and the bounded attachment
 // checkpoint attempted before the start hook was released.
@@ -124,10 +143,11 @@ type SessionTurnEnvelope struct {
 	QueuedAt         int64  `json:"queued_at"`
 	DeliveryAttempts int    `json:"delivery_attempts"`
 	DeliveryMode     string `json:"delivery_mode"`
-	// Carrier says this client can print injected context for the session's
-	// runtime (a hook installer with a context encoder, or a plugin that
-	// captured stdout). The daemon hands pending helper messages only to a
-	// carrier; a boundary that cannot carry leaves them pending until expiry.
+	// Carrier says this client can print injected context into the session's
+	// own conversation (a hook installer with a context encoder, or a plugin
+	// that captured stdout; never a hook its runtime reports as inside a
+	// sub-agent, whose output reaches only the sub-agent). The daemon hands pending helper messages only
+	// to a carrier; a boundary that cannot carry leaves them pending until expiry.
 	// Excluded from the digest: transport capability is not evidence.
 	Carrier bool `json:"carrier,omitempty"`
 }
@@ -224,10 +244,11 @@ type ResultEnvelope struct {
 	QueuedAt             int64          `json:"queued_at"`
 	DeliveryAttempts     int            `json:"delivery_attempts"`
 	DeliveryMode         string         `json:"delivery_mode"`
-	// Carrier says this client can print injected context for the session's
-	// runtime (a hook installer with a context encoder, or a plugin that
-	// captured stdout). The daemon hands pending helper messages only to a
-	// carrier; a boundary that cannot carry leaves them pending until expiry.
+	// Carrier says this client can print injected context into the session's
+	// own conversation (a hook installer with a context encoder, or a plugin
+	// that captured stdout; never a hook its runtime reports as inside a
+	// sub-agent, whose output reaches only the sub-agent). The daemon hands pending helper messages only
+	// to a carrier; a boundary that cannot carry leaves them pending until expiry.
 	// Excluded from the digest: transport capability is not evidence.
 	Carrier bool `json:"carrier,omitempty"`
 }
@@ -322,7 +343,19 @@ type Envelope struct {
 	Skill            string   `json:"skill,omitempty"`
 	Decision         string   `json:"decision,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
-	TS               int64    `json:"ts,omitempty"`
+	// Rule is the rule that produced or asked for Decision. It is evidence, so it is inside
+	// the digest; omitempty keeps every envelope written before the field existed — and
+	// every spool file still waiting to replay — at the digest it always had.
+	Rule string `json:"rule,omitempty"`
+	// Layer is the distribution tier that rule arrived by (schema 38): user |
+	// repository | organization. The same evidence-and-digest rule as Rule: inside the
+	// digest, omitempty so every older envelope and spool file keeps its digest.
+	Layer string `json:"layer,omitempty"`
+	// LayerReasons carries the layered loader's notes (an expired layer, one that
+	// failed to parse, a checkout whose repository layer is not yet staged) — a
+	// separate fact from the tier enum, inside the digest by the same rule.
+	LayerReasons string `json:"layer_reasons,omitempty"`
+	TS           int64  `json:"ts,omitempty"`
 	// ToolInput is encoded as base64 by encoding/json so the exact vendor bytes,
 	// including insignificant JSON whitespace, survive the outer wire envelope.
 	ToolInput             []byte          `json:"tool_input_payload,omitempty"`
@@ -333,10 +366,11 @@ type Envelope struct {
 	QueuedAt              int64           `json:"queued_at"`
 	DeliveryAttempts      int             `json:"delivery_attempts"`
 	DeliveryMode          string          `json:"delivery_mode"`
-	// Carrier says this client can print injected context for the session's
-	// runtime (a hook installer with a context encoder, or a plugin that
-	// captured stdout). The daemon hands pending helper messages only to a
-	// carrier; a boundary that cannot carry leaves them pending until expiry.
+	// Carrier says this client can print injected context into the session's
+	// own conversation (a hook installer with a context encoder, or a plugin
+	// that captured stdout; never a hook its runtime reports as inside a
+	// sub-agent, whose output reaches only the sub-agent). The daemon hands pending helper messages only
+	// to a carrier; a boundary that cannot carry leaves them pending until expiry.
 	// Excluded from the digest: transport capability is not evidence.
 	Carrier bool `json:"carrier,omitempty"`
 }

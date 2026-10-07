@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -387,6 +388,87 @@ func TestTaskDeltaBufferCoalescesChunks(t *testing.T) {
 	case extra := <-flushed:
 		t.Fatalf("delta flushed more than once: %+v", extra)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestTaskIngestFlushesDraftsBeforeCompletedTextAndTools(t *testing.T) {
+	service := installTestRuntimeTasks(t)
+	task, _, _, err := service.repository.Create(taskCreateRecord{ID: "ordered-stream-task",
+		ConsoleScope: "fixture", IdempotencyKey: "ordered-stream-key", RequestDigest: "fixture",
+		Runtime: "future-fixture", WorkingDirectory: t.TempDir(), CreatedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []ChatEvent{
+		{"type": "delta", "text": "a"}, {"type": "delta", "text": " b"},
+		{"type": "text", "text": "a b"}, {"type": "thinking_delta", "text": "thinking"},
+		{"type": "tool", "name": "fixture-tool"}, {"type": "delta", "text": "tail"},
+		{"type": "text", "text": "final"},
+	} {
+		service.ingest(task.ID, task.Runtime, event)
+	}
+	service.deltas.FlushTask(task.ID)
+	events, err := service.Events(task.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"task.queued", "message.delta", "message.completed", "reasoning.delta", "tool.started", "message.delta", "message.completed"}
+	if len(events) != len(want) {
+		t.Fatalf("events=%+v", events)
+	}
+	for i, kind := range want {
+		if events[i].Kind != kind {
+			t.Fatalf("event %d=%s want=%s", i, events[i].Kind, kind)
+		}
+	}
+	if events[1].Payload["text"] != "a b" || events[5].Payload["text"] != "tail" {
+		t.Fatalf("coalesced drafts=%+v", events)
+	}
+}
+
+func TestTaskDeltaFlushWaitsForInFlightTimerPublication(t *testing.T) {
+	entered, release, settled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	buffer := NewTaskDeltaBuffer(func(_, _, _ string, _ ChatEvent) {
+		close(entered)
+		<-release
+	})
+	buffer.Add("task", "fixture", "message.delta", ChatEvent{"type": "delta", "text": "draft"})
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timer did not publish")
+	}
+	go func() { buffer.FlushTask("task"); close(settled) }()
+	select {
+	case <-settled:
+		t.Fatal("flush returned before timer publication settled")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblock()
+	select {
+	case <-settled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("flush did not settle")
+	}
+}
+
+func TestTaskDeltaExpiredTimerCannotFlushReplacementDraft(t *testing.T) {
+	var texts []string
+	buffer := NewTaskDeltaBuffer(func(_, _, _ string, event ChatEvent) { texts = append(texts, anyString(event["text"])) })
+	key := "task\x00message.delta"
+	buffer.Add("task", "fixture", "message.delta", ChatEvent{"type": "delta", "text": strings.Repeat("a", taskDeltaFlushBytes)})
+	buffer.mu.Lock()
+	old := buffer.entries[key]
+	old.timer.Stop()
+	buffer.mu.Unlock()
+	buffer.Add("task", "fixture", "message.delta", ChatEvent{"type": "delta", "text": "new"})
+	buffer.flushKey(key, old)
+	buffer.FlushTask("task")
+	if len(texts) != 2 || len(texts[0]) != taskDeltaFlushBytes || texts[1] != "new" {
+		t.Fatalf("replacement draft was lost: count=%d", len(texts))
 	}
 }
 

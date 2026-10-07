@@ -1,8 +1,10 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,9 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
+	"crossing-guard/harvest"
 	"crossing-guard/internal/guardcli"
 	"crossing-guard/internal/taskinput"
 )
@@ -38,7 +39,7 @@ func (openCodeChatDriver) ChatCapability() ChatCapability {
 		CanSignIn: false, VendorAuthDefault: false, AcceptsCustomModel: true,
 		ModelHint: "provider/model (for example ollama/qwen2.5-coder:7b)",
 		Modes: []ChatMode{
-			{ID: "", Label: "Default", Risk: "normal", Description: "OpenCode's configured agent and permissions apply; permission prompts are refused, never auto-approved."},
+			{ID: "", Label: "Default", Risk: "normal", Description: "OpenCode's configured agent and permissions apply; permission requests wait in the Crossing Guard approvals inbox."},
 			{ID: openCodeVisionMode, Label: "Vision (no tools)", Risk: "normal", Description: "Uses the no-tools vision-proof agent from global OpenCode configuration; refused unless it is defined there as a primary agent. Project configuration and extra arguments are not used."},
 		},
 		Models: []ChatModelOption{
@@ -47,9 +48,9 @@ func (openCodeChatDriver) ChatCapability() ChatCapability {
 		},
 		Inputs: []ChatInputCapability{
 			{Kind: "text", MediaTypes: []string{"text/plain"}, CanStart: true, CanResume: true,
-				Note: "Delivered through OpenCode's ordered --file transport."},
+				Note: "Delivered through OpenCode's ordered file parts."},
 			{Kind: "image", MediaTypes: []string{"image/png"}, CanStart: true, CanResume: true,
-				ModelConditional: true, ModeConditional: true, Note: "Requires the proved vision model and the no-tools vision-proof agent, both in global OpenCode configuration."},
+				ModelConditional: true, CatalogRequired: true, ModeConditional: true, Note: "Requires a model OpenCode reports as accepting images, and the no-tools vision-proof agent in global OpenCode configuration."},
 		},
 	}
 }
@@ -59,8 +60,12 @@ func (openCodeChatDriver) ValidateChatInputs(req ChatRequest, inputs []taskinput
 		switch input.Kind {
 		case taskinput.KindText:
 		case taskinput.KindImage:
-			if req.Model != "ollama/qwen2.5vl:3b" || req.Mode != openCodeVisionMode {
-				return fmt.Errorf("opencode image input requires model ollama/qwen2.5vl:3b and the vision-proof mode")
+			// Which models accept images is OpenCode's fact, checked against its
+			// own model list by the framework before this runs (design §5.3).
+			// The adapter keeps its safety rule: a concrete model and the
+			// no-tools agent.
+			if req.Model == "" || req.Mode != openCodeVisionMode {
+				return fmt.Errorf("opencode image input requires a model chosen from OpenCode's list and the vision-proof mode")
 			}
 		default:
 			return fmt.Errorf("opencode does not support task input kind %q", input.Kind)
@@ -70,36 +75,27 @@ func (openCodeChatDriver) ValidateChatInputs(req ChatRequest, inputs []taskinput
 }
 
 func (openCodeChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exec.Cmd, error) {
+	if err := validateOpenCodeTransportRequest(req); err != nil {
+		return nil, err
+	}
+	if launch.TaskID == "" || launch.DataDir == "" {
+		return nil, fmt.Errorf("OpenCode approvals require daemon task identity and data directory")
+	}
 	bin, err := guardcli.ResolveRuntimeBinary("opencode", req.Binary)
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"run", "--format", "json", "--dir", req.Cwd}
-	if req.SessionID != "" {
-		args = append(args, "--session", req.SessionID)
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("prepare OpenCode server authentication: %w", err)
 	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	if req.Mode != "" {
-		args = append(args, "--agent", req.Mode)
-	}
-	for _, input := range launch.Inputs {
-		args = append(args, "--file", input.Path)
-	}
-	extra, err := openCodeExtraArgs(req)
-	if err != nil {
-		return nil, err
-	}
-	args = append(args, extra...)
-	// --file is variadic: without the terminator it swallows the prompt (S0-1).
-	args = append(args, "--", req.Prompt)
-	cmd := exec.Command(bin, args...)
+	cmd := exec.Command(bin, "serve", "--hostname", "127.0.0.1", "--port", "0")
 	cmd.Dir = req.Cwd
-	cmd.Env = os.Environ()
+	// A handoff cannot be opened in OpenCode in this release (OD-7b), so this
+	// launch is built with no ticket whatever the request carries.
+	cmd.Env = withoutEnv(chatLaunchEnv(ChatRequest{}), "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME")
+	cmd.Env = append(cmd.Env, "OPENCODE_SERVER_USERNAME=opencode", "OPENCODE_SERVER_PASSWORD="+hex.EncodeToString(secret))
 	if req.Mode == openCodeVisionMode {
-		// The run sees only the global configuration the agent check read, so a
-		// repository cannot redefine or demote the agent the mode rests on.
 		cmd.Env = append(cmd.Env, openCodeGlobalConfigOnly)
 	}
 	return cmd, nil
@@ -117,7 +113,7 @@ const openCodeGlobalConfigOnly = "OPENCODE_DISABLE_PROJECT_CONFIG=1"
 // warning, when the requested agent is missing or is a subagent — so the vision
 // mode is admitted only after the binary that will run confirms the agent.
 func (openCodeChatDriver) CanonicalizeChatRequest(req ChatRequest) (ChatRequest, error) {
-	if _, err := openCodeExtraArgs(req); err != nil {
+	if err := validateOpenCodeTransportRequest(req); err != nil {
 		return ChatRequest{}, err
 	}
 	if req.Mode == openCodeVisionMode {
@@ -132,83 +128,24 @@ func (openCodeChatDriver) CanonicalizeChatRequest(req ChatRequest) (ChatRequest,
 	return req, nil
 }
 
-// openCodeExtraOptions are the only run options extra arguments may carry, and
-// whether each takes a value. Measured on OpenCode 1.18.0: none of them approves
-// a permission prompt or touches plugins, the server or egress. --agent picks
-// among already-configured agents (so their configured permissions), and is
-// refused when a mode makes it BuildCmd's own slot. An
-// allowlist, because yargs accepts every option under camel-case, negated,
-// dotted, `=` and repeated spellings, and 1.18 hides two aliases of --auto
-// (--yolo, --dangerously-skip-permissions) that approve every permission prompt.
-// Interim: provider-owned-chat-options-plan.md replaces raw extra arguments.
-var openCodeExtraOptions = map[string]bool{
-	"--agent":    true,
-	"--variant":  true,
-	"--title":    true,
-	"--thinking": false,
+func validateOpenCodeTransportRequest(req ChatRequest) error {
+	if strings.TrimSpace(req.ExtraArgs) != "" {
+		return errors.New("OpenCode GUI extra_args are unsupported by the interactive approval transport")
+	}
+	if req.Model != "" {
+		provider, model, ok := strings.Cut(req.Model, "/")
+		if !ok || provider == "" || model == "" {
+			return errors.New("OpenCode model must be provider/model")
+		}
+	}
+	if req.SessionID != "" && !openCodeWireID(req.SessionID, "ses_") {
+		return errors.New("invalid OpenCode session id")
+	}
+	return nil
 }
 
-// openCodeExtraValueMaxBytes bounds one option value; a validation limit, not a tunable.
-const openCodeExtraValueMaxBytes = 200
-
-// openCodeExtraArgs returns the extra-argument tokens, verbatim, when every one
-// fits the allowlist. A refusal names the first misfit by position and never
-// quotes it: a token such as --model contains "mode", which handleChat routes to
-// the mode control.
-func openCodeExtraArgs(req ChatRequest) ([]string, error) {
-	tokens := splitArgs(req.ExtraArgs)
-	if req.Mode == openCodeVisionMode && len(tokens) > 0 {
-		// A denylist cannot hold here: --no-agent, --agent.x=y, --command and
-		// --attach each move the turn to another agent after the check passed.
-		return nil, errors.New("the vision-proof mode does not accept extra arguments")
-	}
-	const where = " (Settings → extra args for OpenCode, or the request's extra_args)"
-	seen := map[string]bool{}
-	for i := 0; i < len(tokens); i++ {
-		position := i + 1
-		if tokens[i] == "--" {
-			return nil, errors.New(`extra arguments cannot contain a bare "--"; the adapter owns the prompt boundary`)
-		}
-		name, value, inline := strings.Cut(tokens[i], "=")
-		takesValue, known := openCodeExtraOptions[name]
-		switch {
-		case !known || (inline && !takesValue):
-			return nil, fmt.Errorf("opencode extra arguments accept only --agent, --variant, --title (each with a value) and --thinking; argument %d is not accepted"+where, position)
-		case name == "--agent" && req.Mode != "":
-			// BuildCmd emits its own --agent for a mode; two become an array,
-			// which OpenCode cannot resolve and answers with its default agent.
-			return nil, fmt.Errorf("opencode extra arguments cannot set --agent when a mode selects the agent; argument %d"+where, position)
-		case seen[name]:
-			return nil, fmt.Errorf("opencode extra arguments accept each option once; argument %d repeats one"+where, position)
-		case takesValue && !inline:
-			if i+1 == len(tokens) || strings.HasPrefix(tokens[i+1], "-") {
-				return nil, fmt.Errorf("opencode extra arguments need a value after argument %d"+where, position)
-			}
-			i++
-			value = tokens[i]
-		}
-		if takesValue && !openCodeExtraValueOK(value) {
-			if value == "" {
-				return nil, fmt.Errorf("opencode extra arguments need a value after argument %d"+where, position)
-			}
-			return nil, fmt.Errorf("opencode extra argument %d has a value that is too long, not UTF-8, or contains control characters"+where, position)
-		}
-		seen[name] = true
-	}
-	return tokens, nil
-}
-
-// openCodeExtraValueOK refuses before admission what exec would refuse after it
-// (NUL) and what would land in session titles (terminal escapes).
-func openCodeExtraValueOK(value string) bool {
-	if value == "" || len(value) > openCodeExtraValueMaxBytes || !utf8.ValidString(value) {
-		return false
-	}
-	return !strings.ContainsFunc(value, unicode.IsControl)
-}
-
-// Bounds of the interim agent check. Test seams only, not configuration: the
-// runtime model catalog plan replaces this check with its configured runner.
+// Bounds of the agent check. Test seams only, not configuration: a per-request
+// check whose limits are safety bounds, not tunables.
 var (
 	openCodeAgentListTimeout   = 10 * time.Second
 	openCodeAgentListWaitDelay = time.Second
@@ -220,40 +157,38 @@ var (
 // never decoded.
 var openCodeAgentHeader = regexp.MustCompile(`^([^\s\[\]{}"]+) \((primary|subagent|all)\)$`)
 
-// openCodeAgentAvailable runs `agent list` from a neutral directory with global
-// configuration only, and returns nil only when exactly one header names the
-// agent as primary or all. Every other outcome refuses.
+// openCodeAgentAvailable runs `agent list` through the framework's bounded
+// runner, from a neutral directory with global configuration only, and returns
+// nil only when exactly one header names the agent as primary or all. Every
+// other outcome refuses. It checks the binary the request will run, so it stays
+// per request rather than reading the model-discovery cache.
 func openCodeAgentAvailable(bin, name string) error {
 	refuse := func(reason string) error {
 		return fmt.Errorf("the %s mode needs an OpenCode agent named %q in global OpenCode configuration (%s)", name, name, reason)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeAgentListTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "agent", "list")
-	cmd.Dir = os.TempDir()
-	cmd.Env = append(os.Environ(), openCodeGlobalConfigOnly)
-	cmd.WaitDelay = openCodeAgentListWaitDelay
-	prepareTaskProcess(cmd)
-	cmd.Cancel = func() error { return interruptTaskProcess(cmd) }
-	// A writer rather than a pipe: Wait and WaitDelay then bound a child that
-	// keeps stdout open, which a read loop of our own would wait on forever.
-	stdout := &openCodeBoundedOutput{max: openCodeAgentListMaxBytes, overflowed: cancel}
-	cmd.Stdout = stdout
-	if err := cmd.Start(); err != nil {
-		return refuse("the agent list could not be read: start failed")
+	runner := boundedRunner{ctx: ctx, workDir: os.TempDir(), maxBytes: int64(openCodeAgentListMaxBytes),
+		waitDelay: openCodeAgentListWaitDelay}
+	cmd := exec.Command(bin, "agent", "list")
+	cmd.Env = chatLaunchEnv(ChatRequest{})
+	cmd.Env = append(cmd.Env, openCodeGlobalConfigOnly)
+	out, err := runner.Run(cmd)
+	if err != nil {
+		switch modelDiscoveryReason(err) {
+		case modelReasonTooLarge:
+			return refuse("the agent list could not be read: output exceeded its bound")
+		case modelReasonTimedOut:
+			return refuse("the agent list could not be read: timed out")
+		case modelReasonExited:
+			return refuse("the agent list could not be read: exited with an error")
+		case modelReasonWorkDirInRepo:
+			return refuse("the agent list could not be read: the temporary directory is inside a repository")
+		default:
+			return refuse("the agent list could not be read: start failed")
+		}
 	}
-	waitErr := cmd.Wait()
-	switch {
-	case stdout.overflow:
-		return refuse("the agent list could not be read: output exceeded its bound")
-	case ctx.Err() != nil:
-		return refuse("the agent list could not be read: timed out")
-	case errors.Is(waitErr, exec.ErrWaitDelay):
-		return refuse("the agent list could not be read: its output stayed open after exit")
-	case waitErr != nil:
-		return refuse("the agent list could not be read: exited with an error")
-	}
-	modes, listed := openCodeAgentModes(stdout.buf.Bytes(), name)
+	modes, listed := openCodeAgentModes(out, name)
 	switch {
 	case listed == 0:
 		return refuse("the agent list could not be read: no agents listed")
@@ -265,27 +200,6 @@ func openCodeAgentAvailable(bin, name string) error {
 		return refuse("it is defined as a subagent, so OpenCode would fall back to its default agent")
 	}
 	return nil
-}
-
-// openCodeBoundedOutput keeps at most max bytes and stops the process at the
-// first byte past it; a truncated list is never parsed.
-type openCodeBoundedOutput struct {
-	buf        bytes.Buffer
-	max        int
-	overflow   bool
-	overflowed func()
-}
-
-func (out *openCodeBoundedOutput) Write(p []byte) (int, error) {
-	if out.overflow {
-		return len(p), nil
-	}
-	if room := out.max - out.buf.Len(); len(p) > room {
-		out.overflow = true
-		out.overflowed()
-		return len(p), nil
-	}
-	return out.buf.Write(p)
 }
 
 // openCodeAgentModes returns the mode of every header naming the agent, and how
@@ -310,9 +224,19 @@ func (openCodeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 	var out []ChatEvent
 	add := func(event ChatEvent) { out = append(out, event) }
 	typeName := anyString(obj["type"])
-	part, _ := obj["part"].(map[string]any)
+	nested, _ := obj["part"].(map[string]any)
+	part := nested
 	if part == nil {
 		part = obj
+	}
+	// The part id is the record identity OpenCode's stored transcript carries
+	// too, so the console can skip the stored copy of what it drew live. Only
+	// a real nested part has one.
+	anchored := func(event ChatEvent) ChatEvent {
+		if id := anyString(nested["id"]); id != "" {
+			event["anchor"] = id
+		}
+		return event
 	}
 	switch typeName {
 	case "step_start", "step-start":
@@ -320,9 +244,9 @@ func (openCodeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 			add(ChatEvent{"type": "session", "id": id})
 		}
 	case "text":
-		add(ChatEvent{"type": "text", "text": anyString(part["text"])})
+		add(anchored(ChatEvent{"type": "text", "text": anyString(part["text"])}))
 	case "reasoning", "thinking":
-		add(ChatEvent{"type": "thinking", "text": anyString(part["text"])})
+		add(anchored(ChatEvent{"type": "thinking", "text": anyString(part["text"])}))
 	case "tool", "tool_use":
 		name := anyString(part["tool"])
 		state, _ := part["state"].(map[string]any)
@@ -330,7 +254,7 @@ func (openCodeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 		if state != nil && input == nil {
 			input = state["input"]
 		}
-		add(ChatEvent{"type": "tool", "name": name, "text": truncate(compactJSON(input), 600)})
+		add(anchored(ChatEvent{"type": "tool", "name": name, "text": truncate(compactJSON(input), 600)}))
 		if state != nil {
 			result := anyString(state["output"])
 			isError := false
@@ -339,22 +263,21 @@ func (openCodeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 				isError = result != ""
 			}
 			if result != "" {
-				add(ChatEvent{"type": "tool_result", "text": truncate(result, 600), "is_error": isError})
+				add(anchored(ChatEvent{"type": "tool_result", "text": truncate(result, 600), "is_error": isError}))
 			}
 		}
 	case "tool_result":
 		isError, _ := part["is_error"].(bool)
 		add(ChatEvent{"type": "tool_result", "text": truncate(anyString(part["text"]), 600), "is_error": isError})
 	case "step_finish", "step-finish":
-		cost := obj["cost"]
-		if cost == nil {
-			cost = part["cost"]
-		}
-		add(ChatEvent{"type": "result", "cost": cost, "usage": part["tokens"]})
+		add(usageEvent(openCodeStepUsage(obj, part)))
 	case "error":
 		message := anyString(obj["message"])
 		if message == "" {
-			message = anyString(part["error"])
+			message = openCodeErrorText(obj["error"])
+			if message == "" {
+				message = openCodeErrorText(part["error"])
+			}
 		}
 		if isVendorAuthFailure(message) {
 			add(ChatEvent{"type": "auth_required", "runtime": "opencode", "text": "Authenticate the configured OpenCode provider and retry this turn."})
@@ -367,4 +290,147 @@ func (openCodeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 		add(ChatEvent{"type": "stderr", "text": "Unrecognized OpenCode event type: " + truncate(typeName, 80)})
 	}
 	return out
+}
+
+// DiscoverChatModels lists the models OpenCode reports as usable under global
+// configuration (plan §2.2). Everything OpenCode-shaped stays here: the
+// command, its switches, the header-then-object output of --verbose (1.18.0),
+// the provider/model id grammar, and zero meaning "stated as zero" (D-6).
+func (openCodeChatDriver) DiscoverChatModels(_ context.Context, env ChatModelEnv) (ChatModelDiscovery, error) {
+	discovery := ChatModelDiscovery{Scope: "OpenCode global configuration (project configuration and plugins excluded)"}
+	bin, err := guardcli.ResolveRuntimeBinary("opencode", "")
+	if err != nil {
+		return discovery, modelDiscoveryFailure(modelReasonNotInstalled)
+	}
+	discovery.Binary = bin
+	cmd := exec.Command(bin, "models", "--verbose", "--pure")
+	cmd.Env = chatLaunchEnv(ChatRequest{}) // a model listing: no ticket
+	cmd.Env = append(cmd.Env, openCodeGlobalConfigOnly, "OPENCODE_DISABLE_MODELS_FETCH=1",
+		"OPENCODE_DISABLE_AUTOUPDATE=1")
+	out, err := env.Run(cmd)
+	if err != nil {
+		return discovery, err
+	}
+	discovery.Models, discovery.Rejected, err = parseOpenCodeVerboseModels(out)
+	return discovery, err
+}
+
+// openCodeVerboseModel declares only the fields the adapter maps. The api,
+// headers and options objects, which can hold credentials, are skipped by the
+// decoder and never kept.
+type openCodeVerboseModel struct {
+	Variants   map[string]json.RawMessage `json:"variants"`
+	ID         string                     `json:"id"`
+	ProviderID string                     `json:"providerID"`
+	Name       string                     `json:"name"`
+	Limit      struct {
+		Context int64 `json:"context"`
+		Input   int64 `json:"input"`
+		Output  int64 `json:"output"`
+	} `json:"limit"`
+	Cost *struct {
+		Input  float64 `json:"input"`
+		Output float64 `json:"output"`
+		Cache  struct {
+			Read  float64 `json:"read"`
+			Write float64 `json:"write"`
+		} `json:"cache"`
+	} `json:"cost"`
+	Capabilities struct {
+		Reasoning *bool           `json:"reasoning"`
+		Input     map[string]bool `json:"input"`
+	} `json:"capabilities"`
+}
+
+// parseOpenCodeVerboseModels reads `<provider>/<model>` header lines, each
+// followed by one pretty-printed JSON object that ends at a "}" line. A header
+// whose object does not decode, or does not name the header's model, is
+// counted as rejected; output that is not this shape at all is unparseable.
+func parseOpenCodeVerboseModels(out []byte) ([]ChatModelOption, int, error) {
+	lines := strings.Split(string(out), "\n")
+	models, rejected := []ChatModelOption{}, 0
+	for i := 0; i < len(lines); i++ {
+		header := strings.TrimSpace(lines[i])
+		if header == "" {
+			continue
+		}
+		if strings.HasPrefix(header, "{") || strings.HasPrefix(header, "}") || !strings.Contains(header, "/") ||
+			i+1 >= len(lines) || strings.TrimRight(lines[i+1], "\r") != "{" {
+			return nil, 0, modelDiscoveryFailure(modelReasonUnparseable)
+		}
+		end := i + 1
+		for end < len(lines) && strings.TrimRight(lines[end], "\r") != "}" {
+			end++
+		}
+		if end == len(lines) {
+			return nil, 0, modelDiscoveryFailure(modelReasonUnparseable)
+		}
+		var raw openCodeVerboseModel
+		if err := json.Unmarshal([]byte(strings.Join(lines[i+1:end+1], "\n")), &raw); err != nil ||
+			raw.ProviderID+"/"+raw.ID != header {
+			rejected++
+			i = end
+			continue
+		}
+		models = append(models, openCodeModelOption(header, raw))
+		i = end
+	}
+	if len(models) == 0 && rejected == 0 {
+		return nil, 0, modelDiscoveryFailure(modelReasonUnparseable)
+	}
+	return models, rejected, nil
+}
+
+func openCodeModelOption(id string, raw openCodeVerboseModel) ChatModelOption {
+	label := raw.Name
+	if label == "" {
+		label = raw.ID
+	}
+	option := ChatModelOption{ID: id, Label: label, Source: chatModelSourceRuntime,
+		Group: raw.ProviderID, GroupLabel: raw.ProviderID, Effort: openCodeEffort(raw.Variants, raw.Capabilities.Reasoning)}
+	positive := func(value int64) *int64 {
+		if value <= 0 {
+			return nil // OpenCode writes 0 for a limit it does not know
+		}
+		return &value
+	}
+	if limits := (ChatModelLimits{ContextTokens: positive(raw.Limit.Context), InputTokens: positive(raw.Limit.Input),
+		OutputTokens: positive(raw.Limit.Output)}); limits != (ChatModelLimits{}) {
+		option.Limits = &limits
+	}
+	for _, kind := range []taskinput.Kind{taskinput.KindText, taskinput.KindImage} {
+		if raw.Capabilities.Input[string(kind)] {
+			option.Inputs = append(option.Inputs, string(kind))
+		}
+	}
+	if cost := raw.Cost; cost != nil {
+		// D-6: OpenCode's stated rates, zero included; USD per 1M tokens.
+		option.Price = &ChatModelPrice{Unit: "USD", PerTokens: 1_000_000, Rates: []ChatModelRate{
+			{Class: "input", Amount: cost.Input}, {Class: "output", Amount: cost.Output},
+			{Class: "cache-read", Amount: cost.Cache.Read}, {Class: "cache-write", Amount: cost.Cache.Write}}}
+	}
+	return option
+}
+
+// openCodeStepUsage maps one step_finish into the neutral classes. Measured on
+// 1.18.0 (plan §4 step 0): each step reports only its own tokens (additive),
+// and OpenCode counts reasoning apart from output, so the neutral output is
+// their sum. Occupancy is this one call's input plus cache. Run events carry no
+// model id. Cost is OpenCode's stated figure, zero included (D-6).
+func openCodeStepUsage(obj, part map[string]any) ChatUsage {
+	tokens, _ := part["tokens"].(map[string]any)
+	cache, _ := tokens["cache"].(map[string]any)
+	input, output, reasoning := statedCount(tokens["input"]), statedCount(tokens["output"]), statedCount(tokens["reasoning"])
+	cacheRead, cacheWrite := statedCount(cache["read"]), statedCount(cache["write"])
+	usage := ChatUsage{Accumulation: usageAdditive, TokenClasses: harvest.TokenClasses{Input: input,
+		CacheRead: cacheRead, CacheWrite: cacheWrite, Output: sumStated(output, reasoning), Reasoning: reasoning},
+		ContextUsed: sumStated(input, cacheRead, cacheWrite)}
+	cost := obj["cost"]
+	if cost == nil {
+		cost = part["cost"]
+	}
+	if amount, ok := statedAmount(cost); ok {
+		usage.Cost = &harvest.Cost{Amount: amount, Unit: "USD", Basis: harvest.CostBasisRuntime}
+	}
+	return usage
 }

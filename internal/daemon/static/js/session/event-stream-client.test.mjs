@@ -132,3 +132,96 @@ test('a task cursor gap throws so the loop re-snapshots instead of rendering a h
   const client = new EventStreamClient({ ...stores, open: async (_, signal) => ({ body: held(signal) }) });
   assert.throws(() => client.dispatch({ feed: 'tasks', event: 'task', payload: { event_id: 9 } }, { event: 'tasks' }, new Set()), /cursor gap/);
 });
+
+// A stream that delivers its frames and then stays open, like a daemon whose
+// absent feed sent its `unavailable` frame and ended quietly.
+const framesThenHeld = (frames, signal) => new ReadableStream({
+  start(controller) {
+    for (const item of frames) controller.enqueue(new TextEncoder().encode(item));
+    signal?.addEventListener('abort', () => controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  },
+});
+const httpError = status => Object.assign(new Error('HTTP ' + status), { status });
+const taskReason = 'runtime task service unavailable: store schema is v99';
+
+// Degraded start (degraded-surfaces-state-the-reason plan §2.2): a feed whose
+// service is absent answers its opening snapshot with 503. The stream must open
+// anyway, so approvals and activity stay live and the feed's own frame names why.
+test('a 503 opening task snapshot opens the stream once and ends degraded with the reason', async () => {
+  const stores = fakeStores();
+  stores.snapshots.tasks = async () => { throw httpError(503); };
+  const states = [];
+  let attempts = 0;
+  const client = new EventStreamClient({ ...stores, notify: d => states.push([d.state, d.detail]), backoff: { base: 2 },
+    open: async (_, signal) => { attempts++; return { body: framesThenHeld([
+      frame('approvals', 'snapshot', { pending: [], history: [] }),
+      frame('tasks', 'unavailable', { error: taskReason }),
+    ], signal) }; } });
+  client.start();
+  await flush(60);
+  client.stop();
+  assert.equal(attempts, 1, 'no retry loop against an absent feed');
+  assert.deepEqual(states, [['connected', ''], ['degraded', taskReason]]);
+  assert.equal(stores.calls.approval.length, 1, 'approvals still arrive');
+});
+
+test('a 503 opening activity snapshot opens the stream the same way', async () => {
+  const stores = fakeStores();
+  stores.snapshots.activity = async () => { throw httpError(503); };
+  const states = [];
+  let attempts = 0;
+  const client = new EventStreamClient({ ...stores, notify: d => states.push(d.state), backoff: { base: 2 },
+    open: async (_, signal) => { attempts++; return { body: framesThenHeld([frame('activity', 'unavailable', { error: 'x' })], signal) }; } });
+  client.start();
+  await flush(60);
+  client.stop();
+  assert.equal(attempts, 1);
+  assert.deepEqual(states, ['connected', 'degraded']);
+});
+
+test('any other opening snapshot failure still reconnects with backoff', async () => {
+  const stores = fakeStores();
+  let snapshots = 0;
+  stores.snapshots.tasks = async () => { snapshots++; throw httpError(500); };
+  const states = [];
+  let attempts = 0;
+  const client = new EventStreamClient({ ...stores, notify: d => states.push(d.state), backoff: { base: 2 },
+    open: async (_, signal) => { attempts++; return { body: held(signal) }; } });
+  client.start();
+  await flush(40);
+  client.stop();
+  assert.equal(attempts, 0, 'a 500 is not an absent feed');
+  assert.ok(snapshots >= 2, 'the snapshot is retried');
+  assert.equal(states[0], 'reconnecting');
+});
+
+test('a 503 re-snapshot after a reset backs off instead of reopening at once', async () => {
+  const stores = fakeStores();
+  let snapshots = 0;
+  stores.snapshots.tasks = async () => { snapshots++; if (snapshots === 1) return { tasks: [], through_event_id: 5 }; throw httpError(503); };
+  const states = [];
+  let attempts = 0;
+  const client = new EventStreamClient({ ...stores, notify: d => states.push(d.state), backoff: { base: 200 },
+    open: async (_, signal) => { attempts++; return { body: attempts === 1 ? sseBody([frame('tasks', 'reset', { type: 'reset' })]) : held(signal) }; } });
+  client.start();
+  await flush(60);
+  client.stop();
+  assert.equal(attempts, 1, 'no immediate reopen while the backoff runs');
+  assert.deepEqual(states, ['connected', 'reconnecting']);
+});
+
+test('a subject change on a degraded feed reconnects once and ends degraded again', async () => {
+  const stores = fakeStores();
+  stores.snapshots.tasks = async () => { throw httpError(503); };
+  const states = [];
+  let attempts = 0;
+  const client = new EventStreamClient({ ...stores, notify: d => states.push(d.state), backoff: { base: 2 },
+    open: async (_, signal) => { attempts++; return { body: framesThenHeld([frame('tasks', 'unavailable', { error: taskReason })], signal) }; } });
+  client.start();
+  await flush(20);
+  client.setSubject('runtime-a', 'ses-3', { handle: () => {}, drop: () => {} });
+  await flush(40);
+  client.stop();
+  assert.equal(attempts, 2);
+  assert.deepEqual(states, ['connected', 'degraded', 'connected', 'degraded']);
+});

@@ -1,0 +1,11 @@
+{
+  "format_version": 2,
+  "id": "conversation",
+  "name": "Conversation",
+  "description": "Only what was said. Tool calls, thinking and added context are counted, not shown.",
+  "rules": [
+    {"match": {"kind": "tool_call"}, "display": "hide"},
+    {"match": {"kind": "thinking"}, "display": "hide"},
+    {"match": {"kind": "context"}, "display": "hide"}
+  ]
+}

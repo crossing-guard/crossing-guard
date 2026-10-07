@@ -136,6 +136,9 @@ func TestMemoryImportWritesStoreIndexesWrittenRecordsAndRecordsState(t *testing.
 	defer func() { governor = previousGovernor }()
 	writeClaudeTopicFile(t, home, "-Users-x-Documents-Sites-demo-repo", "demo-fact", "We decided the demo repo ships on Fridays.")
 
+	// First run with a governor: written AND indexed (indexed == imported by
+	// construction — the write owner maintains entity/classification/FTS in
+	// the same transaction; the old no-governor gap cannot exist).
 	state := runMemoryImport("test")
 	if state.Error != "" || state.Imported != 1 || state.Indexed != 1 || state.Errors != 0 || state.Store != storeDir {
 		t.Fatalf("first run: %+v", state)
@@ -152,12 +155,13 @@ func TestMemoryImportWritesStoreIndexesWrittenRecordsAndRecordsState(t *testing.
 	if again.Imported != 0 || again.Skipped != 1 || again.Indexed != 0 {
 		t.Fatalf("second run must import nothing: %+v", again)
 	}
-	// With no governor the records are written and the gap is reported, never
-	// indexed through a second store handle.
+	// With no governor the records are STILL written and indexed: the store
+	// write owner needs no governor (the daemon's governor is for events, not
+	// memory records — first-class-records plan §3.3).
 	governor = nil
 	writeClaudeTopicFile(t, home, "-Users-x-Documents-Sites-demo-repo", "second-fact", "Another fact.")
 	third := runMemoryImport("test")
-	if third.Imported != 1 || third.Indexed != 0 || third.Errors != 0 {
+	if third.Imported != 1 || third.Indexed != 1 || third.Errors != 0 {
 		t.Fatalf("no governor: %+v", third)
 	}
 }

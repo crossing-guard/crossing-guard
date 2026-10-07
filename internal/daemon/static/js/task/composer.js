@@ -23,22 +23,31 @@ export function insertMention(value, token, insertion) {
 }
 
 export function createComposer({ sendIntent, loadFiles, fileContext } = {}) {
-  const root = el('div');
-  root.id = 'composer';
+  // The bordered box holds only what the user is sending: text, attachments,
+  // dictation, and the send button. Every other control sits in the toolbar
+  // BELOW the border (like the Claude and Codex apps). root is the shell that
+  // holds both; box is the bordered input.
+  const root = el('div', 'composer-shell');
+  const box = el('div');
+  box.id = 'composer';
   const textarea = el('textarea');
   textarea.placeholder = 'Prompt… (Enter to send, Shift+Enter for newline)';
   textarea.rows = 1;
   const controls = el('div', 'below');
+  const sendRow = el('div', 'composer-send');
   const send = el('button', '', '');
   send.id = 'sendbtn';
   send.title = 'Send (Enter)';
   send.setAttribute('aria-label', 'Send');
   send.innerHTML = ICON_SEND;
-  controls.appendChild(send);
+  sendRow.appendChild(send);
   const menu = el('div');
   menu.id = 'composermenu';
-  root.append(textarea, controls, menu);
+  box.append(textarea, sendRow, menu);
+  root.append(box, controls);
 
+  let revision = 0;
+  textarea.addEventListener('input', () => { revision++; });
   let commands = [];
   let items = [];
   let selected = 0;
@@ -126,13 +135,16 @@ export function createComposer({ sendIntent, loadFiles, fileContext } = {}) {
 
   return {
     root,
+    box,
+    sendRow,
     textarea,
     controls,
     send,
     setCommands(next) { commands = Array.isArray(next) ? [...next] : []; updateMenu(); },
     draft() { return textarea.value.trim(); },
-    clear() { textarea.value = ''; resize(); closeMenu(); },
-    restore(value) { textarea.value = String(value || ''); resize(); },
+    revision() { return revision; },
+    clear() { revision++; textarea.value = ''; resize(); closeMenu(); },
+    restore(value) { revision++; textarea.value = String(value || ''); resize(); },
     insertText(value) {
       const start = textarea.selectionStart ?? textarea.value.length;
       const end = textarea.selectionEnd ?? start;

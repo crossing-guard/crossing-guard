@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"crossing-guard/internal/guardcli"
@@ -67,8 +66,8 @@ func handleRuntimeIntegrationWatchStart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	canaryCommand := "echo " + rulebook.CanaryMarker
-	canaryVerdict, canaryErr := guardcli.CheckCommand(canaryCommand)
-	canaryAvailable := canaryErr == nil && canaryVerdict.Decision == "deny"
+	canaryVerdict, canaryErr := guardcli.CheckCommand(canaryCommand, governorDetectors())
+	canaryAvailable := canaryErr == nil && canaryProvable(canaryVerdict)
 	if !canaryAvailable {
 		canaryCommand = ""
 	}
@@ -80,6 +79,15 @@ func handleRuntimeIntegrationWatchStart(w http.ResponseWriter, r *http.Request) 
 		"canary_available": canaryAvailable, "canary_command": canaryCommand,
 		"note": "Crossing Guard is only watching its local event log. Open and use the provider yourself when ready.",
 	})
+}
+
+// canaryProvable says whether a verdict on the proof command is one the watch could later
+// recognize in a stored event. The watch keys on rule_id == CanaryRuleID, so a deny by
+// some OTHER rule (a user rule placed before canary-deny that also matches the marker)
+// would advertise a canary the watch can never observe — an honest "no canary rule
+// active" instead of a wait that cannot end.
+func canaryProvable(v guardcli.Verdict) bool {
+	return v.Decision == "deny" && v.Rule == rulebook.CanaryRuleID
 }
 
 func runtimeSurfaceLabel(descriptor guardcli.RuntimeConnectionDescriptor, surfaceID string) string {
@@ -164,11 +172,15 @@ func runtimeIntegrationWatchResult(token string, watch runtimeIntegrationWatchEn
 		return nil, err
 	}
 	if len(events) > 0 {
+		dropRuntimeObservationCache() // the watch just saw this runtime fire
 		observations := make([]runtimeIntegrationWatchObservation, 0, len(events))
 		for _, event := range events {
 			observations = append(observations, runtimeIntegrationWatchObservation{
 				EventID: event.ID, SessionID: event.SessionID, Tool: event.Tool, Decision: event.Decision,
-				Denied: event.Decision == "deny" && runtimeEventHasExactCanary(event.Tags),
+				// The canary is recognized by the rule that denied it. The previous matcher
+				// looked for a `command` tag, which exists only at decision time and is
+				// never frozen onto an event — so it could not match any stored row.
+				Denied: event.Decision == "deny" && event.RuleID == rulebook.CanaryRuleID,
 			})
 		}
 		watch, err = runtimeIntegrationPreviews.recordWatchEvents(token, watch.Runtime, watch.ScanEventID, observations)
@@ -197,21 +209,4 @@ func runtimeIntegrationWatchResult(token string, watch runtimeIntegrationWatchEn
 		response["note"] = "The local denial is recorded and visible blocking was confirmed by the owner for the selected surface."
 	}
 	return response, nil
-}
-
-func runtimeEventHasExactCanary(tagsJSON string) bool {
-	var tags []struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}
-	if json.Unmarshal([]byte(tagsJSON), &tags) != nil {
-		return false
-	}
-	want := "echo " + rulebook.CanaryMarker
-	for _, tag := range tags {
-		if strings.EqualFold(tag.Key, "command") && strings.TrimSpace(tag.Value) == want {
-			return true
-		}
-	}
-	return false
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -11,6 +12,9 @@ const RuntimeTaskPayloadLimit = 64 * 1024
 var ErrRuntimeTaskIdempotencyConflict = errors.New("runtime task idempotency key reused with a different request")
 
 type RuntimeTaskRecord struct {
+	RequestedSettings         *TaskRequestedSettings
+	SessionEffortToken        string
+	SessionEffortID           string
 	ID                        string
 	ConsoleScope              string
 	IdempotencyKey            string
@@ -53,13 +57,17 @@ type RuntimeTaskEventRecord struct {
 
 func scanRuntimeTask(row interface{ Scan(...any) error }) (RuntimeTaskRecord, error) {
 	var out RuntimeTaskRecord
+	var requested string
 	var controllable int
 	err := row.Scan(&out.ID, &out.ConsoleScope, &out.IdempotencyKey, &out.RequestDigest,
 		&out.Runtime, &out.CatalogSessionID, &out.NativeSessionID, &out.WorkingDirectory,
 		&out.WorkspaceSelectionID, &out.WorkspaceSelectionVersion, &out.Lifecycle,
 		&out.Ownership, &out.ObservationMode, &out.Freshness, &controllable,
 		&out.CreatedAt, &out.UpdatedAt, &out.LastSequence, &out.LastEventID,
-		&out.ErrorText, &out.RetentionDeadline)
+		&out.ErrorText, &out.RetentionDeadline, &requested)
+	if err == nil && requested != "" {
+		err = json.Unmarshal([]byte(requested), &out.RequestedSettings)
+	}
 	out.Controllable = controllable == 1
 	return out, err
 }
@@ -67,7 +75,7 @@ func scanRuntimeTask(row interface{ Scan(...any) error }) (RuntimeTaskRecord, er
 const runtimeTaskColumns = `id,console_scope,idempotency_key,request_digest,runtime,
 	catalog_session_id,native_session_id,working_directory,workspace_selection_id,workspace_selection_version,
 	lifecycle,ownership,observation_mode,freshness,
-	controllable,created_at,updated_at,last_sequence,last_event_id,error_text,retention_deadline`
+	controllable,created_at,updated_at,last_sequence,last_event_id,error_text,retention_deadline,requested_settings`
 
 // CreateRuntimeTask is atomic on (console scope, idempotency key). A retry returns the
 // original task; reusing the key for different input is an explicit conflict.
@@ -92,22 +100,31 @@ func (ix *Index) createRuntimeTask(in RuntimeTaskRecord, initial *RuntimeTaskEve
 		return RuntimeTaskRecord{}, RuntimeTaskEventRecord{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	requested, err := encodeRequestedSettings(in.RequestedSettings)
+	if err != nil {
+		return RuntimeTaskRecord{}, RuntimeTaskEventRecord{}, false, err
+	}
 	result, err := tx.Exec(`INSERT OR IGNORE INTO runtime_task(
 		id,console_scope,idempotency_key,request_digest,runtime,catalog_session_id,native_session_id,
 		working_directory,workspace_selection_id,workspace_selection_version,lifecycle,ownership,
-		observation_mode,freshness,controllable,created_at,updated_at,last_sequence,last_event_id,error_text,retention_deadline)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.ConsoleScope,
+		observation_mode,freshness,controllable,created_at,updated_at,last_sequence,last_event_id,error_text,retention_deadline,requested_settings)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, in.ID, in.ConsoleScope,
 		in.IdempotencyKey, in.RequestDigest, in.Runtime, in.CatalogSessionID, in.NativeSessionID,
 		in.WorkingDirectory, in.WorkspaceSelectionID, in.WorkspaceSelectionVersion,
 		in.Lifecycle, in.Ownership, in.ObservationMode,
 		in.Freshness, boolInt(in.Controllable), in.CreatedAt, in.UpdatedAt,
-		in.LastSequence, in.LastEventID, in.ErrorText, in.RetentionDeadline)
+		in.LastSequence, in.LastEventID, in.ErrorText, in.RetentionDeadline, requested)
 	if err != nil {
 		return RuntimeTaskRecord{}, RuntimeTaskEventRecord{}, false, fmt.Errorf("create runtime task: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return RuntimeTaskRecord{}, RuntimeTaskEventRecord{}, false, fmt.Errorf("create runtime task rows: %w", err)
+	}
+	if rows == 1 {
+		if err := checkTaskSessionEffort(tx, in); err != nil {
+			return RuntimeTaskRecord{}, RuntimeTaskEventRecord{}, false, err
+		}
 	}
 	var queued RuntimeTaskEventRecord
 	if rows == 1 && initial != nil {

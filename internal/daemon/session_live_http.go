@@ -181,6 +181,8 @@ func sessionLiveProducer(ctx context.Context, runtime, id string, emit func(even
 			}
 			deltas, newLast := deltasAfter(annotateThoughts(current.Events, config.MinThought().Milliseconds()), lastSeq)
 			if len(deltas) > 0 {
+				// New rows only, so each row is classified once, when first sent.
+				addTranscriptFacts(deltas)
 				if err := emit("events", map[string]any{"events": deltas}); err != nil {
 					return err
 				}

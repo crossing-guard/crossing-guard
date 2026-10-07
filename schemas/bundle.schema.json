@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:crossing-guard:schema:bundle:1.0",
+  "$id": "urn:crossing-guard:schema:bundle:1.1",
   "title": "Signed governance and agent-configuration bundle",
   "type": "object",
   "additionalProperties": false,
@@ -18,7 +18,11 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "type": "string",
+      "enum": [
+        "1.0",
+        "1.1"
+      ]
     },
     "id": {
       "$ref": "common.schema.json#/$defs/typedId"
@@ -114,10 +118,11 @@
           "body": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1000000
+            "maxLength": 262144
           }
         }
-      }
+      },
+      "maxItems": 8
     },
     "content_policy": {
       "type": "object",
@@ -169,5 +174,6 @@
         }
       }
     }
-  }
+  },
+  "description": "1.1 adds the caps the parent plan recorded (at most 8 documents, a body of at most 262,144 characters) and accepts documents published as 1.0. At most one rulebook, and the body cap in bytes, are enforced in code on the server at publish and on the device before any parser runs."
 }

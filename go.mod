@@ -3,6 +3,7 @@ module crossing-guard
 go 1.26
 
 require (
+	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c
 	github.com/ncruces/go-sqlite3 v0.35.2
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
@@ -10,7 +11,6 @@ require (
 )
 
 require (
-	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
 	github.com/kisielk/errcheck v1.9.0 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v3 v3.2.35303 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect

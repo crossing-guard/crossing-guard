@@ -28,8 +28,8 @@ func newTestLedger(t *testing.T) *Ledger {
 // (recomputing every hash), and Verify still catches it via the held anchor.
 func TestLedgerTamperEvident(t *testing.T) {
 	l := newTestLedger(t)
-	l.Observe("s1", Event{Tool: "getOrderAddress"}) // personal-data
-	l.Observe("s1", Event{Tool: "getVendorProduct"})
+	l.Observe("s1", Event{Tool: "getCustomerAddress"}) // personal-data
+	l.Observe("s1", Event{Tool: "getSupplierPrice"})
 	if ok, why := l.Verify("s1"); !ok {
 		t.Fatalf("honest chain should verify, got %q", why)
 	}
@@ -66,8 +66,8 @@ func TestLedgerTamperEvident(t *testing.T) {
 // observed across DIFFERENT events in the session — impossible with event-only tags.
 func TestSessionScopedCompoundFires(t *testing.T) {
 	l := newTestLedger(t)
-	// event 1: internal business data (vendor cost) — earlier in the session
-	o1 := l.Observe("s2", Event{Tool: "getVendorProduct"})
+	// event 1: internal business data (supplier price) — earlier in the session
+	o1 := l.Observe("s2", Event{Tool: "getSupplierPrice"})
 	if o1.Decision.Decision != "allow" {
 		t.Fatalf("internal data alone should not block, got %s", o1.Decision.Decision)
 	}

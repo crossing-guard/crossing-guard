@@ -6,7 +6,9 @@ package daemon
 // enough to exercise the review/manage UI, not schema-complete.
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"crossing-guard/memory"
+	"crossing-guard/store"
 )
 
 type Memory struct {
@@ -33,6 +36,33 @@ type Memory struct {
 	Tags           []string `json:"tags,omitempty"`
 	Verified       string   `json:"verified,omitempty"` // dated attestation "2026-07-16 by alice" — render as AGE, never a bare check
 	Pending        bool     `json:"pending,omitempty"`
+	// Revision is the record's revision as read. An edit sends it back; a save made
+	// against an older revision is refused (409), never merged (team item 5, 13b).
+	Revision int64 `json:"revision,omitempty"`
+	// Team is the record's team-sync facts (team item 5); nil for a record that is
+	// neither at a shareable scope nor from a teammate.
+	Team *MemoryTeam `json:"team,omitempty"`
+}
+
+// MemoryTeam is one record's standing with the linked team, as facts.
+type MemoryTeam struct {
+	GlobalID       string `json:"global_id"`
+	ScopeType      string `json:"scope_type"`
+	Shared         bool   `json:"shared"`
+	CanTravel      bool   `json:"can_travel"`              // organization, or repository identified by its remote
+	IdentityNote   string `json:"identity_note,omitempty"` // why a repository record stays on this device
+	Origin         string `json:"origin"`                  // local | pulled
+	Author         string `json:"author,omitempty"`        // the authenticated author of the last landed team revision
+	ServerRevision int64  `json:"server_revision,omitempty"`
+	InSync         bool   `json:"in_sync"`                 // this device's content equals the last synced revision
+	RejectedHere   bool   `json:"rejected_here,omitempty"` // rejected on this device only; the team's version is unchanged
+	Collision      string `json:"collision,omitempty"`     // alias | shadowed
+	WireSlug       string `json:"wire_slug,omitempty"`     // the team's name when this id is a local alias
+	Conflicts      int    `json:"conflicts,omitempty"`     // conflict copies kept for this record
+	Imported       bool   `json:"imported,omitempty"`      // source import: shared one by one, never in bulk
+	// Refused is the code the team refused this record's latest revision with: the edit
+	// on this device was not taken and is not the team's (FR-6). Empty otherwise.
+	Refused string `json:"refused,omitempty"`
 }
 
 type Note struct {
@@ -55,49 +85,86 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // --- memory ---
 
-func (s *Store) ListMemories() []Memory {
-	s.mu.Lock()
-	var out []Memory
-	_ = readJSON(s.path("memories.json"), &out)
-	s.mu.Unlock()
-	for i := range out {
-		out[i].Store = "probe"
-	}
-	// Merge the REAL store via the memory package — the v1c import landed
-	// (ADR 0018: import, never shell-out; the cpmem-subprocess contract this
-	// replaced also read the retired v1.0 `verified` field, so verified
-	// chips were silently empty — fixed here by mapping the v1.1 split).
-	out = append(out, readControlPlaneMemories(false)...)
-	if out == nil {
-		out = []Memory{}
-	}
-	return out
+func (s *Store) ListMemories() ([]Memory, error) {
+	// ONE console-visible memory store (RT-8: the probe memories.json merge is
+	// retired; sandbox records go through the write owner with an origin label).
+	return readControlPlaneMemories(false)
 }
 
-// readControlPlaneMemories maps the engine store onto the console vocabulary
-// (response-to-gui §2): exactly four states, verified rendered as age.
-func readControlPlaneMemories(pendingOnly bool) []Memory {
-	var out []Memory
-	for _, r := range memory.LoadAll(memory.DefaultDir()) {
-		if r.Pending != pendingOnly {
+// readControlPlaneMemories maps the STORE onto the console vocabulary
+// (response-to-gui §2): exactly four states, verified rendered as age. Since
+// the first-class-records change this reads index.sqlite (the one read surface
+// rule, plan §3.5) — no file walking. A store that cannot be read is an error,
+// never an empty list; one not created yet is empty
+// (memory-store-unavailable-reads plan §2).
+func readControlPlaneMemories(pendingOnly bool) ([]Memory, error) {
+	out := []Memory{}
+	ix, err := openIndexForRead()
+	if errors.Is(err, errIndexNotCreated) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer ix.Close()
+	status := "active"
+	if pendingOnly {
+		status = "pending"
+	}
+	recs, err := ix.ListMemory(status)
+	if err != nil {
+		return nil, err
+	}
+	conflicts, err := ix.MemoryConflictCounts()
+	if err != nil {
+		return nil, err
+	}
+	refusals, err := ix.MemoryRefusals()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range recs {
+		m := mapStoreMemoryRecord(r)
+		if m.Team != nil {
+			m.Team.Conflicts, m.Team.Refused = conflicts[r.GlobalID], refusals[r.GlobalID]
+		}
+		out = append(out, m)
+	}
+	if pendingOnly {
+		return out, nil
+	}
+	// A team record rejected on this device stays visible: the team's version is
+	// unchanged, and it returns when a teammate changes it or it is promoted again (O-9).
+	rejected, err := ix.ListMemory("rejected")
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rejected {
+		if r.ShareState != "shared" && r.SyncOrigin != "pulled" {
 			continue
 		}
-		out = append(out, mapControlPlaneRecord(r))
+		m := mapStoreMemoryRecord(r)
+		m.Status = "rejected"
+		if m.Team != nil {
+			m.Team.Conflicts, m.Team.Refused = conflicts[r.GlobalID], refusals[r.GlobalID]
+		}
+		out = append(out, m)
 	}
-	return out
+	return out, nil
 }
 
-func mapControlPlaneRecord(r memory.Record) Memory {
+func mapStoreMemoryRecord(r store.MemoryRecord) Memory {
 	verified := r.VerifiedAt
 	if verified != "" && r.VerifiedBy != "" {
 		verified += " by " + r.VerifiedBy
 	}
 	m := Memory{
-		ID: r.ID, Claim: r.Title, Scope: r.Repository,
+		ID: r.ID, Claim: r.Title, Scope: r.ScopeID,
 		Store: "crossing-guard", Grade: "pkg",
 		Aliases: r.Aliases, Tags: r.Tags,
-		Verified: verified, Pending: r.Pending,
-		CreatedAt: r.Created, UpdatedAt: r.Updated,
+		Verified:  verified,
+		CreatedAt: time.Unix(0, r.CreatedAt).UTC().Format(time.RFC3339),
+		UpdatedAt: time.Unix(0, r.UpdatedAt).UTC().Format(time.RFC3339),
 	}
 	switch r.Source {
 	case "human":
@@ -108,9 +175,10 @@ func mapControlPlaneRecord(r memory.Record) Memory {
 		m.Classification = "inferred"
 	}
 	switch {
-	case r.Pending:
+	case r.Status == "pending":
 		m.Status = "pending"
-	case r.Superseded != "":
+		m.Pending = true
+	case r.SupersededBy != "":
 		m.Status = "superseded"
 	case verified != "":
 		m.Status = "verified"
@@ -119,6 +187,18 @@ func mapControlPlaneRecord(r memory.Record) Memory {
 	}
 	if r.Source != "" {
 		m.Sources = []string{r.Source}
+	}
+	m.Revision = r.Revision
+	canTravel := r.ScopeType == store.MemoryScopeOrganization || (r.ScopeType == store.MemoryScopeRepository && r.RepositoryIdentity == "remote-sha256")
+	if r.ScopeType != store.MemoryScopeUser || r.SyncOrigin == "pulled" {
+		m.Team = &MemoryTeam{GlobalID: r.GlobalID, ScopeType: string(r.ScopeType), Shared: r.ShareState == "shared", CanTravel: canTravel,
+			IdentityNote: r.IdentityNote, Origin: r.SyncOrigin, Author: r.TeamAuthor, ServerRevision: r.ServerRevision,
+			InSync:       store.MemoryProjectionHash(r) == r.SyncedProjectionHash,
+			RejectedHere: r.Status == "rejected" && (r.ShareState == "shared" || r.SyncOrigin == "pulled"),
+			Collision:    r.Collision, WireSlug: r.WireSlug, Imported: r.Source == "import"}
+		if !canTravel && m.Team.IdentityNote == "" && r.ScopeType == store.MemoryScopeRepository {
+			m.Team.IdentityNote = "the repository is known only by its folder name"
+		}
 	}
 	return m
 }
@@ -146,50 +226,120 @@ func splitFrontmatter(s string) (map[string]string, string) {
 	return fm, rest[end+4:]
 }
 
-// GetCpmemMemory fetches ONE full record (incl. dossier body), mirroring the
-// CLI's `memory get --json` shape and its pending/ review fallback. The read
-// is recall-logged like every store read path (instrumentation requirement).
-func GetCpmemMemory(id string) (map[string]any, error) {
+// errMemoryNotFound is the one answer that means "no such record": an unknown
+// or path-like id. Every other failure is the store's, and the routes say so
+// (503) instead of reporting a missing record.
+var errMemoryNotFound = errors.New("memory record not found")
+
+// GetCpmemMemory fetches ONE full record (incl. dossier body), keeping the
+// console's response shape. The read is recall-logged like every store read
+// path (instrumentation requirement), under the caller's label (recallLabel).
+// Store-backed since the first-class-records change — the id guard stays
+// because the response map is built from it.
+func GetCpmemMemory(id, via string) (map[string]any, error) {
 	// ids are kebab-case slugs; anything path-like is a traversal attempt
 	if id == "" || strings.ContainsAny(id, "/\\.") {
-		return nil, fmt.Errorf("record %q not found", id)
+		return nil, fmt.Errorf("record %q: %w", id, errMemoryNotFound)
 	}
-	dir := memory.DefaultDir()
-	r, err := memory.Read(filepath.Join(dir, id+".md"))
-	if err != nil { // review flow: proposals must be readable BEFORE promotion
-		if pr, perr := memory.Read(filepath.Join(dir, "pending", id+".md")); perr == nil {
-			pr.Pending = true
-			r, err = pr, nil
-		}
+	ix, err := openIndexForRead()
+	if errors.Is(err, errIndexNotCreated) {
+		return nil, fmt.Errorf("record %q: %w", id, errMemoryNotFound)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("record %q not found", id)
-	}
-	memory.LogRecall(dir, "get", id, []string{r.ID})
-	raw, err := json.Marshal(struct {
-		memory.Record
-		Body string `json:"body"`
-	}{r, r.Body})
 	if err != nil {
 		return nil, err
 	}
-	var rec map[string]any
-	if err := json.Unmarshal(raw, &rec); err != nil {
+	defer ix.Close()
+	r, err := ix.MemoryByID(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("record %q: %w", id, errMemoryNotFound)
+	}
+	if err != nil {
 		return nil, err
 	}
+	sources, err := ix.MemorySources(id)
+	if err != nil {
+		return nil, err
+	}
+	memory.LogRecall(memory.DefaultDir(), recallLabel(via, "get"), id, []string{r.ID})
+	rec := memoryRecordMap(r)
+	if sources == nil {
+		sources = []store.MemorySource{}
+	}
+	rec["sources"] = sources
 	return rec, nil
+}
+
+// ListMemoryRecordMaps lists every record in one status as the same map
+// GetCpmemMemory returns, minus sources (one query for the list, not one per
+// record). status is one of the store's three; the caller validates it.
+func ListMemoryRecordMaps(status string) ([]map[string]any, error) {
+	ix, err := openIndexForRead()
+	if errors.Is(err, errIndexNotCreated) {
+		return []map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer ix.Close()
+	recs, err := ix.ListMemory(status)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, memoryRecordMap(r))
+	}
+	return out, nil
+}
+
+// memoryRecordMap is the one record shape /api/memory/record and
+// /api/memory/records share, so the single and list reads cannot drift.
+func memoryRecordMap(r store.MemoryRecord) map[string]any {
+	tags, aliases := r.Tags, r.Aliases
+	if tags == nil {
+		tags = []string{}
+	}
+	if aliases == nil {
+		aliases = []string{}
+	}
+	return map[string]any{
+		"id": r.ID, "title": r.Title, "category": r.Category,
+		"scope_type": string(r.ScopeType), "repository": r.ScopeID,
+		"tags": tags, "aliases": aliases,
+		"source": r.Source, "origin": r.Origin,
+		"superseded_by": r.SupersededBy,
+		"verified_at":   r.VerifiedAt, "verified_by": r.VerifiedBy,
+		"created": time.Unix(0, r.CreatedAt).UTC().Format(time.RFC3339),
+		"updated": time.Unix(0, r.UpdatedAt).UTC().Format(time.RFC3339),
+		"format":  1, "body": r.Body, "pending": r.Status == "pending",
+		"revision": r.Revision, "status": r.Status,
+		// Scope and team sync facts (team item 5): recall filters by scope_id and
+		// repository_identity; the console states where a record came from and whether
+		// this device's copy matches the team's.
+		"global_id": r.GlobalID, "scope_id": r.ScopeID, "repository_identity": r.RepositoryIdentity,
+		"share_state": r.ShareState, "sync_origin": r.SyncOrigin, "team_author": r.TeamAuthor,
+		"server_revision": r.ServerRevision, "in_sync": store.MemoryProjectionHash(r) == r.SyncedProjectionHash,
+		"collision": r.Collision, "wire_slug": r.WireSlug, "identity_note": r.IdentityNote,
+		"reject_reason": r.RejectReason,
+	}
 }
 
 // ListPendingMemories returns the engine's proposal inbox (pending/).
 // Engine contract: the console is the ONLY promote surface beyond the CLI.
-func ListPendingMemories() []Memory {
+func ListPendingMemories() ([]Memory, error) {
 	return readControlPlaneMemories(true)
 }
 
-// PromoteMemory / RejectMemory delegate the human act to the engine package —
-// mutations stay engine-owned; the console never writes dossier files itself.
+// PromoteMemory / RejectMemory delegate the human act to the STORE write owner
+// (plan §3.3) — mutations stay store-owned; the console never writes records
+// through any other path, and the mirror is maintained after commit.
 func PromoteMemory(id string) (string, error) {
-	if err := memory.Promote(memory.DefaultDir(), id); err != nil {
+	ix, err := store.Open(indexPath())
+	if err != nil {
+		return "", err
+	}
+	defer ix.Close()
+	if _, err := ix.PromoteMemory(id, store.MemoryActor{AuthorType: "user", AuthorID: consoleActor(), ActorSource: "console"}); err != nil {
 		return "", err
 	}
 	return "promoted " + id + " into the store", nil
@@ -199,52 +349,119 @@ func RejectMemory(id, reason string) (string, error) {
 	if reason == "" {
 		reason = "rejected via console (no reason given)"
 	}
-	if err := memory.Reject(memory.DefaultDir(), id, reason); err != nil {
+	ix, err := store.Open(indexPath())
+	if err != nil {
 		return "", err
 	}
-	return "rejected " + id + " (retained in rejected/)", nil
+	defer ix.Close()
+	if _, err := ix.RejectMemory(id, reason, store.MemoryActor{AuthorType: "user", AuthorID: consoleActor(), ActorSource: "console"}); err != nil {
+		return "", err
+	}
+	return "rejected " + id + " (retained with its history)", nil
 }
 
+// consoleActor names the console's acting user for revision rows.
+func consoleActor() string {
+	who := os.Getenv("USER")
+	if who == "" {
+		who = "console"
+	}
+	return who
+}
+
+// UpsertMemory is the console's write path through the ONE store owner
+// (memory-first-class-records plan §5.3/§6: Crossing Guard records are
+// console-writable; the probe `memories.json` store is retired). New records
+// are drafted `pending` — the human gate (ADR 0013 D4): the console never
+// silently injects what a person has not promoted.
+//
+// Without an id it CREATES: a freshly minted id through the create-only write,
+// so it can never land on an existing record (memory-create-identity plan D-1).
+// With an id it EDITS that existing record (D-3): fields the request does not
+// carry are kept, and the edit is re-drafted pending as ADR 0013's addendum
+// says. Record tags/aliases are carried and validated, never dropped (D-2).
 func (s *Store) UpsertMemory(m Memory) (Memory, error) {
 	if m.Claim == "" {
-		return m, fmt.Errorf("claim is required")
+		return m, fmt.Errorf("%w: claim is required", store.ErrMemoryInvalid)
 	}
-	if m.Store == "crossing-guard" {
-		return m, fmt.Errorf("crossing-guard records are read-only in the console — edit via `cpmem memory`")
+	ix, err := store.Open(indexPath())
+	if err != nil {
+		return m, err
 	}
-	m.Store = "probe"
-	if m.Classification == "" {
-		m.Classification = "user-asserted"
-	}
-	if m.Status == "" {
-		m.Status = "draft"
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var all []Memory
-	_ = readJSON(s.path("memories.json"), &all)
+	defer ix.Close()
+	who := consoleActor()
+	actor := store.MemoryActor{AuthorType: "user", AuthorID: who, ActorSource: "console"}
+
+	var saved store.MemoryRecord
 	if m.ID == "" {
-		m.ID = fmt.Sprintf("mem_%d", time.Now().UnixNano())
-		m.CreatedAt = now()
-		m.UpdatedAt = m.CreatedAt
-		all = append(all, m)
+		saved, err = ix.CreateMemory(store.MemoryRecord{
+			ID: newConsoleMemoryID(), Title: m.Claim, Body: m.Body,
+			Tags: m.Tags, Aliases: m.Aliases,
+			Category: "note", Source: "human",
+			Status: "pending", ScopeType: store.MemoryScopeUser,
+			AuthorType: "user", AuthorID: who,
+		}, nil, nil, actor)
 	} else {
-		found := false
-		for i := range all {
-			if all[i].ID == m.ID {
-				m.CreatedAt = all[i].CreatedAt
-				m.UpdatedAt = now()
-				all[i] = m
-				found = true
-				break
-			}
-		}
-		if !found {
-			return m, fmt.Errorf("memory %s not found", m.ID)
-		}
+		saved, err = editConsoleMemory(ix, m, actor)
 	}
-	return m, writeJSONFile(s.path("memories.json"), all)
+	if err != nil {
+		return m, err
+	}
+	return mapStoreMemoryRecord(saved), nil
 }
+
+// editConsoleMemory revises one existing record from a console request:
+// title always, body when non-empty, tags/aliases when the request carries a
+// non-null array (absent and null keep; [] clears). Only the labels the
+// request carries are validated — a kept label is the record's, not the
+// request's. Category, scope, source, origin, verified stamps and the author
+// of record are the stored record's. The write refuses inside its transaction
+// if the record was deleted after this read.
+func editConsoleMemory(ix *store.Index, m Memory, actor store.MemoryActor) (store.MemoryRecord, error) {
+	if err := store.ValidateMemoryLabels(m.Tags, m.Aliases); err != nil {
+		return store.MemoryRecord{}, err
+	}
+	rec, err := ix.MemoryByID(m.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rec, fmt.Errorf("record %q: %w", m.ID, errMemoryNotFound)
+	}
+	if err != nil {
+		return rec, err
+	}
+	rec.Title = m.Claim
+	if m.Body != "" {
+		rec.Body = m.Body
+	}
+	if m.Tags != nil {
+		rec.Tags = m.Tags
+	}
+	if m.Aliases != nil {
+		rec.Aliases = m.Aliases
+	}
+	// Re-drafted pending: a rejection's reason no longer describes it.
+	rec.Status, rec.RejectReason = "pending", ""
+	// A team record is edited against the revision that was read, always: without one the
+	// save could re-write an older body over a teammate's landed revision (13b, PW-M8).
+	if m.Revision <= 0 && store.MemoryIsTeamRecord(rec) {
+		return rec, fmt.Errorf("%w: an edit of a team record carries the revision it read", store.ErrMemoryStale)
+	}
+	var saved store.MemoryRecord
+	if m.Revision > 0 {
+		// The console sends the revision it displayed: a save over a revision that has
+		// since moved (a teammate's landed edit) is refused, never merged (13b).
+		saved, err = ix.ReviseMemoryAt(rec, m.Revision, nil, nil, actor)
+	} else {
+		saved, err = ix.ReviseMemory(rec, nil, nil, actor)
+	}
+	if errors.Is(err, store.ErrMemoryNotFound) {
+		return saved, fmt.Errorf("record %q: %w", m.ID, errMemoryNotFound)
+	}
+	return saved, err
+}
+
+// newConsoleMemoryID mints a console-created record's id (a var so a test can
+// force a collision and prove the create refuses instead of editing).
+var newConsoleMemoryID = func() string { return store.NewMemoryID("note") }
 
 // --- notes ---
 

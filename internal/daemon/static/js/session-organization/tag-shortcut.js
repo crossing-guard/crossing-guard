@@ -1,4 +1,4 @@
-// The tag shortcut (console.json keymap.tag_session; empty switches it off).
+// The tag shortcut (daemon.json keymap.tag_session; empty switches it off).
 // Its default is an unmodified key, so it lives here with its own typing guard
 // rather than in the global keymap listener, which has none: a letter typed
 // into the composer or any other field must stay a letter.

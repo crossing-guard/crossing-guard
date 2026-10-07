@@ -1,0 +1,2 @@
+error-contains: pattern
+A revision's base is a wire hash (sha256:<64 hex>); anything else cannot be compared against the server's current revision.

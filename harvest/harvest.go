@@ -34,34 +34,37 @@ const (
 )
 
 type SessionSummary struct {
-	Runtime        string    `json:"runtime"`
-	ID             string    `json:"id"`
-	ResumeID       string    `json:"resume_id,omitempty"` // runtime-owned canonical native resume handle
-	Project        string    `json:"project"`
-	Title          string    `json:"title"`
-	Modified       time.Time `json:"modified"`
-	Lines          int       `json:"lines"`
-	Path           string    `json:"path"`
-	SourceRef      string    `json:"source_ref,omitempty"`
-	SourceSegment  string    `json:"source_segment,omitempty"`
-	UpdateMarker   string    `json:"-"`
-	Provider       string    `json:"provider,omitempty"`
-	ParentID       string    `json:"parent_id,omitempty"`
-	ActivityStatus string    `json:"activity_status,omitempty"` // unknown when this source cannot prove exact per-session liveness
-	Context        int64     `json:"context,omitempty"`         // last-turn context occupancy (handoff radar)
-	Cwd            string    `json:"cwd,omitempty"`             // real working dir from the session file (resume needs it; Project is display-mangled for dashed dirs)
+	Runtime  string `json:"runtime"`
+	ID       string `json:"id"`
+	ResumeID string `json:"resume_id,omitempty"` // runtime-owned canonical native resume handle
+	// NativeOpen is the link that opens this session in the vendor's desktop
+	// app; zero when the runtime has no such app or this session has no link.
+	NativeOpen     NativeOpenLink `json:"native_open,omitzero"`
+	Project        string         `json:"project"`
+	Title          string         `json:"title"`
+	Modified       time.Time      `json:"modified"`
+	Lines          int            `json:"lines"`
+	Path           string         `json:"path"`
+	SourceRef      string         `json:"source_ref,omitempty"`
+	SourceSegment  string         `json:"source_segment,omitempty"`
+	UpdateMarker   string         `json:"-"`
+	Provider       string         `json:"provider,omitempty"`
+	ParentID       string         `json:"parent_id,omitempty"`
+	ActivityStatus string         `json:"activity_status,omitempty"` // unknown when this source cannot prove exact per-session liveness
+	Context        int64          `json:"context,omitempty"`         // last-turn context occupancy (handoff radar)
+	Cwd            string         `json:"cwd,omitempty"`             // real working dir from the session file; when set, Project equals it
 	// RepositoryKey is the one cross-stack grouping identity for the Sessions rail.
 	// It normalizes the macOS /private alias and folds vendor worktrees exactly once;
 	// display labels and paging must consume this value rather than re-resolve cwd.
 	RepositoryKey string `json:"repository_key"`
 	Model         string `json:"model,omitempty"` // last model observed in the session
 	Turns         int    `json:"turns,omitempty"` // assistant turns with usage telemetry
-	// governance-index tags (branch/commits/PRs/memory-writes) — canonical
-	// record fields; merged by the daemon after a pure scan
-	Branch    string   `json:"branch,omitempty"`
-	Commits   int      `json:"commits,omitempty"`
-	PRs       []string `json:"prs,omitempty"`
-	MemWrites int      `json:"mem_writes,omitempty"`
+	// governance-index tags (branch/commits/PRs) — canonical record fields. Their
+	// only writer, the sessions.db enrichment merge, was removed on 2026-07-20, so
+	// nothing sets them today (the memory-write count was retired outright).
+	Branch  string   `json:"branch,omitempty"`
+	Commits int      `json:"commits,omitempty"`
+	PRs     []string `json:"prs,omitempty"`
 	// identity capture (canonicalization is the ADR 0009 decision — until
 	// then both identifiers are carried): ID above is the filename stem;
 	// ThreadID is codex's session_meta.session_id (bare uuid)
@@ -132,14 +135,13 @@ var (
 // past a megabyte the answer is "open it in your editor", not a bigger panel.
 const eventTextMax = 1 << 20
 
-// SessionUsage aggregates token/cost telemetry the vendors already write to
-// disk. Claude: message.usage on every assistant line (context occupancy =
-// last input+cache_read+cache_creation). Codex: token_count event_msg carries
-// total_token_usage + model_context_window explicitly. All observed, not
-// inferred — absent fields stay zero and the UI must label them unknown.
+// SessionUsage is token/cost telemetry the vendors already write to disk,
+// folded from model calls (FoldCalls; token-usage-analytics plan §3.1). All
+// observed, not inferred: an absent class stays zero here and the UI labels it
+// unknown; Reasoning and Cost are nil when no call stated them.
 type SessionUsage struct {
 	Model         string  `json:"model,omitempty"`
-	Turns         int     `json:"turns"`          // assistant messages with usage
+	Turns         int     `json:"turns"`          // model calls with usage (the rail labels them calls)
 	InputTokens   int64   `json:"input_tokens"`   // cumulative non-cache input
 	OutputTokens  int64   `json:"output_tokens"`  // cumulative output
 	CacheRead     int64   `json:"cache_read"`     // cumulative cache reads
@@ -147,6 +149,27 @@ type SessionUsage struct {
 	Context       int64   `json:"context"`        // last-turn context occupancy (tokens)
 	ContextWindow int64   `json:"context_window"` // model window if the vendor states it (codex); else 0 = unknown
 	CacheHitRate  float64 `json:"cache_hit_rate"` // cumulative cache_read / (cache_read+input+cache_create)
+	// Reasoning is the part of OutputTokens spent on reasoning — informational,
+	// never added to a total. Nil when the runtime does not state it.
+	Reasoning *int64 `json:"reasoning_tokens,omitempty"`
+	// Other carries runtime-specific classes outside the well-known set.
+	Other []TokenCount `json:"other,omitempty"`
+	// Cost is what the runtime stated for the session; nil when it stated none.
+	Cost *Cost `json:"cost,omitempty"`
+	// ReasoningStatedCalls is how many calls stated Reasoning, so a partial sum
+	// is never shown as a whole one.
+	ReasoningStatedCalls int `json:"reasoning_stated_calls,omitempty"`
+	// Delegated, Agents, Children and AsOf are set only by the recorded
+	// (store-backed) session reader. Delegated holds the calls the session's
+	// native subagents made, and Agents the calls of Crossing Guard agent
+	// sessions working for it, each kept apart from its own (lineage plan §8
+	// rule 7; session usage breakdown plan §5.3). Children is how many
+	// subagents or agents a Delegated or Agents total covers. AsOf is when the
+	// view's sources were last written.
+	Delegated *SessionUsage `json:"delegated,omitempty"`
+	Agents    *SessionUsage `json:"agents,omitempty"`
+	Children  int           `json:"children,omitempty"`
+	AsOf      time.Time     `json:"as_of,omitzero"`
 }
 
 type SessionDetail struct {
@@ -165,18 +188,7 @@ type cacheEntry struct {
 	mod    time.Time
 	size   int64
 	sum    SessionSummary
-	usage  *SessionUsage         // nil when the file carries no telemetry
-	days   map[string]*DayBucket // per-day usage buckets (key: YYYY-MM-DD)
 	marker string
-}
-
-// DayBucket aggregates observed token telemetry for one calendar day.
-type DayBucket struct {
-	Input       int64 `json:"input"`
-	Output      int64 `json:"output"`
-	CacheRead   int64 `json:"cache_read"`
-	CacheCreate int64 `json:"cache_create"`
-	Turns       int   `json:"turns"`
 }
 
 var summaryCache sync.Map // path -> cacheEntry
@@ -192,62 +204,109 @@ type fileJob struct {
 // ScanSessions lists sessions from both runtimes, newest first. Pure over
 // the vendor files: governance-index enrichment is merged by the caller.
 func ScanSessions() []SessionSummary {
-	var jobs []fileJob
+	outcomes := ScanSessionsTyped()
+	return outcomes.Summaries()
+}
+
+// RuntimeScanHealth is the typed health of one runtime's last scan.
+type RuntimeScanHealth struct {
+	Status     string    `json:"status"` // "available" | "degraded" | "unavailable"
+	ErrorClass string    `json:"error_class,omitempty"`
+	LastGoodAt time.Time `json:"last_good_at,omitempty"`
+}
+
+// RuntimeScanOutcome is one runtime's current scan result: its records and
+// health. An error contains no records and explicit health; it never
+// substitutes stale rows (opencode-session-visibility-and-status plan D4).
+type RuntimeScanOutcome struct {
+	Runtime string
+	Records []SessionRecord
+	Health  RuntimeScanHealth
+}
+
+// ScanOutcomes is the typed result of a full scan: per-runtime outcomes plus
+// the merged summary list. The daemon coalescer consumes this to separate
+// current (exact/mutable callers) and presentation (last-good continuity)
+// views.
+type ScanOutcomes struct {
+	Outcomes []RuntimeScanOutcome
+}
+
+// Summaries flattens the outcomes into the session list, newest first. Only
+// available and degraded outcomes contribute rows; an unavailable outcome
+// with no last-good contributes none.
+func (o ScanOutcomes) Summaries() []SessionSummary {
 	out := []SessionSummary{}
-	for _, rt := range Runtimes() {
-		if source, ok := rt.(SessionSource); ok {
-			records, err := source.ListSessionRecords()
-			if err != nil {
-				continue
-			}
-			for _, record := range records {
-				out = append(out, cacheSessionRecord(record))
-			}
+	for _, outcome := range o.Outcomes {
+		if outcome.Health.Status == "unavailable" {
 			continue
 		}
-		jobs = append(jobs, rt.Collect()...)
-	}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, scanConcurrency)
-	for _, j := range jobs {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(j fileJob) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			rt := runtimeFor(j.runtime)
-			if rt == nil {
-				return
-			}
-			sum, ok := summaryForJob(rt, j)
-			if !ok {
-				return
-			}
-			mu.Lock()
+		for _, record := range outcome.Records {
+			sum := cacheSessionRecord(record)
+			decorateSummary(&sum)
 			out = append(out, sum)
-			mu.Unlock()
-		}(j)
-	}
-	wg.Wait()
-	// title overlays (e.g. codex's user-curated thread name), applied after the
-	// cache because the thread-name index changes independently of rollouts
-	for i := range out {
-		decorateSummary(&out[i])
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
 	return out
 }
 
-func logicalCacheKey(ref SessionRef) string {
-	return ref.Runtime + "\x00" + ref.Source + "\x00" + ref.Segment
+// ScanSessionsTyped scans all runtimes and returns a typed per-runtime
+// outcome with health. A runtime whose ListSessionRecords returns an error
+// gets Status="unavailable" with the error class; a runtime without the
+// SessionSource capability gets Status="available" (file-based runtimes are
+// scanned through Collect/Summarize and do not carry per-runtime health).
+func ScanSessionsTyped() ScanOutcomes {
+	outcomes := ScanOutcomes{}
+	for _, rt := range Runtimes() {
+		if source, ok := rt.(SessionSource); ok {
+			records, err := source.ListSessionRecords()
+			if err != nil {
+				outcomes.Outcomes = append(outcomes.Outcomes, RuntimeScanOutcome{
+					Runtime: rt.Name(),
+					Health:  RuntimeScanHealth{Status: "unavailable", ErrorClass: errorClass(err)},
+				})
+				continue
+			}
+			outcomes.Outcomes = append(outcomes.Outcomes, RuntimeScanOutcome{
+				Runtime: rt.Name(),
+				Records: records,
+				Health:  RuntimeScanHealth{Status: "available", LastGoodAt: time.Now()},
+			})
+			continue
+		}
+		// File-based runtimes: collect and summarize without per-runtime health.
+		jobs := rt.Collect()
+		records := make([]SessionRecord, 0, len(jobs))
+		for _, j := range jobs {
+			sum, ok := summaryForJob(rt, j)
+			if !ok {
+				continue
+			}
+			records = append(records, SessionRecord{Ref: SessionRef{Runtime: j.runtime, ID: sum.ID, Source: sum.Path, Segment: sum.SourceSegment}, Summary: sum})
+		}
+		outcomes.Outcomes = append(outcomes.Outcomes, RuntimeScanOutcome{
+			Runtime: rt.Name(),
+			Records: records,
+			Health:  RuntimeScanHealth{Status: "available", LastGoodAt: time.Now()},
+		})
+	}
+	return outcomes
 }
 
-func summaryCacheKey(s SessionSummary) string {
-	if s.SourceRef != "" {
-		return logicalCacheKey(SessionRef{Runtime: s.Runtime, Source: s.SourceRef, Segment: s.SourceSegment})
+func errorClass(err error) string {
+	if err == nil {
+		return ""
 	}
-	return s.Path
+	msg := err.Error()
+	if idx := strings.Index(msg, ":"); idx > 0 {
+		msg = msg[:idx]
+	}
+	return msg
+}
+
+func logicalCacheKey(ref SessionRef) string {
+	return ref.Runtime + "\x00" + ref.Source + "\x00" + ref.Segment
 }
 
 func cacheSessionRecord(record SessionRecord) SessionSummary {
@@ -267,7 +326,7 @@ func cacheSessionRecord(record SessionRecord) SessionSummary {
 	if cached, ok := summaryCache.Load(key); ok && cached.(cacheEntry).marker == record.Ref.UpdateMarker {
 		return cached.(cacheEntry).sum
 	}
-	summaryCache.Store(key, cacheEntry{sum: sum, usage: record.Usage, days: record.Days, marker: record.Ref.UpdateMarker})
+	summaryCache.Store(key, cacheEntry{sum: sum, marker: record.Ref.UpdateMarker})
 	return sum
 }
 
@@ -278,12 +337,12 @@ func summaryForJob(rt Runtime, j fileJob) (SessionSummary, bool) {
 			return entry.sum, true
 		}
 	}
-	sum, usage, days, ok := rt.Summarize(j)
+	sum, ok := rt.Summarize(j)
 	if !ok {
 		return SessionSummary{}, false
 	}
 	sum.RepositoryKey = RepositoryGroupKey(sum)
-	summaryCache.Store(j.path, cacheEntry{mod: j.mod, size: j.size, sum: sum, usage: usage, days: days})
+	summaryCache.Store(j.path, cacheEntry{mod: j.mod, size: j.size, sum: sum})
 	return sum, true
 }
 
@@ -299,6 +358,12 @@ func decorateSummary(sum *SessionSummary) {
 	if handle, ok := runtimeFor(sum.Runtime).(ResumeHandle); ok {
 		if native := handle.ResumeID(*sum); native != "" {
 			sum.ResumeID = native
+		}
+	}
+	sum.NativeOpen = NativeOpenLink{}
+	if opener, ok := runtimeFor(sum.Runtime).(NativeOpener); ok {
+		if link, ok := opener.NativeOpen(*sum); ok {
+			sum.NativeOpen = link
 		}
 	}
 	if rt := runtimeFor(sum.Runtime); rt != nil {
@@ -384,11 +449,11 @@ func SummarizeFile(runtime, path string) (SessionSummary, bool) {
 		}
 	}
 	if sum.Path == "" {
-		s, usage, days, ok := rt.Summarize(j)
+		s, ok := rt.Summarize(j)
 		if !ok {
 			return SessionSummary{}, false
 		}
-		summaryCache.Store(path, cacheEntry{mod: j.mod, size: j.size, sum: s, usage: usage, days: days})
+		summaryCache.Store(path, cacheEntry{mod: j.mod, size: j.size, sum: s})
 		sum = s
 	}
 	if t := rt.ThreadTitle(sum); t != "" {
@@ -427,10 +492,19 @@ func markTitleSource(s *SessionSummary) {
 // segments — a subagent child rollout, however new, is not a match and can
 // never be handed back as the thread's primary (codex MatchID).
 func FindAll(runtime, id string) []SessionSummary {
+	matches, _ := FindAllChecked(runtime, id)
+	return matches
+}
+
+// FindAllChecked is FindAll that also returns why a runtime whose sessions live
+// in a store (a SessionSource) could not be listed. "No such session" and
+// "could not read the store" are different answers, and a caller that reports
+// a failure must be able to tell them apart. The matches are FindAll's.
+func FindAllChecked(runtime, id string) ([]SessionSummary, error) {
 	matches := []SessionSummary{}
 	if records, supported, err := LogicalSessionRecords(runtime); supported {
 		if err != nil {
-			return matches
+			return matches, err
 		}
 		for _, record := range records {
 			if MatchID(record.Summary, id) {
@@ -438,7 +512,7 @@ func FindAll(runtime, id string) []SessionSummary {
 			}
 		}
 		sort.Slice(matches, func(i, j int) bool { return matches[i].Modified.After(matches[j].Modified) })
-		return matches
+		return matches, nil
 	}
 	// Exact/suffix filename candidates cover the common Claude id and Codex rollout/
 	// thread-id shapes without parsing every transcript. The full scan remains the
@@ -461,14 +535,14 @@ func FindAll(runtime, id string) []SessionSummary {
 	}
 	if len(matches) > 0 {
 		sort.Slice(matches, func(i, j int) bool { return matches[i].Modified.After(matches[j].Modified) })
-		return matches
+		return matches, nil
 	}
 	for _, s := range ScanSessions() {
 		if s.Runtime == runtime && MatchID(s, id) {
 			matches = append(matches, s)
 		}
 	}
-	return matches
+	return matches, nil
 }
 
 // Find resolves the newest matching session summary. Callers that derive facts across a
@@ -479,6 +553,62 @@ func Find(runtime, id string) (SessionSummary, bool) {
 		return matches[0], true
 	}
 	return SessionSummary{}, false
+}
+
+// FindListed looks up many ids of one runtime in one listing of its files (or
+// of its store's records), newest match per id. Unlike Find it never falls
+// back to the full session scan, so an id whose file is gone, or whose file
+// name does not carry it, is simply absent. A request that resolves dozens of
+// members (the Usage pane) costs one listing, not one full scan per miss.
+func FindListed(runtime string, ids []string) map[string]SessionSummary {
+	out := map[string]SessionSummary{}
+	keep := func(sum SessionSummary, id string) {
+		if prior, seen := out[id]; !seen || sum.Modified.After(prior.Modified) {
+			out[id] = sum
+		}
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	if records, supported, err := LogicalSessionRecords(runtime); supported {
+		if err == nil {
+			for _, record := range records {
+				for _, id := range ids {
+					if MatchID(record.Summary, id) {
+						keep(record.Summary, id)
+					}
+				}
+			}
+		}
+		return out
+	}
+	rt := runtimeFor(runtime)
+	if rt == nil {
+		return out
+	}
+	for _, job := range rt.Collect() {
+		candidateID := stem(job.path)
+		var wanted []string
+		for _, id := range ids {
+			if candidateID == id || strings.HasSuffix(candidateID, id) {
+				wanted = append(wanted, id)
+			}
+		}
+		if len(wanted) == 0 {
+			continue
+		}
+		sum, ok := summaryForJob(rt, job)
+		if !ok {
+			continue
+		}
+		decorateSummary(&sum)
+		for _, id := range wanted {
+			if MatchID(sum, id) {
+				keep(sum, id)
+			}
+		}
+	}
+	return out
 }
 
 // Normalize reads one session file into canonical events. A zero-turn usage
@@ -518,12 +648,6 @@ func Load(runtime, id string) (*SessionDetail, error) {
 		d.Usage = nil
 	}
 	return d, err
-}
-
-// prettyProject converts the escaped cwd dir name back to something readable.
-func prettyProject(escaped string) string {
-	s := strings.TrimPrefix(escaped, "-")
-	return "/" + strings.ReplaceAll(s, "-", "/")
 }
 
 // --- helpers ---

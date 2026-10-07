@@ -7,22 +7,40 @@
     "running": true
   },
   "store": {
-    "schema_version": 31
+    "schema_version": 33
   },
   "runtimes": [
     {
       "name": "claude",
       "attached": true,
       "firing": {
-        "observed_at": "2026-09-17T15:58:00Z",
-        "evidence": "canary beacon in session file"
+        "observed_at": "2026-09-17T15:58:00Z"
+      },
+      "canary": {
+        "observed_at": "2026-09-17T15:40:00Z",
+        "rule_active": true
       }
     },
     {
       "name": "codex",
       "attached": true,
       "firing": {
+        "observed_at": "2026-09-17T15:12:00Z"
+      },
+      "canary": {
+        "observed_at": null,
+        "rule_active": true
+      }
+    },
+    {
+      "name": "opencode",
+      "attached": true,
+      "firing": {
         "observed_at": null
+      },
+      "canary": {
+        "observed_at": null,
+        "rule_active": false
       }
     }
   ],

@@ -111,8 +111,8 @@ func TestProviderQuotaAdvancesUserChain(t *testing.T) {
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-chain",
 		ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest,
 		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", Priority: 10,
-		Routes:             []store.ManagedRoute{{Runtime: "fallback-fixture"}},
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), Priority: 10,
+		Routes:             testChain(fixture.host, store.ManagedRoute{Runtime: "fallback-fixture"}),
 		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-chain")}); err != nil {
 		t.Fatal(err)
 	}
@@ -213,13 +213,12 @@ func TestBindingChainValidation(t *testing.T) {
 	command := managedBindingCommand{BindingID: "agent-bad-chain",
 		ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest,
 		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime:            "managed-fixture",
-		Routes:             []store.ManagedRoute{{Runtime: "no-such-runtime"}},
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), Routes: testChain(fixture.host, store.ManagedRoute{Runtime: "no-such-runtime"}),
 		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-bad-chain")}
 	if _, err := fixture.host.putBinding(command); err == nil {
 		t.Fatal("chain entry on an unregistered runtime was accepted")
 	}
-	command.Routes = []store.ManagedRoute{{Runtime: "managed-fixture", Mode: "elevated-nonsense"}}
+	command.Routes = testChain(fixture.host, store.ManagedRoute{Runtime: "managed-fixture", Mode: "elevated-nonsense"})
 	if _, err := fixture.host.putBinding(command); err == nil {
 		t.Fatal("chain entry with an unproven mode was accepted (R1)")
 	}
@@ -244,8 +243,8 @@ func TestOperatorRerouteJumpsTheQueue(t *testing.T) {
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-jump",
 		ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest,
 		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", Priority: 10,
-		Routes:             []store.ManagedRoute{{Runtime: "fallback-fixture"}},
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), Priority: 10,
+		Routes:             testChain(fixture.host, store.ManagedRoute{Runtime: "fallback-fixture"}),
 		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-jump")}); err != nil {
 		t.Fatal(err)
 	}
@@ -372,8 +371,8 @@ func TestAgentsSurfaceCarriesRoutesAndOutageFacts(t *testing.T) {
 
 	body := `{"profile_id":"` + preview.ProfileID + `","profile_source_digest":"` + preview.SourceDigest +
 		`","profile_bundle_digest":"` + preview.BundleDigest + `","project_root":"` + fixture.root +
-		`","runtime":"managed-fixture","mode":"","model":"","granted_authority":[],` +
-		`"routes":[{"runtime":"fallback-fixture","model":"local/tiny"}],` +
+		`","route_id":"` + testRouteID(fixture.host, "managed-fixture", "", nil) + `","mode":"","granted_authority":[],` +
+		`"routes":[{"route_id":"` + testRouteID(fixture.host, "fallback-fixture", "local/tiny", nil) + `"}],` +
 		`"expected_state_token":"` + store.ManagedBindingAbsentToken("agent-wire") + `","confirmed":true}`
 	putResponse := httptest.NewRecorder()
 	mux.ServeHTTP(putResponse, httptest.NewRequest(http.MethodPut, "/api/orchestration/agents/agent-wire", strings.NewReader(body)))

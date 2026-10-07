@@ -12,7 +12,10 @@ import (
 
 const orchestrationProfileRequestLimit = 360 * 1024
 
-func registerOrchestrationProfileRoutes(mux *http.ServeMux, owner *profilefs.Owner) {
+// registerOrchestrationProfileRoutes serves import (preview → select). pinned
+// names the revisions a place still runs, so an import never evicts one from
+// the bounded history (agents-settings-redesign plan RT-5).
+func registerOrchestrationProfileRoutes(mux *http.ServeMux, owner *profilefs.Owner, pinned func(string) profilefs.PinSource) {
 	mux.HandleFunc("GET /api/orchestration/profiles", func(w http.ResponseWriter, _ *http.Request) {
 		profiles, err := owner.List()
 		if err != nil {
@@ -49,9 +52,13 @@ func registerOrchestrationProfileRoutes(mux *http.ServeMux, owner *profilefs.Own
 			writeOrchestrationProfileError(w, err)
 			return
 		}
+		var keep profilefs.PinSource
+		if document, parseErr := profilefs.Parse(request.SourceName, request.Source); parseErr == nil {
+			keep = pinned(document.Profile.ID)
+		}
 		result, err := owner.Select(profilefs.SelectCommand{SourceName: request.SourceName, Source: request.Source,
 			ExpectedSourceDigest: request.SourceDigest, ExpectedBundleDigest: request.BundleDigest,
-			ExpectedStateToken: request.StateToken})
+			ExpectedStateToken: request.StateToken, Pins: keep})
 		if err != nil {
 			writeOrchestrationProfileError(w, err)
 			return
@@ -162,8 +169,10 @@ func writeOrchestrationProfileError(w http.ResponseWriter, err error) {
 		status = http.StatusUnprocessableEntity
 	case "not_found":
 		status = http.StatusNotFound
-	case "state_conflict", "integrity_conflict":
+	case "state_conflict", "integrity_conflict", "version_taken", "pinned_revision", "adopted_read_only":
 		status = http.StatusConflict
+	case "pins_unavailable":
+		status = http.StatusServiceUnavailable
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

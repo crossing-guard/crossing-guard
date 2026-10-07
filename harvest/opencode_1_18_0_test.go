@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ncruces/go-sqlite3/driver"
@@ -208,4 +209,136 @@ func TestLogicalFourthRuntimeDoesNotWidenRuntime(t *testing.T) {
 	var _ Runtime = opencodeRuntime{}
 	var _ SessionSource = opencodeRuntime{}
 	var _ LogicalLifecycleSource = opencodeRuntime{}
+}
+
+// Conversation text is the transcript: a long prompt and a long reply come back
+// whole in both read modes, as the Claude and Codex adapters return them. Text
+// OpenCode generated itself (a synthetic attached-file part) and text of an
+// unknown role keep the bookkeeping budget; step rows are unchanged. Only
+// lengths change: one event per part, sequence numbers contiguous, so pins
+// taken on Seq are unaffected.
+func TestOpenCodeConversationTextIsWholeAndBookkeepingStaysClipped(t *testing.T) {
+	path, id := openCodeFixture(t)
+	db, err := driver.Open("file:" + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	prompt := "  " + strings.Repeat("Please compare the providers. ", 40) + "\n"
+	reply := strings.Repeat("Profile pricing is per account, not per profile. ", 60)
+	attached := strings.Repeat("1: line of an attached file\n", 60)
+	partJSON := func(fields map[string]any) string {
+		encoded, _ := json.Marshal(fields)
+		return string(encoded)
+	}
+	for _, row := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO message VALUES('msg_user_2','ses_child',5000,5000,'{"role":"user","time":{"created":5000}}')`, nil},
+		{`INSERT INTO message VALUES('msg_assistant_2','ses_child',5100,5900,'{"role":"assistant","time":{"created":5100}}')`, nil},
+		{`INSERT INTO message VALUES('msg_system','ses_child',6000,6000,'{"role":"system","time":{"created":6000}}')`, nil},
+		{`INSERT INTO part VALUES('prt_prompt','msg_user_2','ses_child',5000,5000,?)`, []any{partJSON(map[string]any{"type": "text", "text": prompt})}},
+		{`INSERT INTO part VALUES('prt_attached','msg_user_2','ses_child',5001,5001,?)`, []any{partJSON(map[string]any{"type": "text", "text": attached, "synthetic": true})}},
+		{`INSERT INTO part VALUES('prt_step','msg_assistant_2','ses_child',5100,5100,?)`, []any{partJSON(map[string]any{"type": "step-start"})}},
+		{`INSERT INTO part VALUES('prt_reply','msg_assistant_2','ses_child',5200,5200,?)`, []any{partJSON(map[string]any{"type": "text", "text": reply})}},
+		{`INSERT INTO part VALUES('prt_system','msg_system','ses_child',6000,6000,?)`, []any{partJSON(map[string]any{"type": "text", "text": strings.Repeat("system note ", 60)})}},
+	} {
+		if _, err := db.Exec(row.query, row.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ref := SessionRef{Runtime: opencodeRuntimeName, ID: id, Source: path, Segment: id}
+	for _, full := range []bool{false, true} {
+		events, unparsed, _, err := (opencodeRuntime{}).NormalizeSession(ref, full)
+		if err != nil || unparsed != 0 || len(events) != 10 {
+			t.Fatalf("full=%v: events=%d unparsed=%d err=%v", full, len(events), unparsed, err)
+		}
+		for index, event := range events {
+			if event.Seq != index {
+				t.Fatalf("full=%v: sequence must stay contiguous, event %d has Seq %d", full, index, event.Seq)
+			}
+		}
+		byText := func(prefix string) CanonicalEvent {
+			for _, event := range events {
+				if strings.HasPrefix(event.Text, prefix) {
+					return event
+				}
+			}
+			t.Fatalf("full=%v: no event starts with %q", full, prefix)
+			return CanonicalEvent{}
+		}
+		if got := byText("Please compare"); got.Kind != "user" || got.Text != strings.TrimSpace(prompt) || got.FullLen != 0 {
+			t.Fatalf("full=%v: the prompt must come back whole: kind=%s len=%d full_len=%d", full, got.Kind, len(got.Text), got.FullLen)
+		}
+		if got := byText("Profile pricing"); got.Kind != "assistant" || got.Text != strings.TrimSpace(reply) || got.FullLen != 0 {
+			t.Fatalf("full=%v: the reply must come back whole: kind=%s len=%d full_len=%d", full, got.Kind, len(got.Text), got.FullLen)
+		}
+		if full {
+			continue // the deep read lifts every budget; bookkeeping clipping is a whole-transcript rule
+		}
+		if got := byText("1: line of an attached file"); got.Kind != "user" || got.FullLen != len(strings.TrimSpace(attached)) || len(got.Text) > transcriptCaps.meta+len("…") {
+			t.Fatalf("a synthetic part keeps the bookkeeping budget: kind=%s len=%d full_len=%d", got.Kind, len(got.Text), got.FullLen)
+		}
+		if got := byText("system note"); got.Kind != "other" || got.FullLen == 0 {
+			t.Fatalf("an unknown role keeps the bookkeeping budget: kind=%s full_len=%d", got.Kind, got.FullLen)
+		}
+		steps := 0
+		for _, event := range events {
+			if event.Name == "step-start" && event.Kind == "other" && event.Text == "prt_step" {
+				steps++
+			}
+		}
+		if steps != 1 {
+			t.Fatalf("the step row must be unchanged: %d matching rows", steps)
+		}
+	}
+}
+
+// Stored rows the console can draw live carry their part id as TurnAnchor, the
+// same identity OpenCode's live stream sends, so the console skips the stored
+// copy of what it drew. A tool call and its result share their part's id.
+// Rows the console never draws live (user text, synthetic text, steps) carry
+// none, so no stored row can be hidden by a mark it was never meant to match.
+func TestOpenCodeDrawableRowsAnchorOnTheirPartID(t *testing.T) {
+	path, id := openCodeFixture(t)
+	db, err := driver.Open("file:" + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, query := range []string{
+		`INSERT INTO part VALUES('prt_reply','msg_assistant','ses_child',4950,4950,'{"type":"text","text":"done"}')`,
+		`INSERT INTO part VALUES('prt_reason','msg_assistant','ses_child',1900,1900,'{"type":"reasoning","text":"think"}')`,
+		`INSERT INTO part VALUES('prt_step','msg_assistant','ses_child',1950,1950,'{"type":"step-start"}')`,
+		`INSERT INTO part VALUES('prt_synth','msg_user','ses_child',1101,1101,'{"type":"text","text":"file body","synthetic":true}')`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, _, _, err := (opencodeRuntime{}).NormalizeSession(SessionRef{Runtime: opencodeRuntimeName, ID: id, Source: path, Segment: id}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchors := map[string][]string{}
+	for _, event := range events {
+		key := event.Kind + ":" + event.Name
+		anchors[key] = append(anchors[key], event.TurnAnchor)
+	}
+	want := map[string][]string{
+		"user:":             {"", ""},
+		"thinking:":         {"prt_reason"},
+		"other:step-start":  {""},
+		"tool_call:write":   {"prt_tool_1"},
+		"tool_result:write": {"prt_tool_1"},
+		"tool_call:bash":    {"prt_tool_2"},
+		"tool_result:bash":  {"prt_tool_2"},
+		"assistant:":        {"prt_reply"},
+	}
+	for key, values := range want {
+		if strings.Join(anchors[key], ",") != strings.Join(values, ",") {
+			t.Fatalf("%s anchors = %q, want %q (all: %v)", key, anchors[key], values, anchors)
+		}
+	}
 }

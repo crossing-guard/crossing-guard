@@ -96,7 +96,7 @@ func TestConsoleSessionRailAndAuthRecoveryContract(t *testing.T) {
 			t.Errorf("chat view regained runtime-specific behavior %q", forbidden)
 		}
 	}
-	settings := read("js/views/settings.js")
+	settings := read("js/views/settings-runtimes.js")
 	if !bytes.Contains(settings, []byte("capabilityPairs(capabilities)")) {
 		t.Error("settings runtime choices must come from chat capabilities")
 	}
@@ -173,7 +173,7 @@ func TestConsoleSessionRailAndAuthRecoveryContract(t *testing.T) {
 		}
 	}
 	css := read("css/app.css")
-	for _, required := range []string{".projhead .projnew", ".projhead .projtoggle", ".projhead .projmode", ".session-pager", ".selected-outside-label", ".sess:focus-visible", ".auth-gate", "#chatwrap.inline::after", "top: 100%; height: 20px", "background: var(--bg); pointer-events: none", ".taskfeedstatus"} {
+	for _, required := range []string{".projhead .projnew", ".projhead .projtoggle", ".projhead .projmode", ".session-pager", ".selected-outside-label", ".sess:focus-visible", ".auth-gate", ".session-foot::after", "top: 100%; height: 20px", "background: var(--bg); pointer-events: none", ".taskfeedstatus"} {
 		if !bytes.Contains(css, []byte(required)) {
 			t.Errorf("console styling lost %q", required)
 		}

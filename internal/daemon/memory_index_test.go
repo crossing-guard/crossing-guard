@@ -5,14 +5,31 @@ import (
 	"testing"
 
 	"crossing-guard/engine"
-	"crossing-guard/memory"
 	"crossing-guard/store"
 )
 
-// TestMemoryBecomesAClassifiedSearchableEntity pins Phase 6: a memory .md folds into
-// the ONE store as a memory:<id> entity, classified by the SAME detectors (so a
-// memory carrying personal data is LABELLED, and a policy could gate on it), and
-// indexed into the SAME FTS (so one search covers memory and sessions).
+// storeMemoryRecord builds one record straight through the write owner.
+func storeMemoryRecord(t *testing.T, ix *store.Index, dets []engine.Detector, r store.MemoryRecord) store.MemoryRecord {
+	t.Helper()
+	r.Source = "human"
+	if r.ScopeType == "" {
+		r.ScopeType = store.MemoryScopeUser
+	}
+	if r.AuthorType == "" {
+		r.AuthorType, r.AuthorID = "user", "tester"
+	}
+	saved, err := ix.UpsertMemory(r, nil, dets, store.MemoryActor{AuthorType: "user", AuthorID: "tester", ActorSource: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return saved
+}
+
+// TestMemoryBecomesAClassifiedSearchableEntity pins the Phase 6 contract, now
+// through the ONE write owner: a store write folds into a memory:<id> entity,
+// classified by the SAME detectors (so a memory carrying personal data is
+// LABELLED, and a policy could gate on it), and indexed into the SAME FTS (so
+// one search covers memory and sessions) — all inside the write transaction.
 func TestMemoryBecomesAClassifiedSearchableEntity(t *testing.T) {
 	ix, err := store.Open(filepath.Join(t.TempDir(), "index.sqlite"))
 	if err != nil {
@@ -26,18 +43,11 @@ func TestMemoryBecomesAClassifiedSearchableEntity(t *testing.T) {
 
 	// A memory whose body carries an email address — the shared data.email detector
 	// classifies it personal, exactly as it would for a tool call touching the same text.
-	rec := memory.Record{
+	storeMemoryRecord(t, ix, dets, store.MemoryRecord{
 		ID: "onboarding-contact", Title: "Onboarding contact",
-		Body:    "For access questions reach the admin at alice@example.com before day one.",
-		Updated: "2026-07-20T10:00:00Z", Category: "note",
-	}
-	labelled, err := indexOneMemory(ix, dets, rec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !labelled {
-		t.Fatal("a memory with an email address should carry a classification label")
-	}
+		Body:     "For access questions reach the admin at alice@example.com before day one.",
+		Category: "note",
+	})
 
 	id := engine.EntityID("memory", "onboarding-contact")
 	ent, err := ix.LookupEntity(id)
@@ -55,12 +65,12 @@ func TestMemoryBecomesAClassifiedSearchableEntity(t *testing.T) {
 	}
 	var hasClass bool
 	for _, s := range st {
-		if s.Key == "data-class" {
+		if s.Key == "data-class" && s.Value == "personal-data" {
 			hasClass = true
 		}
 	}
 	if !hasClass {
-		t.Errorf("memory not labelled with a data-class; state=%+v", st)
+		t.Errorf("memory not labelled data-class=personal-data (the ladder spelling); state=%+v", st)
 	}
 
 	// Searchable through the ONE FTS, tagged as vendor=memory.
@@ -79,8 +89,8 @@ func TestMemoryBecomesAClassifiedSearchableEntity(t *testing.T) {
 	}
 }
 
-// TestReindexMemoryIsIdempotent: re-indexing the same record does not duplicate its
-// FTS row or its entity state.
+// TestReindexMemoryIsIdempotent: re-running the reconcile over the same record
+// does not duplicate its FTS row or its entity state.
 func TestReindexMemoryIsIdempotent(t *testing.T) {
 	ix, err := store.Open(filepath.Join(t.TempDir(), "index.sqlite"))
 	if err != nil {
@@ -91,12 +101,19 @@ func TestReindexMemoryIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := memory.Record{ID: "conv", Title: "A convention", Body: "always kebab-case ids",
-		Updated: "2026-07-20T10:00:00Z", Category: "convention"}
+	storeMemoryRecord(t, ix, dets, store.MemoryRecord{
+		ID: "conv", Title: "A convention", Body: "always kebab-case ids", Category: "convention",
+	})
 
 	for i := 0; i < 3; i++ {
-		if _, err := indexOneMemory(ix, dets, rec); err != nil {
+		recs, err := ix.ListMemory("")
+		if err != nil {
 			t.Fatal(err)
+		}
+		for _, r := range recs {
+			if _, err := reindexOneMemory(ix, dets, r); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	hits, err := ix.SearchEvents("kebab", 10)

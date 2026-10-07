@@ -25,10 +25,10 @@ function node(box, { name, count, countNote, what }) {
   const row = el('div'); row.style.cssText =
     'display:flex;gap:8px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--border)';
   const n = el('span', '', name);
-  n.style.cssText = 'font-weight:600;font-size:12px;flex:0 0 78px';
+  n.style.cssText = 'font-weight:600;font-size:var(--fs-8);flex:0 0 78px';
   row.appendChild(n);
   const c = el('span', '', count === null || count === undefined ? '—' : count.toLocaleString());
-  c.style.cssText = 'font-family:var(--mono);font-size:11.5px;color:var(--dim);flex:0 0 62px;text-align:right';
+  c.style.cssText = 'font-family:var(--mono);font-size:var(--fs-7);color:var(--dim);flex:0 0 62px;text-align:right';
   if (countNote) c.title = countNote;
   row.appendChild(c);
   const w = el('span', 'sub', what);
@@ -40,7 +40,7 @@ function node(box, { name, count, countNote, what }) {
 function axis(box, title, sub) {
   const h = el('div'); h.style.cssText = 'margin:10px 0 2px';
   const t = el('span', '', title);
-  t.style.cssText = 'font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase';
+  t.style.cssText = 'font-size:var(--fs-6);font-weight:600;letter-spacing:.04em;text-transform:uppercase';
   h.appendChild(t);
   box.appendChild(h);
   box.appendChild(el('div', 'sub', sub));

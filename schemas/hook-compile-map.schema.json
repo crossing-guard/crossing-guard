@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:private-ai-control-plane:schema:hook-compile-map:0.1-draft",
+  "$id": "urn:crossing-guard:schema:hook-compile-map:0.1-draft",
   "title": "Hook compile map",
   "description": "The hook-capability-matrix and capability-taxonomy turned into DATA a rule compiler reads. Four tables joined on `runtime`: (1) runtime_hook_facts = the per-runtime hook surface (events, decision fields, fail modes, trust); (2) capability_expansions = how each canonical capability expands to EVERY known tool that reaches the effect, per runtime, with a normalization confidence; (3) action_bindings = which native field an authored action rides, per runtime, and whether it is functional/reserved/absent; (4) backstop_seams = which effect capabilities a non-bypassable seam guarantees. Given an authored rule (see rule.schema.json) the compiler produces, per (capability, action, runtime): {can_block, can_redact, tool_expansion, fail_mode} from the tables, then computes an honest coverage_label = MAX(hook_label, backstop_label) where hook_label = MIN across the coverage/normalization/enforcement gates. Labels are EMITTED by the compiler, never authored. Every record is sourced and dated; facts are marked vendor-doc / binary-extracted / prototype-proven vs inferred, per the project's honesty discipline. Companion spec: docs/reference/rule-compiler.md. Runtime output vocabulary it aligns to: policy-decision.schema.json.",
   "type": "object",

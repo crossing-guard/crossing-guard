@@ -14,14 +14,19 @@
 // No raw HTML injection anywhere in this file: claim text and refs are
 // model-authored input, and ref anchors are built with the DOM refAnchor()
 // helper (core.js) so the orchestration contract-test discipline stays true.
-import { el, refAnchor, SEV_CHIP } from '../core.js';
+import { el, refAnchor, SEV_CHIP, api } from '../core.js';
 import { provider } from '../infopanel.js';
 import * as refs from '../refs.js';
-import { loadAgents, disableAgent, attachAgentToSession, loadSessionTags, loadRelatedSessions, loadGroupNotes, postGroupNote, retractGroupNote, agentWatchesSession, sessionIdentities } from './agents-api.js';
-import { managedProjection, sendFollowerDraft, actOnManagedRun, resumeWithCorrection } from './managed-api.js';
+import { loadAgents, disableAgent, attachAgentToSession, loadSessionTags, loadRelatedSessions, loadGroupNotes, postGroupNote, retractGroupNote, agentWatchesSession, sessionIdentities, watchScopeIds, bindingProblem } from './agents-api.js';
+import { managedSettings, managedProjection, sendFollowerDraft, actOnManagedRun, resumeWithCorrection } from './managed-api.js';
 import { loadProfile } from './profile-api.js';
 import { loadChatCapabilities } from '../chat-capabilities.js';
+import { routePicker, loadRouteChoices } from './agents/route-picker.js';
+import { ROUTE_FAMILY_MANAGED } from './agents/route-model.js';
 import { buildAgentTurnIndex, publishAgentTurnIndex } from './agent-turn-decorators.js';
+import { takeModuleIntent } from '../pane-host.js';
+import { REPLY_NOT_SENT } from '../task/session-status.js';
+import { loadRelatedHandoffs } from '../handoff/handoff-session.js';
 
 /* ---------- pure view-model helpers (unit-tested) ---------- */
 
@@ -34,6 +39,30 @@ export function latestRunByBinding(runs = []) {
     if (!current || (run.state === 'completed' && current.state !== 'completed')) latest.set(run.binding_id, run);
   }
   return latest;
+}
+
+const UNFINISHED_STATES = new Set(['failed', 'suppressed', 'deferred', 'unknown']);
+
+// newerUnfinishedByBinding finds, per binding, the newest run that did not
+// complete (failed, refused, deferred, lost) and is NEWER than the claim the
+// panel shows — the fact that the agent stopped working since its last
+// success (managed-turn-profile-limits plan §4.8). Runs arrive newest-first.
+export function newerUnfinishedByBinding(runs = [], shown = latestRunByBinding(runs)) {
+  const newer = new Map();
+  const reachedShown = new Set();
+  for (const run of runs) {
+    if (!run || !run.binding_id || reachedShown.has(run.binding_id)) continue;
+    if (run === shown.get(run.binding_id)) { reachedShown.add(run.binding_id); continue; }
+    if (UNFINISHED_STATES.has(run.state) && !newer.has(run.binding_id)) newer.set(run.binding_id, run);
+  }
+  return newer;
+}
+
+// runOutcomeText is one unfinished run's class and the daemon's recovery text.
+export function runOutcomeText(run = {}) {
+  if (!UNFINISHED_STATES.has(run.state)) return '';
+  const label = String(run.error_class || run.state).replaceAll('_', ' ');
+  return run.recovery ? label + ': ' + String(run.recovery) : label;
 }
 
 // groupCounters derives the honest loop counters from relationship rows for
@@ -123,6 +152,12 @@ export function unresolvedRefCount(findings = []) {
 
 // Completion is a claim outcome; the separate receipt describes delivery only.
 export function deliveryStatusText(run = {}) {
+  // A proposed reply the daemon did not carry to the session is a draft for
+  // the owner (escalation-delivery plan §6.1) — the class is the daemon's.
+  if (run.attention_class === 'draft' && run.detail?.delivery) {
+    const why = run.detail.delivery.detail ? ' · ' + String(run.detail.delivery.detail) : '';
+    return REPLY_NOT_SENT.charAt(0).toUpperCase() + REPLY_NOT_SENT.slice(1) + why;
+  }
   if (run.action !== 'send_message') return '';
   const receipt = run.detail?.delivery;
   if (!receipt) return 'Message proposed · automatic delivery was not requested.';
@@ -132,12 +167,65 @@ export function deliveryStatusText(run = {}) {
     accepted: 'Message queued · consumption is not confirmed.',
     delivered: 'Delivered to the session\'s boundary · consumption is not separately confirmed.',
     expired: 'Message expired · no boundary arrived in time; not delivered.',
+    not_requested: 'Message proposed · automatic delivery was not requested.',
     pending: 'Delivery unconfirmed · intent recorded; no receipt. Do not retry automatically.',
     unavailable: 'Message delivery unavailable.',
     unknown: 'Delivery outcome unknown · do not retry automatically.',
   };
+  // A socket post is not queued anywhere: the tier replaces the accepted
+  // label (session-message-layer plan §5.6, confirming pass C-1).
+  if (receipt.tier === 'socket-post' && receipt.state === 'accepted') {
+    labels.accepted = 'Sent to the session\'s inbox as a peer message · the vendor\'s inbound controls may hold or drop it; consumption is not confirmed.';
+  }
   const boundary = receipt.boundary && receipt.state === 'accepted' ? ' Boundary: ' + String(receipt.boundary) + '.' : '';
   return (labels[receipt.state] || labels.unknown) + boundary + (receipt.detail ? ' ' + String(receipt.detail) : '');
+}
+
+// One label family beside the delivery receipts (session-message-cross-vendor
+// plan §4/§7): an agent-initiated invocation record's own states. `delivered`
+// is reachable only through the boundary handoff; a socket target's terminal
+// success stays `accepted` — transport success is never consumption.
+export function invocationStatusText(invocation = {}) {
+  const labels = {
+    pending: 'Waiting for the session\'s boundary · consumption is not confirmed.',
+    accepted: 'Sent to the session\'s inbox · the vendor\'s inbound controls may hold or drop it; consumption is not confirmed.',
+    delivered: 'Delivered to the session\'s boundary · consumption is not separately confirmed.',
+    expired: 'Invocation expired · no boundary arrived in time; not delivered.',
+    unavailable: 'Delivery unavailable.',
+    unknown: 'Delivery outcome unknown · do not retry automatically.',
+    refused: 'Refused before sending.',
+  };
+  return labels[invocation.state] || labels.unknown;
+}
+
+// invocationCard renders one agent-initiated send beside the delivery receipts
+// (postwork PW-7): who sent to whom, the terminal label, and the invocation id
+// the asking agent can cite. Trust posture (plan RT-6): the sender line is
+// attribution — what the record and the receiver were told.
+export function invocationCard(invocation = {}) {
+  const card = el('div', 'agent-invocation-card');
+  const head = el('div', 'row');
+  head.append(
+    el('strong', '', 'Send to session'),
+    el('span', 'sub', ' ' + String(invocation.caller_runtime || '?') + '/' + String(invocation.caller_native_id || '?')
+      + ' → ' + String(invocation.target_runtime || '?') + '/' + String(invocation.target_native_id || invocation.target_catalog_id || '?')
+      + (invocation.invocation_id ? ' · ' + String(invocation.invocation_id) : '')),
+  );
+  card.appendChild(head);
+  card.appendChild(el('div', 'sub agent-invocation-status', invocationStatusText(invocation)
+    + (invocation.detail ? ' ' + String(invocation.detail) : '')));
+  return card;
+}
+
+// invocationCards renders the ledger rows that belong to this session — as the
+// caller or the target — newest first, capped. A fetch failure renders
+// nothing: the panel's own content never blocks on this read.
+export function invocationCards(invocations = [], identities = []) {
+  const ids = new Set(identities.map(String));
+  const mine = invocations.filter(item => ids.has(String(item.caller_native_id))
+    || ids.has(String(item.target_native_id)) || ids.has(String(item.target_catalog_id))
+    || ids.has(String(item.caller_canonical_id)) || ids.has(String(item.target_canonical_id)));
+  return mine.slice(0, 10).map(invocationCard);
 }
 
 /* ---------- DOM builders ---------- */
@@ -179,7 +267,19 @@ function stateChip(run) {
 
 /* ---------- the expanded claim card ---------- */
 
-function claimCard(agent, run, ctx) {
+// outcomeNotes are the facts a claim card states about an agent that is not
+// producing claims: its binding cannot run here, the shown run did not
+// complete, or a newer turn did not (plan §4.8).
+function outcomeNotes(agent, run, laterRun) {
+  const notes = [];
+  const problem = bindingProblem(agent);
+  if (problem) notes.push(el('div', 'banner', problem));
+  if (run && UNFINISHED_STATES.has(run.state)) notes.push(el('div', 'sub agent-run-outcome', runOutcomeText(run)));
+  if (laterRun) notes.push(el('div', 'sub agent-run-outcome', 'Last turn · ' + runOutcomeText(laterRun)));
+  return notes;
+}
+
+function claimCard(agent, run, ctx, laterRun = null) {
   const card = el('article', 'agent-claim-card');
   // Attribution header: agent name / type / priority + goal line.
   const head = el('div', 'row agent-claim-head');
@@ -188,6 +288,7 @@ function claimCard(agent, run, ctx) {
     el('span', 'sub', 'priority ' + String(agent?.priority ?? '—')));
   card.appendChild(head);
   if (agent?.profile_description) card.appendChild(el('div', 'sub', String(agent.profile_description)));
+  card.append(...outcomeNotes(agent, run, laterRun));
   if (agent?.prompt_excerpt) {
     const prompt = document.createElement('details');
     prompt.className = 'agent-prompt';
@@ -218,6 +319,16 @@ function claimCard(agent, run, ctx) {
   card.appendChild(verdictRow);
   const delivery = deliveryStatusText(run);
   if (delivery) card.appendChild(el('div', 'sub agent-delivery-status', delivery));
+  // A reply the daemon did not send is the owner's to use: copy it into the
+  // session. Sending it from here is the attended-delivery plan's work.
+  if (run.attention_class === 'draft' && run.action !== 'draft_reply' && run.message) {
+    const copy = el('button', 'btn', 'Copy reply');
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(String(run.message)); copy.textContent = 'Copied ✓'; }
+      catch (error) { card.prepend(el('div', 'banner', String(error?.message || error))); }
+    };
+    card.appendChild(copy);
+  }
   const findings = claimFindings(run, scope);
   if (findings.count) {
     card.appendChild(findings.host);
@@ -370,7 +481,23 @@ function groupNotesSection(run) {
 
 let activeStrip = null; // the currently-rendered strip element, for cg:agents-panel-open
 
-function agentStripRow(agent, run, counters, expandHost, ctx, projectionFailed = false, helperGroup = null) {
+// appendRunWarnings adds the strip's two "this will not work" chips: a binding the
+// daemon says cannot run here, and a newer refused or failed turn than the claim shown.
+function appendRunWarnings(summary, agent, laterRun) {
+  const problem = bindingProblem(agent);
+  if (problem) {
+    const chip = el('span', 'chip st-disputed', 'cannot run here');
+    chip.title = problem;
+    summary.appendChild(chip);
+  }
+  if (laterRun) {
+    const chip = el('span', 'chip st-disputed', 'last turn: ' + String(laterRun.error_class || laterRun.state).replaceAll('_', ' '));
+    chip.title = runOutcomeText(laterRun);
+    summary.appendChild(chip);
+  }
+}
+
+function agentStripRow(agent, run, counters, expandHost, ctx, projectionFailed = false, helperGroup = null, laterRun = null) {
   const row = el('div', 'agent-strip-row');
   const summary = el('button', 'agent-strip-summary');
   summary.type = 'button';
@@ -389,21 +516,21 @@ function agentStripRow(agent, run, counters, expandHost, ctx, projectionFailed =
   } else {
     summary.appendChild(el('span', 'sub', 'watching · no runs yet'));
   }
+  appendRunWarnings(summary, agent, laterRun);
   if (counters && (counters.cycles || counters.replies)) {
     const counter = el('span', 'agent-strip-counter', 'cycle ' + counters.cycles + ' · ' + counters.replies + ' repl' + (counters.replies === 1 ? 'y' : 'ies'));
     counter.title = 'Loop counters from recorded relationships. Token budgets bound the next admission; spend is not reported by this projection.';
     summary.appendChild(counter);
   }
+  row.appendChild(summary);
   if (helperGroup) {
     // ONE helper session per source session (schema 30): the row links it
-    // and counts its turns; the rail folds that session under this one.
-    const open = el('a', 'ref ref-ok agent-strip-helper-session', helperSessionLabel(helperGroup));
-    open.href = '/?runtime=' + encodeURIComponent(String(helperGroup.helper_runtime || ''))
-      + '&session=' + encodeURIComponent(String(helperGroup.helper_native_session_id || ''));
-    open.title = String(helperGroup.helper_native_session_id || '');
-    summary.appendChild(open);
+    // and counts its turns; the rail folds that session under this one. The
+    // link sits beside the summary button, never inside it: a link inside the
+    // button toggled the row as it navigated.
+    row.appendChild(sessionLinkNode(String(helperGroup.helper_runtime || ''),
+      String(helperGroup.helper_native_session_id || ''), helperSessionLabel(helperGroup), 'agent-strip-helper-session'));
   }
-  row.appendChild(summary);
   // G-3: Disable rides the strip header, wired to the agent disable route.
   if (agent?.state === 'enabled' && agent.binding_id) {
     const disable = el('button', 'btn agent-strip-disable', 'Disable');
@@ -419,7 +546,7 @@ function agentStripRow(agent, run, counters, expandHost, ctx, projectionFailed =
   let card = null;
   const expand = () => {
     if (card) { card.remove(); card = null; summary.setAttribute('aria-expanded', 'false'); return; }
-    card = claimCard(agent, run, ctx);
+    card = claimCard(agent, run, ctx, laterRun);
     summary.setAttribute('aria-expanded', 'true');
     expandHost.appendChild(card);
   };
@@ -429,17 +556,10 @@ function agentStripRow(agent, run, counters, expandHost, ctx, projectionFailed =
 }
 
 // attachAgentControl renders the Attach-agent flow for one live session
-// (natural-session plan B-GUI): choose an imported follower/helper, accept
-// its default runtime route or override model/runtime inline, scope = THIS
-// session (watch_natural). Saves through the binding PUT with the daemon's
-// absent token (G-4 CAS discipline). The model picker is the honest preset
-// list from the runtime's published capabilities plus Custom… (M12) — it is
-// labeled as presets, never a fake installed-models list.
+// (natural-session plan B-GUI): choose an imported follower/helper and the
+// model route it runs on, by name; scope = THIS session (watch_natural). Saves
+// through the binding PUT with the daemon's absent token (G-4 CAS discipline).
 function attachAgentControl(ctx, identities) {
-  const selection = ctx.selection || {};
-  const runtime = String(selection.runtime || '');
-  const sessionID = String(selection.id || '');
-  const cwd = String(selection.cwd || '');
   const host = el('div', 'agent-attach');
   const status = el('span', 'sub', '');
   const open = el('button', 'btn', 'Attach agent');
@@ -447,128 +567,99 @@ function attachAgentControl(ctx, identities) {
   open.onclick = async () => {
     open.disabled = true;
     status.textContent = 'Loading agents…';
-    let payload;
+    let choices;
     try {
-      payload = await loadAgents();
+      choices = await attachChoices();
     } catch (error) {
       open.disabled = false;
       status.textContent = 'Agent list unavailable: ' + String(error?.message || error);
       return;
     }
-    const agents = payload?.agents || [];
-    const options = (payload?.profiles || []).filter(option =>
-      option?.compatible && ['follower', 'helper'].includes(String(option.agent_type || '')));
-    const absent = payload?.absent_state_tokens || {};
-    const unbound = options.filter(option => !agents.some(a => a.binding_id === 'agent-' + option.profile_id));
-    if (!unbound.length) {
+    if (!choices.profiles.length) {
       open.disabled = false;
-      status.textContent = 'No unbound follower/helper profiles. Import one in Settings → Agents first.';
+      status.textContent = 'No follower or helper is waiting to be attached. Import one in Settings → Agents first.';
       return;
     }
-    // Replace the button with the inline form.
-    const form = el('div', 'agent-attach-form');
-    const pick = el('select');
-    pick.setAttribute('aria-label', 'Agent to attach');
-    unbound.forEach(option => {
-      const item = el('option');
-      item.value = option.profile_id;
-      item.textContent = String(option.name || option.profile_id) + ' · ' + String(option.agent_type || 'agent');
-      pick.appendChild(item);
-    });
-    form.appendChild(pick);
-    // Runtime route + model picker (presets + custom, honestly labeled).
-    const routeRow = el('div', 'row');
-    const runtimeSelect = el('select');
-    runtimeSelect.setAttribute('aria-label', 'Agent runtime');
-    const modelSelect = el('select');
-    modelSelect.setAttribute('aria-label', 'Agent model');
-    const syncRoute = capabilities => {
-      runtimeSelect.replaceChildren();
-      const list = (capabilities || []).filter(item => item.can_start
-        && (item.modes || []).some(mode => mode.risk === 'normal'));
-      list.forEach(item => {
-        const option = el('option');
-        option.value = item.runtime;
-        option.textContent = item.display_name;
-        runtimeSelect.appendChild(option);
-      });
-      const syncModels = () => {
-        modelSelect.replaceChildren();
-        const capability = list.find(item => item.runtime === runtimeSelect.value);
-        const defaultOption = el('option');
-        defaultOption.value = '';
-        defaultOption.textContent = 'Default model';
-        modelSelect.appendChild(defaultOption);
-        (capability?.models || []).forEach(model => {
-          const option = el('option');
-          option.value = model.id;
-          option.textContent = model.label + (model.custom ? '' : ' · preset');
-          modelSelect.appendChild(option);
-        });
-        const custom = el('option');
-        custom.value = 'custom';
-        custom.textContent = 'Custom…';
-        modelSelect.appendChild(custom);
-      };
-      runtimeSelect.onchange = syncModels;
-      syncModels();
-    };
-    let capabilities = [];
-    try { capabilities = await loadChatCapabilities(); } catch { capabilities = []; }
-    syncRoute(capabilities);
-    routeRow.append(runtimeSelect, modelSelect);
-    form.appendChild(routeRow);
-    const customInput = el('input');
-    customInput.placeholder = 'exact provider/model';
-    customInput.style.width = '200px';
-    customInput.classList.add('hidden');
-    const modelRow = el('div', 'row');
-    modelRow.appendChild(customInput);
-    form.appendChild(modelRow);
-    modelSelect.onchange = () => {
-      customInput.classList.toggle('hidden', modelSelect.value !== 'custom');
-    };
-    const save = el('button', 'btn primary', 'Attach to this session');
-    const cancel = el('button', 'btn', 'Cancel');
-    const actions = el('div', 'row');
-    actions.append(save, cancel, status);
-    form.appendChild(actions);
-    open.replaceWith(form);
-    cancel.onclick = () => { form.replaceWith(open); open.disabled = false; status.textContent = ''; };
-    save.onclick = async () => {
-      save.disabled = true;
-      const option = unbound.find(item => item.profile_id === pick.value);
-      if (!option) { save.disabled = false; status.textContent = 'Profile unavailable.'; return; }
-      const bindingID = 'agent-' + option.profile_id;
-      const token = absent[bindingID];
-      if (!token) { save.disabled = false; status.textContent = 'No creation token for this agent; manage it in Settings → Agents.'; return; }
-      const scope = identities[0] || sessionID;
-      try {
-        await attachAgentToSession({
-          binding_id: bindingID,
-          profile_id: option.profile_id,
-          profile_source_digest: option.source_digest,
-          profile_bundle_digest: option.bundle_digest,
-          project_root: cwd,
-          scope_runtime: runtime,
-          scope_session: scope,
-          runtime: runtimeSelect.value,
-          model: modelSelect.value === 'custom' ? customInput.value.trim() : modelSelect.value,
-          mode: '',
-          granted_authority: [],
-          watch_natural: true,
-        }, token);
-        status.textContent = 'Attached ✓ — watching this session.';
-        form.replaceWith(el('div', 'banner', 'Agent attached. Its run appears here when the session reaches a signal it selects.'));
-      } catch (error) {
-        save.disabled = false;
-        status.textContent = 'Not attached: ' + String(error?.message || error)
-          + (error?.code === 'state_conflict' ? ' — the binding changed elsewhere; check Settings → Agents.' : '');
-      }
-    };
+    status.textContent = '';
+    open.replaceWith(attachForm(ctx, identities, choices, () => { host.replaceChildren(open, status); open.disabled = false; status.textContent = ''; }));
   };
   host.append(open, status);
   return host;
+}
+
+// attachChoices reads what the form offers: the imported follower and helper
+// profiles that have no agent yet — the daemon publishes a creation token for
+// exactly those — and the model routes an agent of that kind can run on.
+async function attachChoices() {
+  const settings = await managedSettings();
+  const tokens = settings?.absent_state_tokens || {};
+  const profiles = (settings?.profiles || []).filter(option => option?.compatible && tokens['agent-' + option.profile_id]);
+  let capabilities = [];
+  try { capabilities = await loadChatCapabilities(); } catch { capabilities = []; }
+  let routes = [];
+  try { routes = await loadRouteChoices(ROUTE_FAMILY_MANAGED, capabilities); } catch { routes = []; }
+  return { profiles, tokens, routes };
+}
+
+// attachForm is the inline form: the agent, its model route by name (team
+// rest-of-release plan §5.5 — what a route resolves to is on Settings → Models;
+// a device with no route for this kind of agent says so and offers Create
+// route), and the two actions on their own row.
+function attachForm(ctx, identities, choices, onCancel) {
+  const form = el('div', 'agent-attach-form');
+  const pick = el('select');
+  pick.setAttribute('aria-label', 'Agent to attach');
+  choices.profiles.forEach(option => {
+    const item = el('option');
+    item.value = option.profile_id;
+    item.textContent = String(option.name || option.profile_id) + (option.agent_type ? ' (' + option.agent_type + ')' : '');
+    pick.appendChild(item);
+  });
+  const agent = el('label', 'agents-field');
+  agent.append(el('span', 'agents-field-label', 'Agent'), pick);
+  const route = routePicker(choices.routes, {});
+  const status = el('div', 'sub');
+  const save = el('button', 'btn primary', 'Attach to this session');
+  save.disabled = route.empty;
+  const cancel = el('button', 'btn', 'Cancel');
+  cancel.onclick = onCancel;
+  const actions = el('div', 'row');
+  actions.append(save, cancel);
+  form.append(agent, route.node, actions, status);
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await attachChosen(ctx, identities, choices, pick.value, route.value());
+      form.replaceWith(el('div', 'banner', 'Agent attached. Its run appears here when the session reaches a signal it selects.'));
+    } catch (error) {
+      save.disabled = false;
+      status.textContent = 'Not attached: ' + String(error?.message || error)
+        + (error?.code === 'state_conflict' ? ' — the binding changed elsewhere; check Settings → Agents.' : '');
+    }
+  };
+  return form;
+}
+
+// attachChosen writes the session-scoped binding for the chosen profile.
+async function attachChosen(ctx, identities, choices, profileID, chosen) {
+  const selection = ctx.selection || {};
+  const option = choices.profiles.find(item => item.profile_id === profileID);
+  if (!option) throw new Error('that profile is no longer available');
+  if (!chosen) throw new Error('create a model route first');
+  const bindingID = 'agent-' + option.profile_id;
+  await attachAgentToSession({
+    binding_id: bindingID,
+    profile_id: option.profile_id,
+    profile_source_digest: option.source_digest,
+    profile_bundle_digest: option.bundle_digest,
+    project_root: String(selection.cwd || ''),
+    scope_runtime: String(selection.runtime || ''),
+    scope_session: identities[0] || String(selection.id || ''),
+    route_id: chosen.route_id,
+    mode: chosen.mode,
+    granted_authority: [],
+    watch_natural: true,
+  }, choices.tokens[bindingID]);
 }
 
 async function renderAgentStrip(ctx, box) {
@@ -576,18 +667,22 @@ async function renderAgentStrip(ctx, box) {
   const runtime = String(selection.runtime || '');
   const sessionID = String(selection.id || '');
   const cwd = String(selection.cwd || '');
-  // All exact identity alternates of this session (artifact id, vendor meta
-  // id, vendor thread id): runs and tags are recorded under whichever
-  // identity the task row carried, so a single-id query missed runs for any
-  // session whose identities diverge — resumed codex threads above all
-  // (g4 plan §3; parent verification limitation #3).
+  // Every id that names this session, as the daemon published them: runs and
+  // tags are recorded under whichever identity the task row carried, so a
+  // single-id query missed runs for any session whose identities diverge —
+  // resumed codex threads above all (g4 plan §3; parent verification
+  // limitation #3). A subagent's thread id names its parent and is not one of
+  // them; watching still compares it (watchScopeIds, child-thread-identity D-1).
   const identities = sessionIdentities(selection);
   box.replaceChildren(el('div', 'sub', 'Checking which agents watch this session…'));
-  const [agentsResult, projectionResult, tagsResult, relatedResult] = await Promise.allSettled([
+  const [agentsResult, projectionResult, tagsResult, relatedResult, invocationsResult, handoffsResult] = await Promise.allSettled([
     loadAgents(),
     identities.length ? managedProjection(runtime, identities) : Promise.reject(new Error('session identity unavailable')),
     identities.length ? loadSessionTags(identities) : Promise.reject(new Error('session identity unavailable')),
     loadRelatedSessions(runtime, sessionID),
+    api('/api/session-message/invocations?limit=100'),
+    loadChatCapabilities().catch(() => []).then(capabilities =>
+      loadRelatedHandoffs(selection, name => capabilities.find(item => item.runtime === name)?.displayName || name)),
   ]);
   if (!box.isConnected) return;
   const render = () => { if (box.isConnected) renderAgentStrip(ctx, box); };
@@ -597,19 +692,34 @@ async function renderAgentStrip(ctx, box) {
   box.appendChild(strip);
   activeStrip = strip;
 
+  const invocations = invocationsResult.status === 'fulfilled'
+    ? (invocationsResult.value?.invocations || []) : [];
+
   const projection = projectionResult.status === 'fulfilled' ? projectionResult.value : null;
   if (projection) publishAgentTurnIndex(runtime + '/' + sessionID, buildAgentTurnIndex(projection));
+  if (renderAgentRows(strip, ctx, { runtime, cwd, identities, agentsResult, projectionResult, projection })) {
+    appendSessionTags(strip, tagsResult);
+  }
+  // Related sessions are the session's own facts: they render whether or not
+  // an agent watches it, and whether or not the agent reads succeeded.
+  const related = relatedSessionsSection(relatedResult, handoffsResult.status === 'fulfilled' ? handoffsResult.value : []);
+  if (related) strip.appendChild(related);
+}
 
+// renderAgentRows draws who watches this session and their runs. True when
+// the full rows rendered; the session-tag row belongs only there.
+function renderAgentRows(strip, ctx, { runtime, cwd, identities, agentsResult, projectionResult, projection }) {
   if (agentsResult.status === 'rejected' && projectionResult.status === 'rejected') {
     strip.appendChild(el('div', 'sub', 'Agent status unavailable: ' + String(agentsResult.reason?.message || agentsResult.reason)));
-    return;
+    return false;
   }
   const agents = agentsResult.status === 'fulfilled' ? (agentsResult.value.agents || []) : [];
-  const watching = agents.filter(agent => agentWatchesSession(agent, { runtime, sessionIds: identities, cwd }));
+  const watching = agents.filter(agent => agentWatchesSession(agent, { runtime, sessionIds: watchScopeIds(ctx.selection || {}), cwd, cwdKey: String((ctx.selection || {}).cwd_key || '') }));
   const runs = projection?.runs || [];
   const relationships = projection?.relationships || [];
   const groups = projection?.groups || [];
   const latest = latestRunByBinding(runs);
+  const later = newerUnfinishedByBinding(runs, latest);
 
   const projectionFailed = projectionResult.status === 'rejected';
   if (!watching.length && !runs.length) {
@@ -620,7 +730,7 @@ async function renderAgentStrip(ctx, box) {
     // disabled/legacy bindings may exist but be unrenderable right now
     // (postwork SF-4).
     if (projectionFailed) strip.appendChild(el('div', 'chip st-disputed', 'run status unavailable — reload to retry'));
-    return;
+    return false;
   }
 
   const attachBar = el('div', 'row');
@@ -629,83 +739,172 @@ async function renderAgentStrip(ctx, box) {
 
   const expandHost = el('div', 'agent-strip-expansion');
   const seenBindings = new Set();
+  const rowFor = (agent, bindingID, failed) => {
+    const groupIDs = new Set(runs.filter(item => item.binding_id === bindingID).map(item => item.group_id));
+    return agentStripRow(agent, latest.get(bindingID) || null, groupCounters(relationships, groupIDs), expandHost, ctx, failed,
+      helperSessionForBinding(groups, bindingID, identities), later.get(bindingID) || null);
+  };
   for (const agent of watching) {
     seenBindings.add(agent.binding_id);
-    const run = latest.get(agent.binding_id) || null;
-    const groupIDs = new Set(runs.filter(item => item.binding_id === agent.binding_id).map(item => item.group_id));
-    strip.appendChild(agentStripRow(agent, run, groupCounters(relationships, groupIDs), expandHost, ctx, projectionFailed,
-      helperSessionForBinding(groups, agent.binding_id, identities)));
+    strip.appendChild(rowFor(agent, agent.binding_id, projectionFailed));
   }
   // Runs from bindings that no longer watch (disabled, historical role names)
   // still render — history is not hidden by today's scope.
-  for (const [bindingID, run] of latest) {
+  for (const bindingID of latest.keys()) {
     if (seenBindings.has(bindingID)) continue;
-    const agent = agents.find(item => item.binding_id === bindingID) || null;
-    const groupIDs = new Set(runs.filter(item => item.binding_id === bindingID).map(item => item.group_id));
-    strip.appendChild(agentStripRow(agent, run, groupCounters(relationships, groupIDs), expandHost, ctx, false,
-      helperSessionForBinding(groups, bindingID, identities)));
+    strip.appendChild(rowFor(agents.find(item => item.binding_id === bindingID) || null, bindingID, false));
   }
   strip.appendChild(expandHost);
-
-  if (tagsResult.status === 'fulfilled' && Array.isArray(tagsResult.value.tags) && tagsResult.value.tags.length) {
-    const tagRow = el('div', 'agent-strip-tags');
-    tagRow.appendChild(el('span', 'sub', 'session tags: '));
-    for (const item of tagsResult.value.tags) {
-      const chip = el('span', 'chip cl-observed', String(item.tag || ''));
-      chip.title = 'applied by ' + String(item.agent_key || item.binding_id || 'unknown agent')
-        + (item.expires_at ? ' · expires ' + item.expires_at : '');
-      tagRow.appendChild(chip);
-    }
-    strip.appendChild(tagRow);
-  }
-
-  if (relatedResult.status === 'fulfilled') {
-    const section = relatedSessionsSection(relatedResult.value);
-    if (section) strip.appendChild(section);
-  }
+  return true;
 }
 
-// One provenance-labeled related-sessions presentation: observed native edges
-// and caused agent arcs, never merged (plan §4). Rows navigate to the session.
-function relatedSessionModel(row = {}) {
+function appendSessionTags(strip, tagsResult) {
+  if (tagsResult.status !== 'fulfilled' || !Array.isArray(tagsResult.value.tags) || !tagsResult.value.tags.length) return;
+  const tagRow = el('div', 'agent-strip-tags');
+  tagRow.appendChild(el('span', 'sub', 'session tags: '));
+  for (const item of tagsResult.value.tags) {
+    const chip = el('span', 'chip cl-observed', String(item.tag || ''));
+    chip.title = 'applied by ' + String(item.agent_key || item.binding_id || 'unknown agent')
+      + (item.expires_at ? ' · expires ' + item.expires_at : '');
+    tagRow.appendChild(chip);
+  }
+  strip.appendChild(tagRow);
+}
+
+// sessionLinkNode is the one way this module links a session. app.js opens a
+// plain click in place through the one session-open path; a modified click
+// keeps the real href, so a new tab boots on that session. It never carries
+// the ref-ok class: that click belongs to the reference model, which swallowed
+// every session link. Without both identity halves it is text, not a link.
+function sessionLinkNode(runtime, id, label, extraClass = '') {
+  if (!runtime || !id) return el('span', 'agent-related-id' + (extraClass ? ' ' + extraClass : ''), label);
+  const link = el('a', 'ref session-link' + (extraClass ? ' ' + extraClass : ''), label);
+  link.href = '/?runtime=' + encodeURIComponent(runtime) + '&session=' + encodeURIComponent(id);
+  link.dataset.sessionRuntime = runtime;
+  link.dataset.sessionId = id;
+  link.title = id;
+  return link;
+}
+
+// relatedRowView is one Related-sessions row as the strip shows it. A row
+// links only when the daemon says its id can name a session (`openable`); an
+// id that cannot, such as a native subagent's agent id, is text, never a link
+// that fails. Observed and caused rows are never merged here (plan §4).
+export function relatedRowView(row = {}) {
+  const runtime = String(row.runtime || '');
+  const sessionId = String(row.session_id || '');
+  const runs = Number(row.runs || 0), replies = Number(row.replies || 0), cycle = Number(row.cycle || 0);
+  const parts = [String(row.kind || '')];
+  if (row.direction) parts.push(String(row.direction));
+  if (row.role) parts.push(String(row.role));
+  if (row.provenance === 'caused' && row.state) parts.push(String(row.state));
+  if (cycle) parts.push('cycle ' + cycle);
+  if (runs > 1) parts.push(runs + ' runs');
+  if (replies) parts.push(replies + (replies === 1 ? ' reply' : ' replies'));
+  const idLabel = sessionId ? (runtime ? runtime + ' \u00b7 ' : '') + sessionId.slice(0, 14) + '\u2026' : '';
   return {
-    kind: String(row.kind || ''),
     provenance: String(row.provenance || ''),
-    direction: String(row.direction || ''),
-    runtime: String(row.runtime || ''),
-    sessionId: String(row.session_id || ''),
-    label: String(row.label || ''),
-    role: String(row.role || ''),
-    state: String(row.state || ''),
-    cycle: Number(row.cycle || 0),
+    text: parts.join(' \u00b7 '),
+    description: String(row.description || ''),
+    link: row.openable === true && runtime && sessionId ? { runtime, id: sessionId, label: idLabel } : null,
+    idLabel,
+    sessionId,
+    label: sessionId ? '' : String(row.label || ''),
     unresolved: !!row.unresolved,
   };
 }
 
-function relatedSessionsSection(payload) {
-  const rows = Array.isArray(payload?.related) ? payload.related.map(relatedSessionModel) : [];
-  if (!rows.length) return null;
+// relatedRowsTree orders rows for display: a descendant sits right after the
+// row it was spawned by (its `via`), one indent per hop. A descendant whose
+// launcher is not listed stays where the daemon put it; no row is ever dropped,
+// not even one caught in a cycle of vias.
+export function relatedRowsTree(rows = []) {
+  const listed = new Set(rows.map(row => String(row?.session_id || '')).filter(Boolean));
+  const under = new Map();
+  const top = [];
+  for (const row of rows) {
+    const via = String(row?.via || '');
+    if (via && listed.has(via) && via !== String(row?.session_id || '')) {
+      if (!under.has(via)) under.set(via, []);
+      under.get(via).push(row);
+    } else top.push(row);
+  }
+  const out = [];
+  const placed = new Set();
+  const visit = (row, depth) => {
+    if (placed.has(row)) return;
+    placed.add(row);
+    out.push({ row, depth });
+    const id = String(row?.session_id || '');
+    const nested = id ? under.get(id) : null;
+    if (!nested) return;
+    under.delete(id);
+    for (const child of nested) visit(child, depth + 1);
+  };
+  for (const row of top) visit(row, 0);
+  for (const row of rows) visit(row, 0);
+  return out;
+}
+
+function relatedRowNode(view, depth) {
+  const line = el('div', 'agent-related-row');
+  if (depth) {
+    line.classList.add('agent-related-nested');
+    line.style.marginInlineStart = (depth * 1.25) + 'em';
+  }
+  line.appendChild(el('span', 'chip cl-' + (view.provenance === 'caused' ? 'claimed' : 'observed'), view.provenance));
+  line.appendChild(el('span', '', view.text));
+  if (view.description) {
+    const description = el('span', 'agent-related-desc', view.description);
+    description.title = view.description;
+    line.appendChild(description);
+  }
+  if (view.link) line.appendChild(sessionLinkNode(view.link.runtime, view.link.id, view.link.label));
+  else if (view.idLabel) {
+    const id = el('span', 'agent-related-id', view.idLabel);
+    id.title = view.sessionId;
+    line.appendChild(id);
+  } else if (view.label) {
+    const chip = el('span', 'chip', view.label);
+    if (view.unresolved) chip.title = 'unresolved reference';
+    line.appendChild(chip);
+  }
+  if (view.unresolved && view.sessionId) line.appendChild(el('span', 'chip', 'unresolved'));
+  return line;
+}
+
+// relatedSectionModel takes the settled read. A failed read, or a partial one
+// (the daemon's coverage note), says so; neither looks like "none". Null only
+// when the read succeeded, found nothing and missed nothing.
+export function relatedSectionModel(result) {
+  if (result?.status !== 'fulfilled') {
+    return { unavailable: 'Related sessions unavailable: ' + String(result?.reason?.message || result?.reason || 'unknown error') };
+  }
+  const rows = Array.isArray(result.value?.related) ? result.value.related : [];
+  const coverage = String(result.value?.coverage || '');
+  if (!rows.length && !coverage) return null;
+  return { rows: relatedRowsTree(rows).map(({ row, depth }) => ({ view: relatedRowView(row), depth })), coverage };
+}
+
+// handoffs are the rows a handoff adds: the session this one continues, or who
+// continued this one. They are on another person's device, so they are text.
+function relatedSessionsSection(result, handoffs = []) {
+  const model = relatedSectionModel(result);
+  if (!model && !handoffs.length) return null;
   const section = el('div', 'agent-related-sessions');
   section.appendChild(el('strong', 'sub', 'Related sessions'));
-  for (const row of rows) {
-    const line = el('div', 'agent-related-row');
-    line.appendChild(el('span', 'chip cl-' + (row.provenance === 'caused' ? 'claimed' : 'observed'), row.provenance));
-    let text = row.kind + (row.direction ? ' \u00b7 ' + row.direction : '');
-    if (row.role) text += ' \u00b7 ' + row.role;
-    if (row.cycle) text += ' \u00b7 cycle ' + row.cycle;
-    line.appendChild(el('span', '', text));
-    if (row.sessionId) {
-      const open = el('a', 'ref ref-ok', (row.runtime ? row.runtime + ' \u00b7 ' : '') + row.sessionId.slice(0, 14) + '\u2026');
-      open.href = '/?runtime=' + encodeURIComponent(row.runtime) + '&session=' + encodeURIComponent(row.sessionId);
-      line.appendChild(open);
-    } else if (row.label) {
-      const chip = el('span', 'chip', row.label);
-      if (row.unresolved) chip.title = 'unresolved reference';
-      line.appendChild(chip);
-    }
-    if (row.unresolved && row.sessionId) line.appendChild(el('span', 'chip', 'unresolved'));
+  for (const handoff of handoffs) {
+    const line = el('div', 'agent-related-row agent-related-handoff');
+    line.append(el('span', 'agent-related-id', handoff.label), el('span', 'agent-related-desc', handoff.description));
     section.appendChild(line);
   }
+  if (!model) return section;
+  if (model.unavailable) {
+    section.appendChild(el('div', 'sub', model.unavailable));
+    return section;
+  }
+  for (const { view, depth } of model.rows) section.appendChild(relatedRowNode(view, depth));
+  if (model.coverage) section.appendChild(el('div', 'sub agent-related-coverage', model.coverage));
   return section;
 }
 
@@ -713,16 +912,22 @@ provider({
   id: 'session.agents', zone: 'header', order: -10, title: 'Agents',
   paneModule: { placement: 'deck' },
   match: ctx => ctx.surface === 'session' && !!ctx.selection,
-  render: (ctx, box) => renderAgentStrip(ctx, box),
+  render: async (ctx, box) => { await renderAgentStrip(ctx, box); consumeRevealIntent(); },
 });
 
-// "⚖ n watching" and the session-header Agents button open this panel — the
-// one managed-work surface.
+// The activity line's agents link reveals this module with the intent
+// "expand-first". The strip may render before or after the reveal resolves, so
+// both paths consume the one pending intent, and only one of them acts on it.
+function consumeRevealIntent() {
+  if (!activeStrip?.isConnected) return;
+  if (takeModuleIntent('session.agents') !== 'expand-first') return;
+  activeStrip.scrollIntoView({ block: 'nearest' });
+  activeStrip.querySelector('.agent-strip-row')?.cgExpand?.();
+}
+
 if (typeof document !== 'undefined') {
-  document.addEventListener('cg:agents-panel-open', () => {
-    if (!activeStrip?.isConnected) return;
-    activeStrip.scrollIntoView({ block: 'nearest' });
-    activeStrip.querySelector('.agent-strip-row')?.cgExpand?.();
+  document.addEventListener('cg:module-revealed', event => {
+    if (event.detail?.id === 'session.agents') consumeRevealIntent();
   });
   // Live-run refresh (natural-session plan B-GUI): the live session view
   // dispatches this event when its governance delta channel reports new

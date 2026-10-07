@@ -15,7 +15,10 @@ const ENTRY_LIMIT = 512;
 export const SESSION_ATTENTION_STORAGE_KEY = 'cg-session-attention-v2';
 const ACTIVE = new Set(['queued', 'starting', 'running']);
 const UNREAD = new Set(['new_result', 'new_failure', 'interrupted']);
-const SOURCES = ['task', 'turn'];
+// Three id spaces: task event ids, turn row ids, and agent-ask ids (the
+// daemon's ask_id). Adding a space needs no version bump: the parse keeps
+// what it knows and every merge walks this list.
+const SOURCES = ['task', 'turn', 'agent'];
 
 export function exactSessionKey(runtime, catalogID, _nativeID = '') {
   const provider = String(runtime || '').trim();
@@ -44,9 +47,66 @@ function ageSeconds(item, now) {
 // header reads it through statusLabel from the daemon's frame; the composer's
 // activity row reads it from its own live events. Same words either way.
 export function progressWords(progress, tool) {
+  if (progress === 'starting') return 'starting…';
   if (progress === 'thinking') return 'thinking…';
   if (progress === 'writing') return 'writing…';
   if (progress === 'tool') return 'running ' + (tool || 'a tool');
+  return '';
+}
+
+// The activity line's own words (session-view plan §A6): what it says when the
+// session's updates stop, and the agents link. Closed list, like the rest.
+export const NOT_UPDATING = 'not updating';
+export function agentsLinkWords({ review = 0, running = 0, watching = 0 } = {}) {
+  if (review) return review + ' to review ›';
+  if (running) return running + ' running ›';
+  if (watching) return watching + ' watching ›';
+  return '';
+}
+
+// askStatus is the frame's owner-attention beside the ladder: the newest
+// unresolved agent ask this reader has not acknowledged, and the drafts —
+// proposed replies that were not sent. Plain text only; renderers set it as
+// text, never as markup.
+export function askStatus(item, ledger) {
+  const id = Number(item?.ask_id) || 0;
+  const count = Number(item?.ask_count) || 0;
+  const unseen = id > 0 && count > 0
+    && !(ledger && id <= ledger.cursor(item?.runtime || '', item?.catalog_session_id || '', item?.native_session_id || '', 'agent'));
+  return {
+    unseen, id, count,
+    text: String(item?.ask_text || ''),
+    agent: String(item?.ask_agent || ''),
+    drafts: Number(item?.draft_count) || 0,
+    draftText: String(item?.draft_text || ''),
+    unknown: item?.ask_state === 'unknown',
+  };
+}
+
+// The words an ask and a draft take, on every surface (closed list).
+export const ASKS_YOU = 'asks you';
+export const REPLY_NOT_SENT = 'reply not sent';
+// askLine is the one phrasing of an ask on every surface — rail title, card,
+// header: the helper's own line, attributed to the agent by name.
+export function askLine(ask) {
+  return askText(ask) ? ASKS_YOU + ': ' + askText(ask) : '';
+}
+
+// askText is the line with its agent, without the lead words.
+function askText(ask) {
+  if (!ask?.text) return '';
+  return ask.agent ? ask.text + ' (' + ask.agent + ')' : ask.text;
+}
+
+// agentNote is the quiet line under the status for an agent's words that are
+// not the unseen ask: an ask the reader acknowledged but has not answered
+// (it stays until the owner moves in the session), else an unsent reply. An
+// unreadable ask source draws nothing here: the failure is reported once in
+// the agents' own diagnostics, never as words on every session.
+export function agentNote(ask) {
+  if (!ask) return '';
+  if (ask.count && !ask.unseen) return askLine(ask);
+  if (ask.drafts) return REPLY_NOT_SENT + (ask.draftText ? ': ' + ask.draftText : '');
   return '';
 }
 
@@ -71,6 +131,17 @@ export function statusLabel(item, now = Date.now(), seen = false) {
   if (age !== null) return { text: 'no update for ' + humanDuration(age), age: '', tone: 'quiet' };
   return { text: 'unknown', age: '', tone: 'quiet' };
 }
+// needsReader says whether a rendered status is waiting on the reader: an
+// approval, an agent's ask, a failure, an interruption or a result not yet
+// seen; a session at rest after its turn ended; or an ask the reader saw and
+// has not answered, even while the session runs. It reads the rendered status
+// alone, so a board and a dot can never disagree about the frame behind them.
+const NEEDS_READER = new Set(['approval', 'ask', 'failed', 'interrupted', 'new_result']);
+export function needsReader(status) {
+  if (!status) return false;
+  if (NEEDS_READER.has(status.indicator?.kind) || status.execution === 'waiting') return true;
+  return Boolean(status.ask && status.ask.count > 0 && !status.ask.unseen);
+}
 
 // renderSessionStatus turns one frame plus the reader's ledger into what the
 // rail and header draw. `item` may be null (the daemon has said nothing about
@@ -87,9 +158,16 @@ export function renderSessionStatus(item, ledger, now = Date.now()) {
   const id = Number(item?.attention_id) || 0;
   const seen = UNREAD.has(attention) && id > 0 && ledger
     ? id <= ledger.cursor(runtime, catalogID, nativeID, source) : false;
-  const words = statusLabel(item, now, seen);
+  let words = statusLabel(item, now, seen);
+  const ask = askStatus(item, ledger);
+  // Precedence (plan §6.2): an approval or an input request, then an unseen
+  // ask, then the ladder's own markers. An acknowledged ask shows the marker
+  // beneath it again.
+  const askShows = ask.unseen && attention !== 'approval';
+  if (askShows) words = { text: ASKS_YOU, age: words.age, tone: 'ask' };
   let kind = 'none';
   if (attention === 'approval') kind = 'approval';
+  else if (askShows) kind = 'ask';
   else if (ACTIVE.has(execution)) kind = 'running';
   else if (attention === 'new_failure' && !seen) kind = 'failed';
   else if (attention === 'interrupted' && !seen) kind = 'interrupted';
@@ -99,9 +177,9 @@ export function renderSessionStatus(item, ledger, now = Date.now()) {
   // The explanation is about the reader's work, in the reader's words. The
   // daemon's own item.detail is NOT rendered: it describes how we know, and
   // that is our bookkeeping.
-  const detail = explain(kind, execution, presence, words.age);
+  const detail = kind === 'ask' ? askText(ask) : explain(kind, execution, presence, words.age);
   return {
-    execution, presence, attention, seen,
+    execution, presence, attention, seen, ask,
     attention_id: id, attention_source: source,
     indicator: { kind, label: kind === 'none' ? '' : label, detail },
     label, detail, age: words.age, tone: words.tone,
@@ -141,17 +219,21 @@ function validState(value) {
   return { version: STORAGE_VERSION, baselined: value.baselined, entries };
 }
 
+function emptyEntry() {
+  const entry = { touched: 0 };
+  for (const source of SOURCES) entry[source] = 0;
+  return entry;
+}
+
 function mergeAttentionState(left, right) {
   const merged = emptyState();
   merged.baselined = Boolean(left?.baselined || right?.baselined);
   for (const state of [left, right]) {
     for (const [key, entry] of Object.entries(state?.entries || {})) {
-      const previous = merged.entries[key] || { task: 0, turn: 0, touched: 0 };
-      merged.entries[key] = {
-        task: Math.max(previous.task, entry.task || 0),
-        turn: Math.max(previous.turn, entry.turn || 0),
-        touched: Math.max(previous.touched, entry.touched || 0),
-      };
+      const previous = merged.entries[key] || emptyEntry();
+      const next = { touched: Math.max(previous.touched, entry.touched || 0) };
+      for (const source of SOURCES) next[source] = Math.max(previous[source] || 0, entry[source] || 0);
+      merged.entries[key] = next;
     }
   }
   return merged;
@@ -189,6 +271,8 @@ export class SessionAttentionStore {
   // first looked as already read — for the TASK space only. Turn rows that
   // pre-date the feature are never called unread, because there is no
   // baseline to compare them to; they simply carry no cursor until acknowledged.
+  // Agent asks inside the daemon's ask horizon start unseen: an ask is a
+  // question still open, and owner motion resolves it daemon-side.
   establishBaseline(tasks, throughEventID) {
     if (this.state.baselined || !Number.isSafeInteger(throughEventID) || throughEventID <= 0) return false;
     const touched = this.now();
@@ -197,7 +281,7 @@ export class SessionAttentionStore {
       const key = exactSessionKey(task.session_runtime, task.catalog_session_id, task.native_session_id);
       const cursor = Number(task.last_event_id) || 0;
       if (!key || cursor <= 0) continue;
-      const previous = this.state.entries[key] || { task: 0, turn: 0, touched: 0 };
+      const previous = this.state.entries[key] || emptyEntry();
       this.state.entries[key] = { ...previous, task: Math.max(previous.task, cursor), touched };
     }
     this.state.baselined = true; this.bound(); this.persist(); this.emit(); return true;
@@ -211,7 +295,7 @@ export class SessionAttentionStore {
     if (!key || !SOURCES.includes(source) || !Number.isSafeInteger(cursor) || cursor <= 0) return false;
     this.state = mergeAttentionState(this.state, this.read());
     if (cursor <= this.cursor(runtime, catalogID, nativeID, source)) return false;
-    const previous = this.state.entries[key] || { task: 0, turn: 0, touched: 0 };
+    const previous = this.state.entries[key] || emptyEntry();
     this.state.entries[key] = { ...previous, [source]: cursor, touched: this.now() };
     this.bound(); this.persist(); this.emit(); return true;
   }

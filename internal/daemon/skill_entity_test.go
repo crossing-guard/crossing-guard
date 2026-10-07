@@ -25,16 +25,16 @@ func TestSkillNameBecomesAnEntity(t *testing.T) {
 	g := NewGovernor(ix, dets)
 
 	if err := g.Observe(Observation{SessionID: "s", Tool: "Skill",
-		Skill: "oms-amazon-ai-proxy", TS: 10, Decision: "allow"}); err != nil {
+		Skill: "example-data-proxy", TS: 10, Decision: "allow"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// The normalizer must resolve the skill as the target entity.
-	n := Normalize(Observation{Tool: "Skill", Skill: "oms-amazon-ai-proxy"})
-	if n.TargetKind != "skill" || n.TargetIdentity != "oms-amazon-ai-proxy" {
+	n := Normalize(Observation{Tool: "Skill", Skill: "example-data-proxy"})
+	if n.TargetKind != "skill" || n.TargetIdentity != "example-data-proxy" {
 		t.Fatalf("skill not resolved as an entity: %+v", n)
 	}
-	wantID := engine.EntityID("skill", "oms-amazon-ai-proxy")
+	wantID := engine.EntityID("skill", "example-data-proxy")
 	if n.TargetID != wantID {
 		t.Fatalf("skill entity id = %q, want %q", n.TargetID, wantID)
 	}
@@ -66,7 +66,7 @@ func TestSkillNameBecomesAnEntity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ents) != 1 || ents[0].Entity.Identity != "oms-amazon-ai-proxy" {
+	if len(ents) != 1 || ents[0].Entity.Identity != "example-data-proxy" {
 		t.Fatalf("skill not listed under kind=skill: %+v", ents)
 	}
 }

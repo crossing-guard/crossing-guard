@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "id": "ses_00000000000000000000000000",
+  "device_id": "dev_11111111111111111111111111",
+  "session": {
+    "id": "ses_00000000000000000000000000",
+    "runtime": "claude",
+    "native_id": "x"
+  },
+  "workspace": {
+    "repository_id": null
+  },
+  "events": {
+    "count": 0,
+    "first_at": null,
+    "last_at": null
+  },
+  "chain_claim": {
+    "status": "device-attested",
+    "rows": 0,
+    "chained": 0,
+    "legacy": 0,
+    "disk_span": [
+      0,
+      0
+    ],
+    "held_span": null
+  },
+  "reported_at": "2026-09-29T10:06:00Z"
+}

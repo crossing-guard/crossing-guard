@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCursorHookInputNormalizesDocumentedAliases(t *testing.T) {
@@ -171,6 +172,11 @@ func TestApprovalRequestCarriesRuntimeAndCursorUnknownBudgetFailsClosed(t *testi
 	t.Setenv("CG_GOVERN", server.Listener.Addr().String())
 	t.Setenv("CG_GOVERN_TOKEN", "token")
 	pendingObserve = nil
+	// A prompt's budget is what is left of this process's one deadline: a test binary
+	// that has run longer than the budget would be denied without asking.
+	started := hookStarted
+	hookStarted = time.Now()
+	t.Cleanup(func() { hookStarted = started })
 	allowed, via, _ = askHuman("claude-session", claudeVendor, "rule", "ask", "message", "command", "tags", "")
 	if allowed || via != "inbox-user-deny" {
 		t.Fatalf("existing runtime ask allowed=%t via=%q", allowed, via)

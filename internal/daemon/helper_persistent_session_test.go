@@ -36,6 +36,10 @@ func (driver *helperSessionFixtureDriver) ProjectEvent(object map[string]any) []
 	return []ChatEvent{{"type": "text", "text": anyString(object["text"])}}
 }
 
+func (driver *helperSessionFixtureDriver) LocalRoute(request ChatRequest) (bool, string) {
+	return fixtureLocalRoute(request)
+}
+
 func (driver *helperSessionFixtureDriver) ChatCapability() ChatCapability {
 	return managedFixtureDriver{}.ChatCapability()
 }
@@ -112,7 +116,8 @@ func TestHelperSessionIsOnePerSourceSessionAndCoalescesMidTurn(t *testing.T) {
 	gate := filepath.Join(root, "first-turn-may-finish")
 	driver.command = func(request ChatRequest) string {
 		if !strings.Contains(request.Prompt, "Crossing Guard") {
-			return jsonTextCommand("Source turn text")
+			// The source's turn starts at its session frame.
+			return helperTurnCommand(request.SessionID, "Source turn text", "")
 		}
 		if request.SessionID == "" {
 			// The first turn holds until the test has SEEN the source's next
@@ -162,6 +167,8 @@ func TestHelperSessionIsOnePerSourceSessionAndCoalescesMidTurn(t *testing.T) {
 	if len(runs) != 2 {
 		t.Fatalf("two turns expected after one source turn: %+v", runs)
 	}
+	// Adoption, the turn count, and the slot clear land after completed.
+	waitForTerminalsHandled(t, fixture, runs)
 	groups := groupsFor(t, fixture, runs)
 	if len(groups) != 1 {
 		t.Fatalf("one source session must pair with one group: %+v", groups)
@@ -217,6 +224,7 @@ func TestHelperSessionIsOnePerSourceSessionAndCoalescesMidTurn(t *testing.T) {
 	})
 	waitForGroup(t, fixture, firstRun.GroupID, func(group store.ManagedGroup) bool { return group.HelperTurns == 4 })
 	runs = runsFor(t, fixture, binding.BindingID)
+	waitForTerminalsHandled(t, fixture, runs)
 	if groups = groupsFor(t, fixture, runs); len(groups) != 1 {
 		t.Fatalf("a resumed source turn must stay in the pairing group: %+v", groups)
 	}
@@ -376,19 +384,19 @@ func TestHelperTurnRequestAndBudgetFollowCapability(t *testing.T) {
 	if _, _, err := fixture.host.ix.AdmitManagedRun(group, run, store.ManagedGroupBudget{MaxTotal: 8, MaxActive: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "managed-fixture", "", "", fixture.root, "p"); request.SessionID != "" {
+	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "managed-fixture", "", "", fixture.root, "p", nil); request.SessionID != "" {
 		t.Fatalf("no session yet: %+v", request)
 	}
 	if err := fixture.host.ix.SetGroupHelperSession("org_req", "managed-fixture", "hs-r", 0, true, 2); err != nil {
 		t.Fatal(err)
 	}
-	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "managed-fixture", "m", "", fixture.root, "p"); request.SessionID != "hs-r" || request.Model != "m" {
+	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "managed-fixture", "m", "", fixture.root, "p", nil); request.SessionID != "hs-r" || request.Model != "m" {
 		t.Fatalf("primary route resumes: %+v", request)
 	}
-	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "codex", "", "", fixture.root, "p"); request.SessionID != "" {
+	if request := fixture.host.helperTurnRequest("org_req", "managed-fixture", "codex", "", "", fixture.root, "p", nil); request.SessionID != "" {
 		t.Fatalf("a fallback route runs fresh: %+v", request)
 	}
-	if request := fixture.host.helperTurnRequest("org_req", "codex", "codex", "", "", fixture.root, "p"); request.SessionID != "" {
+	if request := fixture.host.helperTurnRequest("org_req", "codex", "codex", "", "", fixture.root, "p", nil); request.SessionID != "" {
 		t.Fatalf("a recorded session never crosses runtimes: %+v", request)
 	}
 	profile := selectManagedProfile(t, fixture.owner, []byte(strings.Replace(string(sessionKindsFollowerProfileSource()), "  max-depth: 1\n", "  max-depth: 1\n  max-concurrency: 3\n", 1)))
@@ -504,7 +512,8 @@ func TestHelperSessionAdoptsForksAndClearsOnlyUnansweredFailures(t *testing.T) {
 	driver := &helperSessionFixtureDriver{}
 	driver.command = func(request ChatRequest) string {
 		if !strings.Contains(request.Prompt, "Crossing Guard") {
-			return jsonTextCommand("Source turn text")
+			// The source's turn starts at its session frame.
+			return helperTurnCommand(request.SessionID, "Source turn text", "")
 		}
 		switch mode.Load() {
 		case "fork":
@@ -536,7 +545,11 @@ func TestHelperSessionAdoptsForksAndClearsOnlyUnansweredFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForRuns(t, fixture.host, settledCount(n))
-		seed := runsFor(t, fixture, binding.BindingID)[0]
+		// Adopt/clear run after the settle write; "keeps the session" is only
+		// provable once they have.
+		runs := runsFor(t, fixture, binding.BindingID)
+		waitForTerminalsHandled(t, fixture, runs)
+		seed := runs[0]
 		return waitForGroup(t, fixture, seed.GroupID, func(group store.ManagedGroup) bool {
 			occupying, _ := fixture.host.ix.OccupyingManagedRuns(group.GroupID)
 			return group.PendingEventID == 0 && occupying == 0

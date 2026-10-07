@@ -27,7 +27,7 @@ type ReviewRepository interface {
 }
 
 // ReviewBudgets are the observation budgets and policy the console
-// configuration publishes (console.json `diff.*`); the daemon passes them in.
+// configuration publishes (daemon.json `diff.*`); the daemon passes them in.
 type ReviewBudgets struct {
 	BaseRef           string
 	MaxFiles          int

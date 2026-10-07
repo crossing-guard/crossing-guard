@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"crossing-guard/internal/modelroute"
 	"crossing-guard/internal/orchestration"
 	"crossing-guard/internal/orchestration/profilefs"
 	"crossing-guard/store"
@@ -90,8 +91,7 @@ func registerOrchestrationReviewRoutes(mux *http.ServeMux, host *orchestrationRe
 			ProfileID             string `json:"profile_id"`
 			ProfileSourceDigest   string `json:"profile_source_digest"`
 			ProfileBundleDigest   string `json:"profile_bundle_digest"`
-			Endpoint              string `json:"endpoint"`
-			Model                 string `json:"model"`
+			RouteID               string `json:"route_id"`
 			TimeoutMS             int    `json:"timeout_ms"`
 			Effect                string `json:"effect"`
 			ApprovalSubdeadlineMS int    `json:"approval_subdeadline_ms"`
@@ -99,8 +99,15 @@ func registerOrchestrationReviewRoutes(mux *http.ServeMux, host *orchestrationRe
 			RuntimeFilter         string `json:"runtime_filter"`
 			ExpectedStateToken    string `json:"expected_state_token"`
 			Confirmed             bool   `json:"confirmed"`
+			typedModelFields
 		}
 		if err := decodeReviewJSON(w, r, &request); err != nil {
+			writeReviewError(w, err)
+			return
+		}
+		// A write that still sends an endpoint, model or runtime is refused by name
+		// (plan §5.3, criterion 56): the reviewer names a model route.
+		if err := request.refusal(""); err != nil {
 			writeReviewError(w, err)
 			return
 		}
@@ -110,7 +117,7 @@ func registerOrchestrationReviewRoutes(mux *http.ServeMux, host *orchestrationRe
 		}
 		binding, err := host.putBinding(reviewBindingCommand{ProfileID: request.ProfileID,
 			ProfileSourceDigest: request.ProfileSourceDigest, ProfileBundleDigest: request.ProfileBundleDigest,
-			Endpoint: request.Endpoint, Model: request.Model, TimeoutMS: request.TimeoutMS,
+			RouteID: strings.TrimSpace(request.RouteID), TimeoutMS: request.TimeoutMS,
 			Effect: request.Effect, ApprovalSubdeadlineMS: request.ApprovalSubdeadlineMS,
 			// Absent means yes: a delegated reviewer the operator has not spoken
 			// about may answer questions, which is what the grant is for.
@@ -223,6 +230,12 @@ func reviewHistory(ix *store.Index, limit int, runtime, sessionID string) ([]rev
 	if err != nil {
 		return nil, err
 	}
+	return reviewHistoryItems(ix, records)
+}
+
+// reviewHistoryItems joins each invocation with what the governance record
+// and the tool's actual result say, for reviewCard.
+func reviewHistoryItems(ix *store.Index, records []store.ReviewInvocation) ([]reviewHistoryItem, error) {
 	items := make([]reviewHistoryItem, 0, len(records))
 	for _, record := range records {
 		retained, readErr := ix.ReviewSourceEvidenceRetained(record.EventID)
@@ -296,8 +309,15 @@ func writeReviewError(w http.ResponseWriter, err error) {
 		status, code, message = http.StatusConflict, "action_conflict", "The action identity conflicts with retained review evidence."
 	} else {
 		var problem *reviewHTTPProblem
+		var refusal *routeRefusal
+		var admission *modelroute.AdmissionRefused
 		if errors.As(err, &problem) {
 			status, code, message = http.StatusBadRequest, problem.code, problem.message
+		} else if errors.As(err, &refusal) {
+			// A route refusal is typed and names its field or route; it is shown as it is.
+			status, code, message = http.StatusBadRequest, refusal.Code, refusal.Message
+		} else if errors.As(err, &admission) {
+			code, message = admission.Code(), admission.Error()
 		} else if strings.Contains(err.Error(), "store") || strings.Contains(err.Error(), "database") {
 			status, code, message = http.StatusInternalServerError, "storage_error", "Report-only review storage is unavailable."
 		}

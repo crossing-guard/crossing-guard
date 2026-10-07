@@ -44,6 +44,14 @@ type Record struct {
 	Body       string   `json:"-"`
 	Path       string   `json:"-"`
 	Pending    bool     `json:"pending,omitempty"` // lives in pending/, never projected; GUI inbox flag (R7)
+	// Scope survives into recall (team item 5 decision 12; invariant 6: scope is a
+	// field). Store records carry all three; a legacy mirror file has only Repository
+	// and reads as a weak repository record. Shadowed marks a pulled team record whose
+	// name a local user record already holds (decision 15): never recalled.
+	ScopeType          string `json:"scope_type,omitempty"` // user | repository | organization
+	ScopeID            string `json:"scope_id,omitempty"`
+	RepositoryIdentity string `json:"repository_identity,omitempty"` // weak | remote-sha256
+	Shadowed           bool   `json:"-"`
 }
 
 // Categories is the record-category enum (ADR 0013 D1 frontmatter).

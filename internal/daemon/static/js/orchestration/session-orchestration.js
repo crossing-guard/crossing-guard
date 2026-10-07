@@ -1,30 +1,60 @@
 import { el } from '../core.js';
 import { managedProjection } from './managed-api.js';
-import { loadAgents, agentWatchesSession, sessionIdentities } from './agents-api.js';
+import { loadAgents, agentWatchesSession, sessionIdentities, watchScopeIds } from './agents-api.js';
+import { isModuleEnabled, revealModule } from '../pane-host.js';
+import { agentsLinkWords } from '../task/session-status.js';
 
-async function mountSessionOrchestration(row, runtime, session, context = {}) {
-  // Every exact identity this session is known under (artifact id, vendor
-  // meta id, vendor thread id): runs are recorded under whichever identity
-  // the task row carried, so the header counters must read all of them
-  // (g4 plan §3 — same alternates the strip uses).
-  const identities = sessionIdentities({ id: session, meta_id: context.meta_id, thread_id: context.thread_id });
-  const button = el('button', 'btn', 'Agents');
-  // The session-agents panel (right column) is the ONE managed-work surface.
-  button.onclick = () => document.dispatchEvent(new CustomEvent('cg:agents-panel-open', { detail: { runtime, session } }));
-  row.appendChild(button);
-  // "⚖ n watching" — which enabled agents cover this session (deterministic
-  // scope match, agents-api.js). Clicking opens the right-column agent panel.
-  void loadAgents().then(payload => {
-    if (!row.isConnected) return;
-    const scope = { runtime, sessionIds: identities, cwd: String(context.cwd || '') };
-    const watching = (payload.agents || []).filter(agent => agentWatchesSession(agent, scope));
-    if (!watching.length) return;
-    const indicator = el('button', 'btn session-agents-watching', '⚖ ' + watching.length + ' watching');
-    indicator.title = 'Agents watching this session: ' + watching.map(agent => String(agent.profile_name || agent.profile_id || agent.binding_id)).join(', ');
-    indicator.onclick = () => document.dispatchEvent(new CustomEvent('cg:agents-panel-open', { detail: { runtime, session } }));
-    row.appendChild(indicator);
-  }).catch(() => { /* the agents route is additive; the header stays quiet without it */ });
-  try { const projection = await managedProjection(runtime, identities.length ? identities : session); if (!button.isConnected) return; const active = (projection.runs || []).filter(run => ['admitted', 'running'].includes(run.state)).length; const needs = (projection.runs || []).filter(run => run.state === 'completed' && ['draft_reply', 'request_interrupt', 'launch_profile'].includes(run.action)).length; const total = (projection.runs || []).length; if (active) button.textContent = active + (active === 1 ? ' agent running' : ' agents running'); else if (needs) button.textContent = needs + ' agent item' + (needs === 1 ? '' : 's') + ' need review'; else if (total) button.textContent = total + ' agent item' + (total === 1 ? '' : 's'); }
-  catch { button.title = 'Agent run status is unavailable; open to retry.'; }
+// mountSessionOrchestration renders the ONE agents link at the end of the
+// session's activity line (session-view-and-console-preferences plan §A3):
+// "N to review ›" when agent work waits on the reader, else "N running ›",
+// else "N watching ›", else nothing. Clicking reveals the session.agents
+// module in the workspace. The link exists only while that module can be
+// revealed, so it is never a control that does nothing.
+async function mountSessionOrchestration(host, runtime, session, context = {}) {
+  // Every id that names this session, as the daemon published them: runs are
+  // recorded under whichever identity the task row carried, so the counts
+  // must read all of them (g4 plan §3). Watching compares the thread id too
+  // (watchScopeIds, child-thread-identity plan D-1).
+  const identities = sessionIdentities({ id: session, identities: context.identities });
+  const counts = { watching: 0, running: 0, review: 0 };
+  const link = el('button', 'activity-agents');
+  link.type = 'button';
+  // A reveal that failed hides the link until the workspace changes again, so
+  // it never stays on screen as a control that does nothing.
+  let failed = false;
+  link.onclick = () => {
+    revealModule('session.agents', { intent: 'expand-first' }).catch(() => { failed = true; paint(); });
+  };
+  function paint() {
+    if (!host.isConnected) return;
+    const words = agentsLinkWords(counts);
+    link.textContent = words;
+    link.classList.toggle('review', counts.review > 0);
+    const show = Boolean(words) && !failed && isModuleEnabled('session.agents');
+    if (show && !link.isConnected) host.appendChild(link);
+    if (!show && link.isConnected) link.remove();
+  }
+  const onModuleState = () => {
+    if (!host.isConnected) { document.removeEventListener('cg:module-state', onModuleState); return; }
+    failed = false;
+    paint();
+  };
+  document.addEventListener('cg:module-state', onModuleState);
+  const [agents, projection] = await Promise.allSettled([
+    loadAgents(),
+    managedProjection(runtime, identities.length ? identities : session),
+  ]);
+  if (agents.status === 'fulfilled') {
+    const scope = { runtime, cwd: String(context.cwd || ''), cwdKey: String(context.cwd_key || ''),
+      sessionIds: watchScopeIds({ id: session, meta_id: context.meta_id, thread_id: context.thread_id }) };
+    counts.watching = (agents.value.agents || []).filter(agent => agentWatchesSession(agent, scope)).length;
+  }
+  if (projection.status === 'fulfilled') {
+    const runs = projection.value.runs || [];
+    counts.running = runs.filter(run => ['admitted', 'running'].includes(run.state)).length;
+    // The daemon's contract flag, never a list kept here (RT-11).
+    counts.review = runs.filter(run => run.awaits_operator === true).length;
+  }
+  paint();
 }
 export { mountSessionOrchestration };

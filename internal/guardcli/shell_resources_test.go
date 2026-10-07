@@ -78,7 +78,7 @@ func TestShellResourceClaimsLiteralHeredocOutput(t *testing.T) {
 	tests := []struct {
 		name, command, target string
 	}{
-		{"single quoted delimiter", "cat > app/Console/Commands/TypesenseHealth.php <<'PHP'\n<?php\ncat body.txt\nPHP\ncat after.txt", "app/Console/Commands/TypesenseHealth.php"},
+		{"single quoted delimiter", "cat > app/Console/Commands/SearchHealth.php <<'PHP'\n<?php\ncat body.txt\nPHP\ncat after.txt", "app/Console/Commands/SearchHealth.php"},
 		{"double quoted delimiter", "cat > \"docs/a b.md\" <<\"DOC\"\nbody\nDOC", "docs/a b.md"},
 		{"bare delimiter", "cat > output.txt <<EOF\nbody\nEOF\n", "output.txt"},
 		{"crlf delimiter", "cat > output.txt <<EOF\r\nbody\r\nEOF\r\n", "output.txt"},

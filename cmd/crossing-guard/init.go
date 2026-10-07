@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,13 +31,17 @@ import (
 	"crossing-guard/harvest"
 	"crossing-guard/internal/daemon"
 	"crossing-guard/internal/guardcli"
+	"crossing-guard/internal/platform"
 	"crossing-guard/internal/rulebook"
 )
 
 func initCmd(args []string) {
-	dryRun, assumeYes, err := parseInitArgs(args)
+	dryRun, assumeYes, recallAnswer, err := parseInitArgs(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "usage: crossing-guard init [--dry-run] [--yes]")
+		fmt.Fprintln(os.Stderr, "usage: crossing-guard init [--dry-run] [--yes] [--recall | --no-recall]")
+		if err == errRecallConflict {
+			fmt.Fprintln(os.Stderr, "  "+err.Error())
+		}
 		os.Exit(2)
 	}
 	self, err := os.Executable()
@@ -48,7 +53,7 @@ func initCmd(args []string) {
 	fmt.Println("crossing-guard init — one memory, one rulebook, every agent")
 	fmt.Println("  binary: " + self)
 	fmt.Println("  data:   " + dataDir() + "   (nothing leaves this machine)")
-	if warning := initPlatformWarning(daemon.CurrentPlatformSupport()); warning != "" {
+	if warning := initPlatformWarning(platform.Current()); warning != "" {
 		fmt.Println(warning)
 	}
 
@@ -139,8 +144,11 @@ func initCmd(args []string) {
 		fmt.Printf("\nRulebook: UNAVAILABLE — %v\n", loadErr)
 	}
 
+	in := bufio.NewReader(os.Stdin)
 	if governable == 0 {
 		fmt.Println("\nNothing to attach.")
+		// Recall has its own yes, so an all-current machine still reaches it.
+		initRecall(in, self, dryRun, recallAnswer)
 		if dryRun {
 			return // --dry-run promised "touches nothing" — that includes a network probe
 		}
@@ -165,12 +173,12 @@ func initCmd(args []string) {
 				fmt.Println("  " + r.Config)
 			}
 		}
+		initRecall(in, self, dryRun, recallAnswer)
 		return
 	}
 
 	// ── consent, per runtime ──────────────────────────────────────────────────
 	// Per-runtime, because attaching Claude has never implied attaching Codex.
-	in := bufio.NewReader(os.Stdin)
 	attached := 0
 	for _, r := range runtimes {
 		if !r.Installed || ((r.Consented || r.Attached) && r.Current) {
@@ -200,15 +208,16 @@ func initCmd(args []string) {
 	if attached == 0 {
 		fmt.Println("\nNothing was attached.")
 	}
+	initRecall(in, self, dryRun, recallAnswer)
 
 	reportService(dryRun)
 	reportConsole()
 }
 
 // initPlatformWarning presents the existing capability record at the front door. It
-// deliberately contains no GOOS switch or copied support table: daemon.PlatformSupport
-// remains the one truth that doctor, startup, enforcement, and init all consume.
-func initPlatformWarning(support daemon.PlatformSupport) string {
+// deliberately contains no GOOS switch or copied support table: platform.Support
+// remains the one truth that doctor, startup, enforcement, coverage and init all consume.
+func initPlatformWarning(support platform.Support) string {
 	if support.StatefulEnforcementReady() {
 		return ""
 	}
@@ -219,20 +228,37 @@ func initPlatformWarning(support daemon.PlatformSupport) string {
 		support.GOOS, support.Service, support.Uninstall, support.StoreACL, support.Note)
 }
 
-func parseInitArgs(args []string) (dryRun, assumeYes bool, err error) {
+// errRecallConflict is --recall and --no-recall given together.
+var errRecallConflict = errors.New("--recall and --no-recall cannot both be given")
+
+// parseInitArgs reads init's flags. recall is "yes" (--recall), "no"
+// (--no-recall) or "" (ask). --yes answers the hook questions only: the
+// recall tools are a separate yes (recall-mcp-v1-plan §3.7).
+func parseInitArgs(args []string) (dryRun, assumeYes bool, recall string, err error) {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	var recallYes, recallNo bool
 	flags.BoolVar(&dryRun, "dry-run", false, "show the plan without changing anything")
 	flags.BoolVar(&dryRun, "n", false, "show the plan without changing anything")
 	flags.BoolVar(&assumeYes, "yes", false, "accept runtime attachment prompts")
 	flags.BoolVar(&assumeYes, "y", false, "accept runtime attachment prompts")
+	flags.BoolVar(&recallYes, "recall", false, "register the recall tools with every attached runtime")
+	flags.BoolVar(&recallNo, "no-recall", false, "do not register the recall tools")
 	if err := flags.Parse(args); err != nil {
-		return false, false, err
+		return false, false, "", err
 	}
 	if flags.NArg() != 0 {
-		return false, false, fmt.Errorf("unexpected argument %q", flags.Arg(0))
+		return false, false, "", fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
-	return dryRun, assumeYes, nil
+	switch {
+	case recallYes && recallNo:
+		return false, false, "", errRecallConflict
+	case recallYes:
+		recall = "yes"
+	case recallNo:
+		recall = "no"
+	}
+	return dryRun, assumeYes, recall, nil
 }
 
 // ephemeralBinary reports whether this binary sits somewhere it will not stay.
@@ -245,10 +271,14 @@ func ephemeralBinary(self string) (bool, string) {
 // ask reads one y/n. A non-interactive stdin (CI, a pipe) must not be read as
 // consent: absent a human, the answer is no, and --yes is how a script says yes
 // on purpose.
-func ask(in *bufio.Reader, prompt string) bool {
+func ask(in *bufio.Reader, prompt string) bool { return askWithFlag(in, prompt, "--yes") }
+
+// askWithFlag is ask with the flag that answers this question named in its
+// non-interactive hints.
+func askWithFlag(in *bufio.Reader, prompt, consentFlag string) bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
-		fmt.Println(prompt + " no (stdin is not a terminal; pass --yes to consent non-interactively)")
+		fmt.Println(prompt + " no (stdin is not a terminal; pass " + consentFlag + " to consent non-interactively)")
 		return false
 	}
 	fmt.Print(prompt + " [y/N] ")
@@ -257,7 +287,7 @@ func ask(in *bufio.Reader, prompt string) bool {
 		// stdin passed the terminal test (/dev/null is a character device) but had
 		// nothing to give. Declining is right; declining SILENTLY is not — a reader
 		// would see a prompt they never got to answer and no reason why.
-		fmt.Println("\n  (no answer — stdin ended; pass --yes to consent non-interactively)")
+		fmt.Println("\n  (no answer — stdin ended; pass " + consentFlag + " to consent non-interactively)")
 		return false
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))

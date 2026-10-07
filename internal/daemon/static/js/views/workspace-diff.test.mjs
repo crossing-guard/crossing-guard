@@ -18,7 +18,7 @@ test('the scope menu lists every scope and disables git scopes with the reason',
 });
 
 test('every §3.5 condition maps to a pane state, and only checkout conditions disable git scopes', () => {
-  for (const code of ['no-recorded-folder', 'ambiguous-folder', 'not-a-repository', 'route-missing']) {
+  for (const code of ['no-recorded-folder', 'ambiguous-folder', 'not-a-repository', 'route-missing', 'review-unavailable']) {
     assert.equal(problemState({ code }).disablesGit, true, code);
   }
   for (const code of ['git-failed', 'git-timeout', 'base-ref-missing', 'unreachable', 'invalid-path', 'file-not-in-scope']) {

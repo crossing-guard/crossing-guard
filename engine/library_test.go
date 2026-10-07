@@ -2,6 +2,8 @@ package engine
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -113,8 +115,10 @@ func TestStructuralFloorIsExactSubsetOfStarter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(floor) != 30 || len(starter) != 69 {
-		t.Fatalf("migration snapshot floor=%d starter=%d, want 30/69", len(floor), len(starter))
+	// 70 since data.credential (owner ruling D-6, stateful-rule-coverage plan): the
+	// legacy starter changes only by a recorded owner ruling.
+	if len(floor) != 30 || len(starter) != 70 {
+		t.Fatalf("migration snapshot floor=%d starter=%d, want 30/70", len(floor), len(starter))
 	}
 	starterByID := map[string]Detector{}
 	for _, detector := range starter {
@@ -132,11 +136,123 @@ func TestStructuralFloorIsExactSubsetOfStarter(t *testing.T) {
 		}
 	}
 	for _, opinionatedID := range []string{"area.src", "area.secrets", "net.dest", "risk.rm-rf",
-		"secret.private-key", "data.email", "agent.claim-done", "user.frustration", "phase.red-team"} {
+		"secret.private-key", "data.email", "data.credential", "agent.claim-done", "user.frustration", "phase.red-team"} {
 		for _, detector := range floor {
 			if detector.ID == opinionatedID {
 				t.Fatalf("opinionated detector %s leaked into structural floor", opinionatedID)
 			}
 		}
 	}
+}
+
+// secretSamples holds one positive sample per shipped secret detector. A new secret
+// detector without a sample fails TestCredentialProducerCoversEverySecretDetector, which
+// is the point: it must be folded into data.credential too.
+var secretSamples = map[string]string{
+	"secret.aws-key":     "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+	"secret.private-key": "-----BEGIN RSA PRIVATE KEY-----",
+	"secret.gh-token":    "token ghp_" + strings.Repeat("a", 36) + " end",
+	"secret.bearer":      "curl -H 'authorization: Bearer abcdefghij0123'",
+}
+
+// data.credential is the data-class=credential-material producer, and its regex is the
+// secret detectors' regexes as alternatives. Two guards keep them from drifting: each
+// secret regex must appear verbatim as one alternative (a (?i)X flag as a (?i:X) group),
+// and each secret detector's sample must fire both it and data.credential. The first
+// catches a broadened secret regex whose old sample still passes; the second catches an
+// alternative that no longer matches what it claims to.
+func TestCredentialProducerCoversEverySecretDetector(t *testing.T) {
+	dets, err := DefaultDetectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cred *Detector
+	for i := range dets {
+		if dets[i].ID == "data.credential" {
+			cred = &dets[i]
+		}
+	}
+	if cred == nil || cred.Tag.Key != "data-class" || cred.Tag.Value != "credential-material" ||
+		cred.Scope != "resource" || len(cred.Roles) != 0 || cred.Coverage.Enumerable {
+		t.Fatalf("data.credential missing or misdeclared: %+v", cred)
+	}
+	// Its gaps carry every secret detector's gaps, so the per-term coverage report for a
+	// data-class term is never narrower than the secret terms it summarizes.
+	credGaps := map[string]bool{}
+	for _, g := range cred.Coverage.Gaps {
+		credGaps[g] = true
+	}
+	for _, d := range dets {
+		if d.Tag.Key != "secret" {
+			continue
+		}
+		for _, g := range d.Coverage.Gaps {
+			if !credGaps[g] {
+				t.Errorf("data.credential gaps miss %s gap %q", d.ID, g)
+			}
+		}
+	}
+	alternatives := map[string]bool{}
+	for _, alt := range strings.Split(cred.Regex, ")|(") {
+		alt = strings.TrimSuffix(strings.TrimPrefix(alt, "("), ")")
+		alternatives[alt] = true
+	}
+	secrets := 0
+	for _, d := range dets {
+		if d.Tag.Key != "secret" {
+			continue
+		}
+		secrets++
+		want := "?:" + d.Regex
+		if flagged, ok := strings.CutPrefix(d.Regex, "(?i)"); ok {
+			want = "?i:" + flagged
+		}
+		if !alternatives[want] {
+			t.Errorf("%s regex %q is not an alternative of data.credential (want %q)", d.ID, d.Regex, want)
+		}
+		sample, ok := secretSamples[d.ID]
+		if !ok {
+			t.Errorf("%s has no sample; add one and fold it into data.credential", d.ID)
+			continue
+		}
+		tags := Classify(Event{Text: sample, Role: "tool_call"}, dets)
+		if !hasTag(tags, "secret", d.Tag.Value) || !hasTag(tags, "data-class", "credential-material") {
+			t.Errorf("%s sample %q: tags %v, want secret=%s and data-class=credential-material",
+				d.ID, sample, tags, d.Tag.Value)
+		}
+	}
+	if secrets != len(alternatives) {
+		t.Errorf("data.credential has %d alternatives for %d secret detectors", len(alternatives), secrets)
+	}
+	// The case flag must not leak out of the bearer group into the other alternatives.
+	if regexp.MustCompile(cred.Regex).MatchString("akiaabcdefghijklmnop") {
+		t.Error("data.credential matched a lowercase AWS key: the (?i) flag leaked")
+	}
+}
+
+// With the starter, a credential sample now raises the water mark to the ladder's top
+// rung, which no shipped detector could reach before data.credential.
+func TestCredentialSampleRaisesTheWaterMark(t *testing.T) {
+	dets, err := DefaultDetectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := Classify(Event{Text: secretSamples["secret.aws-key"], Role: "tool_call"}, dets)
+	if got := WaterMark(tags); got != "credential-material" {
+		t.Fatalf("water mark %q, want credential-material (tags %v)", got, tags)
+	}
+	for _, tag := range tags {
+		if tag.Key == "data-class" && strings.Contains(tag.Evidence, "AKIA") {
+			t.Fatalf("data.credential stored raw evidence %q", tag.Evidence)
+		}
+	}
+}
+
+func hasTag(tags []Tag, key, value string) bool {
+	for _, t := range tags {
+		if t.Key == key && t.Value == value {
+			return true
+		}
+	}
+	return false
 }

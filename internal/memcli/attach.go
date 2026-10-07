@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"crossing-guard/harvest"
+	"crossing-guard/memory"
 )
 
 // both marks match: the current emission and the pre-rename one still
@@ -50,6 +51,53 @@ func ensureHookEntry(hooks map[string]any, event, matcher, cmd string) (bool, er
 		entry["matcher"] = matcher
 	}
 	hooks[event] = append(entries, entry)
+	return true, nil
+}
+
+// removeHookCommand removes, from one hook event, every hook whose command is
+// exactly cmd, then any entry left with no hooks, then the event when it has no
+// entries. Hooks with any other command, and their entries, are untouched.
+func removeHookCommand(hooks map[string]any, event, cmd string) (bool, error) {
+	rawEntries, present := hooks[event]
+	if !present {
+		return false, nil
+	}
+	entries, ok := rawEntries.([]any)
+	if !ok {
+		return false, fmt.Errorf("hooks.%s must be a JSON array; refusing to replace it", event)
+	}
+	removed := false
+	kept := make([]any, 0, len(entries))
+	for _, rawEntry := range entries {
+		entry, isEntry := rawEntry.(map[string]any)
+		inner, hasHooks := entry["hooks"].([]any)
+		if !isEntry || !hasHooks {
+			kept = append(kept, rawEntry)
+			continue
+		}
+		remaining := make([]any, 0, len(inner))
+		for _, rawHook := range inner {
+			hook, _ := rawHook.(map[string]any)
+			if command, _ := hook["command"].(string); command == cmd {
+				removed = true
+				continue
+			}
+			remaining = append(remaining, rawHook)
+		}
+		if len(remaining) == 0 && len(inner) > 0 {
+			continue // the entry held only our hook
+		}
+		entry["hooks"] = remaining
+		kept = append(kept, entry)
+	}
+	if !removed {
+		return false, nil
+	}
+	if len(kept) == 0 {
+		delete(hooks, event)
+	} else {
+		hooks[event] = kept
+	}
 	return true, nil
 }
 
@@ -95,10 +143,22 @@ type DoctorReport struct {
 func doctorReport(recent int) DoctorReport {
 	dir := memoryDir()
 	nonces := loggedNonces(dir)
+	// The doctor counts STORE records (the read surface rule) with the mirror
+	// as the fallback for a pre-migration store.
+	records, pending := 0, 0
+	if recs, err := memListRecords("active"); err == nil {
+		records = len(recs)
+		if pend, err := memListRecords("pending"); err == nil {
+			pending = len(pend)
+		}
+	} else {
+		records = len(memory.Load(dir))
+		pending = len(memory.LoadAll(dir)) - records
+	}
 	rep := DoctorReport{
 		Store:       dir,
-		Records:     len(loadRecords(dir)),
-		Pending:     len(loadAllRecords(dir)) - len(loadRecords(dir)),
+		Records:     records,
+		Pending:     pending,
 		KnownNonces: len(nonces),
 		EffectiveConfig: map[string]any{ // GUI R8: front-ends never guess paths
 			"store_dir":   dir,

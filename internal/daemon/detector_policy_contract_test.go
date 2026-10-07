@@ -85,7 +85,7 @@ func TestDetectorPolicyStatusPreviewSelectConflictAndUnselect(t *testing.T) {
 	if err := json.Unmarshal(selectedRec.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if !status.Governor.Selected || status.Governor.DetectorCount != 69 || !status.RestartRequired {
+	if !status.Governor.Selected || status.Governor.DetectorCount != 70 || !status.RestartRequired {
 		t.Fatalf("selected status = %+v", status)
 	}
 	if status.DurableGovernor == nil || !status.DurableGovernor.Selected ||

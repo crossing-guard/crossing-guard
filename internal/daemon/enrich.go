@@ -1,11 +1,11 @@
 package daemon
 
-// Session tags from the governor index (~/.crossing-guard/sessions.db):
-// branch, commits, issues/PRs, memory writes — enrichment the sessionindex
-// extractors write (the work-artifact extractor port into harvest is tracked
-// P1 work). Read via the embedded ncruces driver since M4 slice C — the
-// sqlite3-CLI shell-out is gone repo-wide. Read-only, best-effort: no db →
-// sessions simply carry no tags, never an error.
+// The session footprint (the Facts card): what the session touched, derived
+// from our own governance event log by liveFootprint. The sessions.db
+// enrichment this file once read (branch, commits, issues/PRs, memory writes,
+// written by the retired sessionindex experiment) is gone since 2026-07-20;
+// the branch/commits/PR fields below have no writer today, and the memory
+// read/write fields were retired (audit-memory-write-fact plan).
 
 import (
 	"strings"
@@ -22,20 +22,15 @@ type Enrichment struct {
 	Branch    string   `json:"branch,omitempty"`
 	Commits   int      `json:"commits,omitempty"`
 	PRs       []string `json:"prs,omitempty"`
-	MemWrites int      `json:"mem_writes,omitempty"`
 	ToolCalls int      `json:"tool_calls,omitempty"`
 	// full detail (session facts card)
 	CommitList   []Commit `json:"commit_list,omitempty"`
 	Pushes       []string `json:"pushes,omitempty"`
 	Files        []string `json:"files,omitempty"`
 	FilesCreated []string `json:"files_created,omitempty"`
-	MemReadIDs   []string `json:"mem_read_ids,omitempty"`
-	MemWriteIDs  []string `json:"mem_write_ids,omitempty"`
-	// Source says WHERE this footprint came from, because two very different
-	// pipelines can fill it: "live" = our own governance event log, current by
-	// construction; "legacy-index" = sessions.db, written by the Python
-	// sessionindex EXPERIMENT, which stopped running on 2026-07-16. Rendering the
-	// two identically let a four-day-dead pipeline look like current fact.
+	// Source says WHERE this footprint came from. Only "live" (our own governance
+	// event log, current by construction) is set today; "legacy-index" named the
+	// retired sessions.db pipeline, which stopped running on 2026-07-16.
 	Source string `json:"source,omitempty"`
 	AsOf   int64  `json:"as_of,omitempty"` // newest observation backing this record
 }

@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "import_min_interval_seconds": 300,
+  "import_on_session_end": true,
+  "propose": {
+    "enabled": false,
+    "per_session_max": 5
+  },
+  "synthesis": {
+    "enabled": false,
+    "max_per_day": 20
+  }
+}

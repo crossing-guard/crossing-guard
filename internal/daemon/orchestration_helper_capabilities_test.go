@@ -117,7 +117,7 @@ func TestHelperDeliveryUsesExactSourceAndCompletedReplayDoesNotResend(t *testing
 	f := newAgentHostFixture(t, driver)
 	authored := strings.ReplaceAll(string(courseCorrectorProfileSource()), "request-interrupt", "send-message")
 	profile := selectManagedProfile(t, f.owner, []byte(authored))
-	binding, err := f.host.putBinding(managedBindingCommand{BindingID: "agent-delivery", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: f.root, Runtime: "managed-fixture", GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-delivery")})
+	binding, err := f.host.putBinding(managedBindingCommand{BindingID: "agent-delivery", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: f.root, RouteID: testRouteID(f.host, "managed-fixture", "", nil), GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-delivery")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,19 +173,43 @@ func TestHelperDeliveryUsesExactSourceAndCompletedReplayDoesNotResend(t *testing
 	}
 }
 
-func TestHelperCodexDeliveryExactCommandAndAcknowledgement(t *testing.T) {
-	const target = "01a09633-9b2d-7a22-a6cf-e370c30cb22e"
-	const messageID = "01a09639-a7cd-7830-bca8-1ff8f8992032"
+// installArgvRecordingCodex puts a fake codex on PATH that records its argv
+// NUL-separated and acknowledges the queue; the message is never embedded in
+// the script, so the comparison is byte-exact for any argv-representable text
+// (anything without NUL).
+func installArgvRecordingCodex(t *testing.T, messageID string) string {
+	t.Helper()
 	root := t.TempDir()
-	// The executable checks each argument separately, including literal shell syntax.
-	script := "#!/bin/sh\n[ \"$1\" = queue ] && [ \"$2\" = --thread ] && [ \"$3\" = " + target + " ] && [ \"$4\" = --message ] && [ \"$5\" = 'literal $(no-shell); message' ] || exit 2\necho 'Queued message " + messageID + " for thread " + target + ".'\n"
+	argvFile := filepath.Join(root, "argv")
+	script := "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CG_TEST_ARGV\"\necho \"Queued message " + messageID + " for thread $3.\"\n"
 	if err := os.WriteFile(filepath.Join(root, "codex"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root)
+	t.Setenv("CG_TEST_ARGV", argvFile)
+	return argvFile
+}
+
+func recordedCodexArgv(t *testing.T, argvFile string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+}
+
+func TestHelperCodexDeliveryExactCommandAndAcknowledgement(t *testing.T) {
+	const target = "abcdef00-aaaa-7bbb-8ccc-00000000000b"
+	const messageID = "01a09639-a7cd-7830-bca8-1ff8f8992032"
+	argvFile := installArgvRecordingCodex(t, messageID)
 	got := (codexChatDriver{}).DeliverSessionMessage(context.Background(), SessionIdentity{Runtime: "codex", NativeID: target}, "literal $(no-shell); message")
 	if got.State != "accepted" || got.MessageID != messageID {
 		t.Fatal(got)
+	}
+	want := []string{"queue", "--thread", target, "--message=literal $(no-shell); message"}
+	if argv := recordedCodexArgv(t, argvFile); strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv %q, want %q", argv, want)
 	}
 	for _, output := range []string{"", "Queued message " + messageID + " for thread other.", "noise\nQueued message " + messageID + " for thread " + target + "."} {
 		if got := codexQueueReceipt(target, output); got.State != "unknown" {
@@ -199,6 +223,31 @@ func TestHelperCodexDeliveryExactCommandAndAcknowledgement(t *testing.T) {
 	cancel()
 	if got := (codexChatDriver{}).DeliverSessionMessage(ctx, SessionIdentity{Runtime: "codex", NativeID: target}, "hello"); got.State != "unavailable" {
 		t.Fatal(got)
+	}
+}
+
+// A message is one `--message=` token whatever it starts with: clap would
+// parse a separate dash-led value as a flag and the message would be lost.
+func TestHelperCodexDeliveryDashLedMessageIsOneToken(t *testing.T) {
+	const target = "abcdef00-aaaa-7bbb-8ccc-00000000000b"
+	const messageID = "01a09639-a7cd-7830-bca8-1ff8f8992032"
+	argvFile := installArgvRecordingCodex(t, messageID)
+	for _, message := range []string{
+		"- hello", "-- hello", "--yolo", "-h", "-", "=x", "it's", "$(no-shell)",
+		"- one\n- two", "trailing newline\n", "100% %s \\n literal",
+		attributedHelperMessage(store.ManagedRun{BindingID: "b", RunID: "r"}, "- bullet"),
+	} {
+		if err := os.Remove(argvFile); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		got := (codexChatDriver{}).DeliverSessionMessage(context.Background(), SessionIdentity{Runtime: "codex", NativeID: target}, message)
+		if got.State != "accepted" || got.MessageID != messageID {
+			t.Fatalf("%q: %+v", message, got)
+		}
+		want := []string{"queue", "--thread", target, "--message=" + message}
+		if argv := recordedCodexArgv(t, argvFile); strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("%q: argv %q, want %q", message, argv, want)
+		}
 	}
 }
 
@@ -263,7 +312,7 @@ func TestHelperCodexDeliveryInterruptedCommandIsUnknown(t *testing.T) {
 	t.Setenv("PATH", root)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	receipt := (codexChatDriver{}).DeliverSessionMessage(ctx, SessionIdentity{Runtime: "codex", NativeID: "01a09633-9b2d-7a22-a6cf-e370c30cb22e"}, "message")
+	receipt := (codexChatDriver{}).DeliverSessionMessage(ctx, SessionIdentity{Runtime: "codex", NativeID: "abcdef00-aaaa-7bbb-8ccc-00000000000b"}, "message")
 	if receipt.State != "unknown" {
 		t.Fatal(receipt)
 	}
@@ -339,6 +388,9 @@ func TestHelperSourceCapabilityIndependentOfHelperRoute(t *testing.T) {
 	chatDrivers["opencode"] = openCodeChatDriver{}
 	source := strings.ReplaceAll(string(helperAgentProfileSource()), "kind: draft-reply", "kind: intervention")
 	source = strings.ReplaceAll(source, "  - reply", "  - send-message")
+	// This test is about delivery transport, not destination: the profile
+	// allows remote routes so every runtime's default model may run it.
+	source = strings.Replace(source, "    - managed-turn\n", "    - managed-turn\n  destination:\n    locality: explicit-local-or-remote\n", 1)
 	profile := selectManagedProfile(t, f.owner, []byte(source))
 	for _, helper := range []string{"codex", "claude", "opencode"} {
 		mode := ""
@@ -347,7 +399,7 @@ func TestHelperSourceCapabilityIndependentOfHelperRoute(t *testing.T) {
 		}
 		for _, source := range []string{"codex", "claude", "opencode", ""} {
 			id := "agent-" + helper + "-" + source + "-test"
-			_, err := f.host.putBinding(managedBindingCommand{BindingID: id, ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: f.root, Runtime: helper, Mode: mode, ScopeRuntime: source, GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken(id)})
+			_, err := f.host.putBinding(managedBindingCommand{BindingID: id, ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: f.root, RouteID: testRouteID(f.host, helper, "", nil), Mode: mode, ScopeRuntime: source, GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken(id)})
 			// Every registered runtime now publishes a delivery transport
 			// (Codex queue; Claude and OpenCode the boundary carrier), so a
 			// send-message grant is accepted for each source scope.

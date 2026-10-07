@@ -2,6 +2,7 @@ package sessionactivity
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -55,5 +56,51 @@ func TestSubscribeAfterOldGenerationReceivesCurrentSnapshot(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for current snapshot")
+	}
+}
+
+// TestRefreshAndReplaceSerialization pins plan D6: an event-driven Replace
+// arriving during a sampler refresh lands AFTER the refresh, so a stale
+// refresh cannot overwrite a newer event replacement.
+func TestRefreshAndReplaceSerialization(t *testing.T) {
+	var samplerStarted, samplerCanProceed sync.WaitGroup
+	samplerStarted.Add(1)
+	samplerCanProceed.Add(1)
+	service := NewService(func(_ context.Context, now time.Time) (Capability, []Item) {
+		samplerStarted.Done()
+		samplerCanProceed.Wait() // block the sampler inside refresh
+		return Capability{Status: "available"}, []Item{{Runtime: "opencode", CatalogSessionID: "ses-blocked",
+			Presence: "open", Execution: "unknown", ObservedAt: now}}
+	}, time.Hour, 5*time.Second)
+	service.Start(context.Background())
+	defer service.Close()
+	samplerStarted.Wait() // the first refresh is now inside the sampler, holding writerMu
+
+	// An event-driven Replace arrives while the refresh is blocked. It should
+	// wait for the refresh to finish, then land as the newer generation.
+	done := make(chan struct{})
+	go func() {
+		service.Replace(Item{Runtime: "opencode", CatalogSessionID: "ses-blocked",
+			Presence: "unknown", Execution: "running", ObservedAt: time.Now().UTC()})
+		close(done)
+	}()
+
+	// Give the Replace goroutine time to block on writerMu.
+	time.Sleep(20 * time.Millisecond)
+	samplerCanProceed.Done() // release the sampler
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Replace did not complete after the refresh finished")
+	}
+	snapshot := service.Snapshot()
+	if snapshot.Generation < 2 {
+		t.Fatalf("expected at least 2 generations, got %d", snapshot.Generation)
+	}
+	// The Replace must have landed: the item's execution is "running", not
+	// the sampler's "unknown".
+	if len(snapshot.Items) != 1 || snapshot.Items[0].Execution != "running" {
+		t.Fatalf("Replace was overwritten by the stale refresh: %+v", snapshot.Items)
 	}
 }

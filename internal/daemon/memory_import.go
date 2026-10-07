@@ -117,10 +117,12 @@ func errorSuffix(text string) string {
 	return " — " + text
 }
 
-// runMemoryImport performs one import into the product store and indexes the
-// records it wrote through the live governor (plan D3). The store root is
-// memory.DefaultDir() — the location the CLI, the index and the console read —
-// not the daemon's data directory.
+// runMemoryImport performs one import into the product STORE through the one
+// write owner (first-class-records plan §3.3: record + entity + classification +
+// FTS + outbox in one transaction; the separate indexWrittenMemory step and its
+// no-governor drift window are gone). The store root is memory.DefaultDir()
+// for the MIRROR; the records land in index.sqlite, the location every read
+// surface reads.
 func runMemoryImport(reason string) MemoryImportState {
 	started := time.Now()
 	dir := memory.DefaultDir()
@@ -130,43 +132,18 @@ func runMemoryImport(reason string) MemoryImportState {
 	if err != nil {
 		state.Error = err.Error()
 	}
+	// Every written record now lands through the write owner, which already
+	// maintains the entity/classification/FTS rows transactionally; the
+	// imported count is the indexed count by construction.
+	state.Indexed = len(written)
 	if len(written) > 0 {
-		state.Indexed, state.Errors = indexWrittenMemory(dir, written)
+		state.Errors = 0
 	}
 	state.DurationMS = time.Since(started).Milliseconds()
 	if err := writeMemoryImportState(filepath.Dir(indexPath()), state); err != nil {
 		log.Printf("memory import state could not be written: %v", err)
 	}
 	return state
-}
-
-// indexWrittenMemory indexes exactly the records one import wrote, through
-// the governor's store handle under its write lock. With no governor (the
-// daemon is still booting, or governance is off) the records wait for the
-// CLI's index verb; that is logged once per run, never silently skipped.
-func indexWrittenMemory(dir string, ids []string) (indexed, errors int) {
-	g := governor
-	if g == nil {
-		log.Printf("memory import: %d records written but no governor to index them; run `crossing-guard memory index`", len(ids))
-		return 0, 0
-	}
-	want := map[string]bool{}
-	for _, id := range ids {
-		want[id] = true
-	}
-	g.writeMu.Lock()
-	defer g.writeMu.Unlock()
-	for _, record := range memory.LoadAll(dir) {
-		if !want[record.ID] {
-			continue
-		}
-		if _, err := indexOneMemory(g.ix, g.dets, record); err != nil {
-			errors++
-			continue
-		}
-		indexed++
-	}
-	return indexed, errors
 }
 
 func memoryImportStatePath(dataDir string) string {

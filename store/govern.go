@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"crossing-guard/engine"
@@ -21,7 +22,7 @@ import (
 // definition so a new column is a single-site edit, not a three-way drift between the
 // two queries and the decoder.
 const (
-	eventCols                = "id,ts,session_id,runtime,verb,tool,target_entity_id,tags,decision,reason,origin"
+	eventCols                = "id,ts,session_id,runtime,verb,tool,target_entity_id,tags,decision,reason,origin,COALESCE(rule_id,''),COALESCE(layer,'')"
 	defaultSessionTraceLimit = 100
 	maxSessionTraceLimit     = 200
 )
@@ -54,6 +55,15 @@ type EventRecord struct {
 	// GlobalID is the wire identity (engine.NewTypedID "evt"); minted by AppendEvent when
 	// empty. Legacy rows carry a deterministic id from the V31 backfill.
 	GlobalID string `json:"global_id,omitempty"`
+	// RuleID is the rule that produced or asked for Decision (schema 33). Empty means
+	// unknown — the row predates the field, or no rule was involved. It is never
+	// back-filled by parsing Reason: a rule id recovered from prose would be inference
+	// stored as fact.
+	RuleID string `json:"rule_id,omitempty"`
+	// Layer is the distribution tier that rule arrived by (schema 38): "user",
+	// "repository", or "organization". Empty means unknown — the row predates layered
+	// bundles, or no rule decided. The same no-guessing rule as RuleID.
+	Layer string `json:"layer,omitempty"`
 }
 
 // EventResource is one exact structured target associated with a returned event.
@@ -178,6 +188,29 @@ func (ix *Index) BeginGov() (*GovTx, error) {
 func (g *GovTx) Commit() error   { return g.tx.Commit() }
 func (g *GovTx) Rollback() error { return g.tx.Rollback() }
 
+// Exec and QueryRow expose the underlying transaction to store-owned write paths
+// that compose several existing helpers inside ONE transaction (the memory write
+// owner — memory-first-class-records plan §3.3/RT-2). Store-internal by design:
+// GovTx never leaves this package, so the exposure adds no API surface.
+func (g *GovTx) Exec(query string, args ...any) (sql.Result, error) {
+	return g.tx.Exec(query, args...)
+}
+
+func (g *GovTx) QueryRow(query string, args ...any) *sql.Row {
+	return g.tx.QueryRow(query, args...)
+}
+
+// SearchDocuments replaces the record's memory search documents within g
+// (the WithTx half of RT-2: replaceOwnedSearchDocuments over a GovTx).
+func (g *GovTx) ReplaceMemorySearchDocument(id string, ts int64, text string) error {
+	if id == "" {
+		return fmt.Errorf("memory search identity is incomplete")
+	}
+	return replaceOwnedSearchDocuments(g, "memory", "memory", id, []SearchDocument{{
+		Order: 0, Timestamp: strconv.FormatInt(ts, 10), Kind: "memory", Text: text, Lineage: "memory:" + id,
+	}})
+}
+
 // AppendEvent appends one event to the log. Append-only by discipline — no update,
 // no delete (the seam where a hash chain could later be added, per the model doc).
 // AppendEvent writes one action. It is the ONE event writer: the global id is minted
@@ -194,16 +227,17 @@ func (g *GovTx) AppendEvent(e EventRecord, anchor *engine.ChainAnchor) (int64, e
 	if anchor != nil {
 		body := engine.EventChainBody{GlobalID: e.GlobalID, TS: e.TS, Session: e.SessionID,
 			Runtime: e.Runtime, Verb: e.Verb, Tool: e.Tool, Target: e.TargetEntityID,
-			TagsDigest: engine.TagsDigest(e.Tags), Decision: e.Decision, Reason: e.Reason, Origin: e.Origin}
+			TagsDigest: engine.TagsDigest(e.Tags), Decision: e.Decision, Reason: e.Reason, Origin: e.Origin,
+			Rule: e.RuleID, Layer: engine.Layer(e.Layer)}
 		p, h := anchor.Advance(&body)
 		chainSeq = sql.NullInt64{Int64: body.Seq, Valid: true}
 		prev, hash = sql.NullString{String: p, Valid: true}, sql.NullString{String: h, Valid: true}
 	}
 	res, err := g.tx.Exec(
-		`INSERT INTO event(ts,session_id,runtime,verb,tool,target_entity_id,tags,decision,reason,origin,global_id,chain_seq,prev_hash,hash)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO event(ts,session_id,runtime,verb,tool,target_entity_id,tags,decision,reason,origin,global_id,chain_seq,prev_hash,hash,rule_id,layer)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.TS, e.SessionID, e.Runtime, e.Verb, e.Tool, e.TargetEntityID, e.Tags, e.Decision, e.Reason, e.Origin,
-		e.GlobalID, chainSeq, prev, hash)
+		e.GlobalID, chainSeq, prev, hash, e.RuleID, e.Layer)
 	if err != nil {
 		return 0, err
 	}
@@ -211,19 +245,12 @@ func (g *GovTx) AppendEvent(e EventRecord, anchor *engine.ChainAnchor) (int64, e
 	if err != nil {
 		return 0, err
 	}
-	var linked int
-	if err := g.tx.QueryRow(`SELECT linked FROM sync_device LIMIT 1`).Scan(&linked); err != nil && err != sql.ErrNoRows {
-		return 0, err
+	contentHash := hash.String
+	if contentHash == "" {
+		contentHash = engine.TagsDigest(e.Tags)
 	}
-	if linked == 1 {
-		contentHash := hash.String
-		if contentHash == "" {
-			contentHash = engine.TagsDigest(e.Tags)
-		}
-		if _, err := g.tx.Exec(`INSERT INTO sync_outbox(record_kind,global_id,content_hash,scope,enqueued_at) VALUES('event',?,?,?,?)`,
-			e.GlobalID, contentHash, e.SessionID, e.TS); err != nil {
-			return 0, err
-		}
+	if err := enqueueOutbox(g.tx, OutboxEvent, e.GlobalID, contentHash, e.SessionID, e.TS); err != nil {
+		return 0, err
 	}
 	return id, nil
 }
@@ -247,7 +274,7 @@ func (ix *Index) EventChainTail(sessionID string) (seq int64, tail string, ok bo
 func (ix *Index) EventChainRows(sessionID string) ([]engine.ChainRow, error) {
 	rows, err := ix.db.Query(`SELECT global_id, COALESCE(chain_seq,0), ts, session_id, runtime, COALESCE(verb,''), COALESCE(tool,''),
 		COALESCE(target_entity_id,''), COALESCE(tags,''), COALESCE(decision,''), COALESCE(reason,''), COALESCE(origin,''),
-		COALESCE(prev_hash,''), COALESCE(hash,'') FROM event WHERE session_id = ? ORDER BY id`, sessionID)
+		COALESCE(prev_hash,''), COALESCE(hash,''), rule_id, COALESCE(layer,'') FROM event WHERE session_id = ? ORDER BY id`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +284,7 @@ func (ix *Index) EventChainRows(sessionID string) ([]engine.ChainRow, error) {
 		var r engine.ChainRow
 		var tags string
 		if err := rows.Scan(&r.Body.GlobalID, &r.Body.Seq, &r.Body.TS, &r.Body.Session, &r.Body.Runtime, &r.Body.Verb, &r.Body.Tool,
-			&r.Body.Target, &tags, &r.Body.Decision, &r.Body.Reason, &r.Body.Origin, &r.Prev, &r.Hash); err != nil {
+			&r.Body.Target, &tags, &r.Body.Decision, &r.Body.Reason, &r.Body.Origin, &r.Prev, &r.Hash, &r.Body.Rule, &r.Body.Layer); err != nil {
 			return nil, err
 		}
 		r.Body.TagsDigest = engine.TagsDigest(tags)
@@ -300,23 +327,11 @@ func (ix *Index) EventWireInputs(sessionID string) ([]engine.WireEventInput, err
 	if err != nil {
 		return nil, err
 	}
-	repositoryID, checkoutRoot, _, err := ix.SessionRepository(sessionID)
+	f, err := ix.wireSessionFacts(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	native := sessionID
-	if i := strings.Index(sessionID, "/"); i > 0 {
-		native = sessionID[i+1:]
-	}
-	var catalogID, resumeID string
-	if err := ix.db.QueryRow(`SELECT catalog_id, resume_id FROM sessions WHERE id IN (?, ?) LIMIT 1`, native, sessionID).Scan(&catalogID, &resumeID); err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-	rows, err := ix.db.Query(`SELECT e.global_id, e.ts, COALESCE(d.received_at,0), e.session_id, e.runtime,
-		COALESCE(e.verb,''), COALESCE(e.tool,''), COALESCE(e.target_entity_id,''), COALESCE(e.tags,''),
-		COALESCE(e.decision,''), COALESCE(e.reason,''), COALESCE(e.origin,''),
-		COALESCE(e.chain_seq,0), COALESCE(e.prev_hash,''), COALESCE(e.hash,'')
-		FROM event e LEFT JOIN event_delivery d ON d.event_id = e.id
+	rows, err := ix.db.Query(`SELECT `+wireEventCols+` FROM event e LEFT JOIN event_delivery d ON d.event_id = e.id
 		WHERE e.session_id = ? ORDER BY e.id`, sessionID)
 	if err != nil {
 		return nil, err
@@ -324,12 +339,11 @@ func (ix *Index) EventWireInputs(sessionID string) ([]engine.WireEventInput, err
 	defer rows.Close()
 	var out []engine.WireEventInput
 	for rows.Next() {
-		in := engine.WireEventInput{DeviceID: deviceID, CatalogID: catalogID, ResumeID: resumeID,
-			RepositoryID: repositoryID, CheckoutRoot: checkoutRoot}
-		if err := rows.Scan(&in.GlobalID, &in.TS, &in.ReceivedAt, &in.Session, &in.Runtime, &in.Verb, &in.Tool,
-			&in.TargetEntityID, &in.FrozenTags, &in.Decision, &in.Reason, &in.Origin, &in.ChainSeq, &in.PrevHash, &in.Hash); err != nil {
+		in, err := scanWireEvent(rows)
+		if err != nil {
 			return nil, err
 		}
+		in.DeviceID, in.CatalogID, in.ResumeID, in.RepositoryID, in.CheckoutRoot = deviceID, f.catalogID, f.resumeID, f.repositoryID, f.checkoutRoot
 		out = append(out, in)
 	}
 	return out, rows.Err()
@@ -405,10 +419,15 @@ func (g *GovTx) AppendEventInput(in EventInput) error {
 	if in.Payload != nil {
 		payload = in.Payload
 	}
-	_, err := g.tx.Exec(`INSERT INTO event_input(event_id,media_type,raw_bytes,captured_bytes,
+	if _, err := g.tx.Exec(`INSERT INTO event_input(event_id,media_type,raw_bytes,captured_bytes,
 		digest,completeness,payload,source_ref) VALUES(?,?,?,?,?,?,?,?)`, in.EventID, in.MediaType,
-		in.RawBytes, in.CapturedBytes, in.Digest, in.Completeness, payload, in.SourceRef)
-	return err
+		in.RawBytes, in.CapturedBytes, in.Digest, in.Completeness, payload, in.SourceRef); err != nil {
+		return err
+	}
+	if in.Payload == nil {
+		return nil
+	}
+	return enqueueContent(g.tx, in.EventID, in.Digest)
 }
 
 func observationIdentity(q interface{ QueryRow(string, ...any) *sql.Row }, observationID string) (int64, string, bool, error) {
@@ -620,7 +639,12 @@ func (ix *Index) FailSessionCheckpoint(id, endedAt int64, status, boundaryClass,
 	if boundaryClass != "late-replay" && boundaryClass != "unconfirmed" && boundaryClass != "settled" && boundaryClass != "point-in-time" && boundaryClass != "exact-close" {
 		return sql.ErrNoRows
 	}
-	res, err := ix.db.Exec(`UPDATE session_checkpoint SET status=?,boundary_class=?,capture_ended_at=?,
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE session_checkpoint SET status=?,boundary_class=?,capture_ended_at=?,
 		change_record_id=NULL,failure_kind=?,detail_digest=? WHERE id=? AND status='capturing'`,
 		status, boundaryClass, endedAt, failureKind, detailDigest, id)
 	if err != nil {
@@ -633,7 +657,14 @@ func (ix *Index) FailSessionCheckpoint(id, endedAt int64, status, boundaryClass,
 	if n != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_checkpoint WHERE id=?`, id).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := enqueueCheckpointFact(tx, id, sessionID, status+":"+failureKind+":"+detailDigest, endedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (ix *Index) SetSessionCheckpointRepository(id int64, repositoryID, checkoutID, checkoutRoot string) error {
@@ -1233,6 +1264,128 @@ func memoryIdentity(entityID string) string {
 	return entityID
 }
 
+// DirectSessionFact is one session fact the daemon authors itself, outside any
+// detector: the checkpoint-settle uncommitted-work fact being the first
+// (orchestration-flows pilot slice A, monitoring-owned per pass-1 RT-8). Its fields
+// are unexported so only this package can declare one: every fact that can reach
+// session_state without a detector is in DirectSessionFacts, which is what the
+// coverage compiler reads (state-producer-declarations plan D-2). A fact written but
+// not declared would be labeled INERT while the stateful tier fires on it.
+type DirectSessionFact struct {
+	key, value, detector string
+	enumerable           bool
+	gaps                 []string
+}
+
+// Key, Value and Detector are the folded state coordinates and the evidence source.
+func (f DirectSessionFact) Key() string      { return f.key }
+func (f DirectSessionFact) Value() string    { return f.value }
+func (f DirectSessionFact) Detector() string { return f.detector }
+
+// FactUncommittedWork: the session settled with edits and no covering commit. The
+// gaps are every way the fact is absent or stale while the work it names exists.
+var FactUncommittedWork = uncommittedWork
+
+var uncommittedWork = DirectSessionFact{key: "work", value: "uncommitted", detector: "checkpoint-settle",
+	enumerable: true, gaps: []string{
+		"written only at a completed checkpoint settle: actions before the first settle never see it, and commit-then-edit is missed until the next settle",
+		"not written without revision evidence (non-git), when the capture fails or is cancelled, or when the change record has no items",
+		"never cleared: a later commit does not retract it (session state never decays)",
+	}}
+
+// DirectSessionFacts is the complete catalog of detector-less session facts.
+func DirectSessionFacts() []DirectSessionFact { return []DirectSessionFact{uncommittedWork} }
+
+// declared reports whether a fact's coordinates are in the catalog. The catalog is
+// built from unexported values, so reassigning an exported fact var cannot add one.
+func (f DirectSessionFact) declared() bool {
+	for _, d := range DirectSessionFacts() {
+		if f.key == d.key && f.value == d.value && f.detector == d.detector {
+			return true
+		}
+	}
+	return false
+}
+
+// StateProducer declares the fact to the coverage compiler. The stateful tier reads it
+// as session:<key>; the audit and the tags dry-run classify transcripts and never do.
+func (f DirectSessionFact) StateProducer() engine.StateProducer {
+	return engine.StateProducer{Tag: engine.SessionStatePrefix + f.key, Values: []string{f.value},
+		Source: "daemon:" + f.detector, Enumerable: f.enumerable, Gaps: append([]string(nil), f.gaps...),
+		Live: true, Harvest: false}
+}
+
+// UpsertSessionStateDirect records one declared direct fact on a session without an
+// event append. Same model, same fold, one transaction; the detector name on the row
+// names the evidence source so no consumer can mistake it for a hook or transcript
+// fact. Owner tags remain structurally unable to reach this store (they are a
+// different table the evaluator never joins).
+func (ix *Index) UpsertSessionStateDirect(sessionID string, fact DirectSessionFact, evidence string, ts int64) error {
+	if sessionID == "" {
+		return errors.New("session state fact needs a session")
+	}
+	if !fact.declared() {
+		return errors.New("session state fact is not a declared direct fact")
+	}
+	tx, err := ix.BeginGov()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row := StateRow{Key: fact.key, Value: fact.value, Detector: fact.detector, Provenance: fact.detector, Evidence: evidence}
+	if err := tx.UpsertSessionState(sessionID, row, ts); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// MergeStateValue renames one folded value, key=from → key=to, in both fold tables
+// (session_state and entity_state), merging into an existing `to` row with the fold's own
+// MIN(first_seen)/MAX(last_seen) semantics. It exists to repair folds written under a
+// legacy spelling; the event log is never touched. It knows no vocabulary: the caller
+// names the key and both values. A read probe comes first, so a store with nothing to
+// repair takes no write lock. Returns the number of legacy rows moved.
+func (ix *Index) MergeStateValue(key, from, to string) (int64, error) {
+	if key == "" || from == "" || to == "" || from == to {
+		return 0, errors.New("state value merge needs a key and two different values")
+	}
+	var legacy bool
+	if err := ix.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM session_state WHERE key=? AND value=?)
+		OR EXISTS(SELECT 1 FROM entity_state WHERE key=? AND value=?)`, key, from, key, from).Scan(&legacy); err != nil {
+		return 0, err
+	}
+	if !legacy {
+		return 0, nil
+	}
+	tx, err := ix.BeginGov()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var moved int64
+	for _, fold := range []struct{ table, owner string }{{"session_state", "session_id"}, {"entity_state", "entity_id"}} {
+		// The SELECT carries a WHERE, which SQLite needs to parse INSERT…SELECT…ON CONFLICT.
+		if _, err := tx.tx.Exec(`INSERT INTO `+fold.table+`(`+fold.owner+`,key,value,detector,provenance,evidence,first_seen,last_seen)
+			SELECT `+fold.owner+`,key,?,detector,provenance,evidence,first_seen,last_seen
+			FROM `+fold.table+` WHERE key=? AND value=?
+			ON CONFLICT(`+fold.owner+`,key,value,detector) DO UPDATE SET
+			  first_seen=MIN(first_seen,excluded.first_seen),
+			  last_seen=MAX(last_seen,excluded.last_seen)`, to, key, from); err != nil {
+			return 0, fmt.Errorf("merge %s: %w", fold.table, err)
+		}
+		res, err := tx.tx.Exec(`DELETE FROM `+fold.table+` WHERE key=? AND value=?`, key, from)
+		if err != nil {
+			return 0, fmt.Errorf("merge %s: %w", fold.table, err)
+		}
+		n, _ := res.RowsAffected()
+		moved += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return moved, nil
+}
+
 // CountEventsByOrigin returns how many of a session's events carry the given origin
 // ("live"|"imported"). The importer uses it to (a) never clobber a session already
 // captured LIVE, and (b) know whether a re-import needs to clear prior imported rows.
@@ -1412,7 +1565,7 @@ func scanEvents(rows *sql.Rows, err error) ([]EventRecord, error) {
 	for rows.Next() {
 		var e EventRecord
 		if err := rows.Scan(&e.ID, &e.TS, &e.SessionID, &e.Runtime, &e.Verb, &e.Tool, &e.TargetEntityID,
-			&e.Tags, &e.Decision, &e.Reason, &e.Origin); err != nil {
+			&e.Tags, &e.Decision, &e.Reason, &e.Origin, &e.RuleID, &e.Layer); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -1431,7 +1584,7 @@ func (ix *Index) EventsForEntity(entityID string, limit int) ([]EventRecord, err
 		SELECT id FROM event WHERE target_entity_id=?
 		UNION SELECT event_id FROM event_resource WHERE entity_id=?
 	) SELECT event.id,event.ts,event.session_id,event.runtime,event.verb,event.tool,
-		event.target_entity_id,event.tags,event.decision,event.reason,event.origin
+		event.target_entity_id,event.tags,event.decision,event.reason,event.origin,COALESCE(event.rule_id,''),COALESCE(event.layer,'')
 		FROM event JOIN matched ON matched.id=event.id ORDER BY event.ts,event.id LIMIT ?`,
 		entityID, entityID, limit))
 }
@@ -1513,6 +1666,56 @@ func (ix *Index) SessionState(sessionID string) ([]StateRow, error) {
 type SessionStateFacet struct {
 	SessionID string
 	StateRow
+}
+
+// UncommittedWorkFacet is one settle-authored uncommitted-work fact resolved
+// onto its session's runtime (the sessions projection is the runtime owner;
+// session_state carries none).
+type UncommittedWorkFacet struct {
+	Runtime   string
+	SessionID string
+	FactAt    int64
+	Evidence  string
+}
+
+// UncommittedWorkFacetsAfter reads the uncommitted-work facts with last_seen
+// strictly greater than the position, oldest first, bounded. The detector
+// filter is exact: only the checkpoint-settle rows this fact family authors.
+func (ix *Index) UncommittedWorkFacetsAfter(position int64, limit int) ([]UncommittedWorkFacet, bool, error) {
+	rows, err := ix.db.Query(`SELECT f.session_id,f.last_seen,f.evidence,COALESCE(s.vendor,'')
+		FROM session_state f LEFT JOIN sessions s ON s.id=f.session_id
+		WHERE f.detector=? AND f.key=? AND f.value=?
+		AND f.last_seen>? ORDER BY f.last_seen,f.session_id LIMIT ?`,
+		uncommittedWork.detector, uncommittedWork.key, uncommittedWork.value, position, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []UncommittedWorkFacet
+	for rows.Next() {
+		var row UncommittedWorkFacet
+		if err := rows.Scan(&row.SessionID, &row.FactAt, &row.Evidence, &row.Runtime); err != nil {
+			return nil, false, err
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
+}
+
+// UncommittedWorkFacetHead is the newest fact's last_seen; a fresh stream
+// position bootstraps here (history is not a signal).
+func (ix *Index) UncommittedWorkFacetHead() (int64, error) {
+	var head int64
+	err := ix.db.QueryRow(`SELECT COALESCE(MAX(last_seen),0) FROM session_state
+		WHERE detector=? AND key=? AND value=?`,
+		uncommittedWork.detector, uncommittedWork.key, uncommittedWork.value).Scan(&head)
+	return head, err
 }
 
 // AllSessionStateFacets reads the folded detector state of every session, most

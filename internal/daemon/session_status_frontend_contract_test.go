@@ -27,12 +27,14 @@ func TestSessionStatusFrontendKeepsOneProviderNeutralProjection(t *testing.T) {
 	}
 	// The browser is a RENDERER of the daemon's status frame (session-status
 	// signal plan, 2026-09-01): it owns the reader's acknowledgement ledger —
-	// two cursors, one per attention id space — and the words/shapes. It
+	// one cursor per attention id space (task, turn, and the agent-ask space
+	// the escalation-delivery plan added without a version bump) — and the
+	// words/shapes. It
 	// never ranks facts or joins tasks to approvals; that logic moved to Go.
 	for _, required := range [][]byte{
 		[]byte("renderSessionStatus"), []byte("statusLabel"),
 		[]byte("attention_source"), []byte("since_ms"),
-		[]byte("const SOURCES = ['task', 'turn']"),
+		[]byte("const SOURCES = ['task', 'turn', 'agent']"),
 		[]byte("establishBaseline"), []byte("ENTRY_LIMIT = 512"),
 		[]byte("session-attention-v2"),
 	} {
@@ -52,9 +54,12 @@ func TestSessionStatusFrontendKeepsOneProviderNeutralProjection(t *testing.T) {
 	view := read("js/views/sessions.js")
 	for _, required := range [][]byte{
 		[]byte("session-status.js"), []byte("session-status-slot"),
-		[]byte("session-status-summary"), []byte("document.visibilityState === 'visible'"),
+		[]byte("createActivityLine"), []byte("session-foot"), []byte("document.visibilityState === 'visible'"),
 		[]byte("document.hasFocus()"), []byte("sessionAttentionStore.acknowledge"),
 		[]byte("paintSessionSelection"), []byte("selectSessionRows"),
+		// An agent's ask is acknowledged only after a reader interaction
+		// (escalation-delivery independent red-team J5).
+		[]byte("if (lastInteraction <= askShown.at) return;"),
 	} {
 		if !bytes.Contains(view, required) {
 			t.Errorf("session status view lost %q", required)

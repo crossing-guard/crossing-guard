@@ -1,6 +1,7 @@
 package analyzermodule
 
 import (
+	"crossing-guard/internal/atomicfile"
 	"errors"
 	"fmt"
 	"io"
@@ -96,7 +97,7 @@ func Install(dataDir, sourceDirectory string) (Package, error) {
 	if staged.PackageDigest != source.PackageDigest || staged.EntrypointDigest != source.EntrypointDigest {
 		return Package{}, fmt.Errorf("staged analyzer package digest changed during copy")
 	}
-	if err := syncDirectory(temporary); err != nil {
+	if err := atomicfile.SyncDir(temporary); err != nil {
 		return Package{}, fmt.Errorf("sync staged analyzer package: %w", err)
 	}
 	if err := os.Rename(temporary, destination); err != nil {
@@ -106,7 +107,7 @@ func Install(dataDir, sourceDirectory string) (Package, error) {
 		return Package{}, fmt.Errorf("publish analyzer package: %w", err)
 	}
 	cleanup = false
-	if err := syncDirectory(root); err != nil {
+	if err := atomicfile.SyncDir(root); err != nil {
 		return Package{}, fmt.Errorf("sync analyzer package catalog: %w", err)
 	}
 	return Inspect(destination)
@@ -222,18 +223,6 @@ func copyRegularFile(source, destination string, mode fs.FileMode) error {
 		return fmt.Errorf("close analyzer package source: %w", err)
 	}
 	return nil
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	if err := directory.Sync(); err != nil {
-		_ = directory.Close() // preserve sync error
-		return err
-	}
-	return directory.Close()
 }
 
 func pathExists(path string) bool {

@@ -24,12 +24,18 @@ export function openApprovalStream(signal) {
   return checkedFetch('Approval stream', '/stream', { headers: cpHeaders(), signal });
 }
 
-export async function decideApproval(id, decision, reason, selections) {
-  // Selections ride along only when the held call was asking a question, so an
-  // ordinary allow or deny is byte-identical to what it has always been.
-  const body = selections?.length
+export async function decideApproval(id, decision, reason, selections, grantID = '') {
+  // The request-bound choice stays byte-identical to the legacy decision body.
+  // Only the explicitly broader choice adds grant_id.
+  const selectedGrant = decision === 'allow' && grantID !== 'request' ? grantID : '';
+  let body = selections?.length
     ? JSON.stringify({ id, decision, reason, selections })
     : JSON.stringify({ id, decision, reason });
+  if (selectedGrant) {
+    body = selections?.length
+      ? JSON.stringify({ id, decision, reason, selections, grant_id: selectedGrant })
+      : JSON.stringify({ id, decision, reason, grant_id: selectedGrant });
+  }
   const response = await checkedFetch('Approval decision', '/decision', {
     method: 'POST', headers: { ...cpHeaders(), 'Content-Type': 'application/json' }, body,
   });

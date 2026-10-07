@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"crossing-guard/internal/modelroute"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -113,7 +114,7 @@ func enableTestReviewBindingAt(t *testing.T, host *orchestrationReviewHost, prev
 	t.Helper()
 	binding, err := host.putBinding(reviewBindingCommand{ProfileID: preview.ProfileID,
 		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest,
-		Endpoint: endpoint, Model: "local-test-model", TimeoutMS: 1000,
+		RouteID: testInferenceRouteID(host, endpoint, "local-test-model"), TimeoutMS: 1000,
 		ExpectedStateToken: store.ReviewBindingAbsentToken()})
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +187,7 @@ func TestReviewHostDelegatedFirstAnswersExactPendingAskThroughApprovalOwner(t *t
 	host, _, preview := reviewHostHarnessWithSource(t, delegatedReviewProfileSource())
 	if _, err := host.putBinding(reviewBindingCommand{ProfileID: preview.ProfileID,
 		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest,
-		Endpoint: server.URL, Model: "local-test-model", TimeoutMS: 1500,
+		RouteID: testInferenceRouteID(host, server.URL, "local-test-model"), TimeoutMS: 1500,
 		Effect: "delegated-first", ApprovalSubdeadlineMS: 1000,
 		ExpectedStateToken: store.ReviewBindingAbsentToken()}); err != nil {
 		t.Fatal(err)
@@ -394,17 +395,26 @@ func TestReviewSettingsHTTPExposesSeparateBindingAndRejectsRemoteOrUnknownInput(
 	remote := httptest.NewRecorder()
 	mux.ServeHTTP(remote, httptest.NewRequest(http.MethodPut, "/api/orchestration/reviews/binding",
 		bytesReader(encoded)))
-	if remote.Code != http.StatusUnprocessableEntity {
+	// A write that still names its endpoint is refused by name (plan §5.3, criterion
+	// 56): a remote endpoint can no longer even be typed on the reviewer, and the route
+	// owner refuses to store one.
+	if remote.Code != http.StatusBadRequest || !strings.Contains(remote.Body.String(), routeRefusalTypedField) ||
+		!strings.Contains(remote.Body.String(), "endpoint is not accepted") {
 		t.Fatalf("remote=%d %s", remote.Code, remote.Body.String())
 	}
+	if _, err := host.routes.owner.Preview(modelroute.Draft{Name: "Remote", Family: modelroute.FamilyInference,
+		Fields: modelroute.Fields{Endpoint: "https://review.example.invalid", Model: "remote"}}); !modelroute.IsCode(err, modelroute.CodeInvalid) {
+		t.Fatalf("a remote inference route was accepted: %v", err)
+	}
+	delete(request, "endpoint")
+	delete(request, "model")
 	unknown := httptest.NewRecorder()
 	mux.ServeHTTP(unknown, httptest.NewRequest(http.MethodPut, "/api/orchestration/reviews/binding",
 		stringsReader(`{"confirmed":true,"future":true}`)))
 	if unknown.Code != http.StatusBadRequest {
 		t.Fatalf("unknown=%d %s", unknown.Code, unknown.Body.String())
 	}
-	request["endpoint"] = "http://127.0.0.1:1"
-	request["model"] = "local-test-model"
+	request["route_id"] = testInferenceRouteID(host, "http://127.0.0.1:1", "local-test-model")
 	encoded, _ = json.Marshal(request)
 	enabled := httptest.NewRecorder()
 	mux.ServeHTTP(enabled, httptest.NewRequest(http.MethodPut, "/api/orchestration/reviews/binding", bytesReader(encoded)))

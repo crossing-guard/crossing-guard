@@ -9,25 +9,26 @@ import (
 )
 
 type RuntimeTask struct {
-	ID                        string        `json:"id"`
-	Runtime                   string        `json:"session_runtime"`
-	CatalogSessionID          string        `json:"catalog_session_id,omitempty"`
-	NativeSessionID           string        `json:"native_session_id,omitempty"`
-	WorkingDirectory          string        `json:"working_directory"`
-	WorkspaceSelectionID      string        `json:"workspace_selection_id,omitempty"`
-	WorkspaceSelectionVersion int64         `json:"workspace_selection_version,omitempty"`
-	Lifecycle                 TaskLifecycle `json:"lifecycle"`
-	Ownership                 string        `json:"ownership"`
-	ObservationMode           string        `json:"observation_mode"`
-	Freshness                 string        `json:"freshness"`
-	Controllable              bool          `json:"controllable"`
-	CreatedAt                 int64         `json:"created_at"`
-	UpdatedAt                 int64         `json:"updated_at"`
-	LastSequence              int64         `json:"last_sequence"`
-	LastEventID               int64         `json:"last_event_id"`
-	ErrorText                 string        `json:"error,omitempty"`
-	RetentionDeadline         int64         `json:"retention_deadline"`
-	Events                    []TaskEvent   `json:"events,omitempty"`
+	RequestedSettings         *store.TaskRequestedSettings `json:"requested_settings,omitempty"`
+	ID                        string                       `json:"id"`
+	Runtime                   string                       `json:"session_runtime"`
+	CatalogSessionID          string                       `json:"catalog_session_id,omitempty"`
+	NativeSessionID           string                       `json:"native_session_id,omitempty"`
+	WorkingDirectory          string                       `json:"working_directory"`
+	WorkspaceSelectionID      string                       `json:"workspace_selection_id,omitempty"`
+	WorkspaceSelectionVersion int64                        `json:"workspace_selection_version,omitempty"`
+	Lifecycle                 TaskLifecycle                `json:"lifecycle"`
+	Ownership                 string                       `json:"ownership"`
+	ObservationMode           string                       `json:"observation_mode"`
+	Freshness                 string                       `json:"freshness"`
+	Controllable              bool                         `json:"controllable"`
+	CreatedAt                 int64                        `json:"created_at"`
+	UpdatedAt                 int64                        `json:"updated_at"`
+	LastSequence              int64                        `json:"last_sequence"`
+	LastEventID               int64                        `json:"last_event_id"`
+	ErrorText                 string                       `json:"error,omitempty"`
+	RetentionDeadline         int64                        `json:"retention_deadline"`
+	Events                    []TaskEvent                  `json:"events,omitempty"`
 }
 
 type TaskEvent struct {
@@ -53,6 +54,9 @@ type TaskEvent struct {
 }
 
 type taskCreateRecord struct {
+	RequestedSettings                                            *store.TaskRequestedSettings
+	SessionEffortToken                                           string
+	SessionEffortID                                              string
 	ID, ConsoleScope, IdempotencyKey, RequestDigest              string
 	Runtime, CatalogSessionID, NativeSessionID, WorkingDirectory string
 	WorkspaceSelectionID                                         string
@@ -80,9 +84,9 @@ type taskRepository interface {
 type taskStoreRepository struct{ index *store.Index }
 
 func (r taskStoreRepository) Create(in taskCreateRecord) (RuntimeTask, TaskEvent, bool, error) {
-	payload, _ := json.Marshal(map[string]any{"type": "queued", "task_id": in.ID})
+	payload, _ := json.Marshal(map[string]any{"type": "queued", "task_id": in.ID, "requested_settings": in.RequestedSettings})
 	record, event, created, err := r.index.CreateRuntimeTaskWithEvent(store.RuntimeTaskRecord{
-		ID: in.ID, ConsoleScope: in.ConsoleScope, IdempotencyKey: in.IdempotencyKey,
+		RequestedSettings: in.RequestedSettings, SessionEffortToken: in.SessionEffortToken, SessionEffortID: in.SessionEffortID, ID: in.ID, ConsoleScope: in.ConsoleScope, IdempotencyKey: in.IdempotencyKey,
 		RequestDigest: in.RequestDigest, Runtime: in.Runtime,
 		CatalogSessionID: in.CatalogSessionID, NativeSessionID: in.NativeSessionID, WorkingDirectory: in.WorkingDirectory,
 		WorkspaceSelectionID: in.WorkspaceSelectionID, WorkspaceSelectionVersion: in.WorkspaceSelectionVersion,
@@ -210,7 +214,7 @@ func (r taskStoreRepository) DeleteExpired(now int64) (int64, error) {
 }
 
 func runtimeTaskFromStore(record store.RuntimeTaskRecord) RuntimeTask {
-	return RuntimeTask{ID: record.ID, Runtime: record.Runtime,
+	return RuntimeTask{RequestedSettings: record.RequestedSettings, ID: record.ID, Runtime: record.Runtime,
 		CatalogSessionID: record.CatalogSessionID, NativeSessionID: record.NativeSessionID, WorkingDirectory: record.WorkingDirectory,
 		WorkspaceSelectionID: record.WorkspaceSelectionID, WorkspaceSelectionVersion: record.WorkspaceSelectionVersion,
 		Lifecycle: TaskLifecycle(record.Lifecycle), Ownership: record.Ownership,

@@ -109,7 +109,8 @@
             "file-observation",
             "external-source",
             "derived-record",
-            "imported"
+            "imported",
+            "sandbox-hook"
           ]
         },
         "content_hash": {

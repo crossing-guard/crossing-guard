@@ -25,7 +25,7 @@ func TestPortableTargetNeverReturnsAnAbsolutePath(t *testing.T) {
 	if got := PortableTarget("url:api.example.com", root, repo); got == nil || got.Kind != "url" || got.Name != "api.example.com" {
 		t.Fatalf("url targets ship their host: %+v", got)
 	}
-	if got := PortableTarget("mcp:oms__getOrder", root, repo); got == nil || got.Kind != "mcp" || got.Name != "oms__getOrder" {
+	if got := PortableTarget("mcp:shop__getOrder", root, repo); got == nil || got.Kind != "mcp" || got.Name != "shop__getOrder" {
 		t.Fatalf("mcp targets ship their tool: %+v", got)
 	}
 	if PortableTarget("", root, repo) != nil {
@@ -137,5 +137,51 @@ func TestWireSessionIsOneIDWhateverLocalStringNamedIt(t *testing.T) {
 	}
 	if bare.Session.NativeID != "3f6c1a2e" || bare.Session.Runtime != "claude" || composite.Session.NativeID != "3f6c1a2e" {
 		t.Fatalf("normalized identities: %+v %+v", bare.Session, composite.Session)
+	}
+}
+
+// The §7.1 reservation: a sandbox-spooled observation encodes under its own provenance
+// kind and the result is schema-valid wire JSON (the enum carries the value).
+func TestEncodeWireEventCarriesTheSandboxHookProvenance(t *testing.T) {
+	raw, err := EncodeWireEvent(WireEventInput{DeviceID: "dev_A", GlobalID: DeterministicTypedID("evt", "dev_A:sandbox"), TS: 100,
+		Session: "claude/s1", Runtime: "claude", Verb: "exec", Tool: "Bash", Decision: "allow", Origin: "sandbox-hook"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"kind":"sandbox-hook"`) {
+		t.Fatalf("provenance kind not carried: %s", raw)
+	}
+}
+
+// Postwork C1: frozen evidence from the real classifier carries the absolute path the
+// hook saw ("path=/Users/…"); on the wire it is repository-relative inside the checkout
+// and "[absolute path]" outside it. Built from Classify's own output, not a literal.
+func TestEncodeWireEventNeverShipsAnAbsolutePathInTags(t *testing.T) {
+	dets, err := DefaultDetectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ path, want string }{
+		{"/Users/dev/work/api/docs/guide.md", "path=docs/guide.md"},
+		{"/Users/dev/notes/private.md", "path=[absolute path]"},
+	} {
+		tags := Classify(Event{Tool: "Read", Path: c.path, Role: "tool_call"}, dets)
+		found := false
+		for _, tg := range tags {
+			found = found || strings.HasPrefix(tg.Evidence, "path=")
+		}
+		if !found {
+			t.Fatalf("fixture premise: the classifier must freeze path evidence for %s: %+v", c.path, tags)
+		}
+		frozen, _ := json.Marshal(tags)
+		raw, err := EncodeWireEvent(WireEventInput{DeviceID: "dev_A", GlobalID: DeterministicTypedID("evt", c.path), TS: 1, Session: "claude/s",
+			Runtime: "claude", Verb: "read", Tool: "Read", TargetEntityID: "file:" + c.path, FrozenTags: string(frozen), Decision: "allow",
+			Reason: "read " + c.path, Origin: "live", RepositoryID: "remote-sha256-v1:r", CheckoutRoot: "/Users/dev/work/api"}, dets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "/Users/") || !strings.Contains(string(raw), c.want) {
+			t.Fatalf("%s: %s", c.path, raw)
+		}
 	}
 }

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:session:1.0",
+  "title": "Session projection pushed by a device: the three identities, the event span, and the device's own chain report as a CLAIM",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "device_id",
+    "session",
+    "workspace",
+    "events",
+    "chain_claim",
+    "reported_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "session": {
+      "$ref": "common.schema.json#/$defs/session"
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ],
+      "properties": {
+        "repository_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        }
+      }
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "first_at",
+        "last_at"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_at": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_at": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "chain_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "rows",
+        "chained",
+        "legacy",
+        "disk_span",
+        "held_span"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "fork",
+            "gap",
+            "none",
+            "empty"
+          ]
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chained": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "legacy": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disk_span": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "held_span": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tail_matches_held": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "reported_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

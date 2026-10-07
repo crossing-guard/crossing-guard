@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "id": "ckp_22222222222222222222222222",
+  "device_id": "dev_11111111111111111111111111",
+  "session_id": "ses_00000000000000000000000000",
+  "kind": "attachment",
+  "status": "complete",
+  "boundary_class": "settled",
+  "repository_id": null,
+  "requested_at": "2026-09-29T10:00:00Z",
+  "ended_at": null,
+  "revision": null,
+  "failure_kind": "",
+  "detail_digest": "",
+  "checkout_root": "/Users/dev/work"
+}

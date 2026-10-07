@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "text_extensions": [
+    ".txt",
+    ".md",
+    ".go",
+    ".js",
+    ".mjs",
+    ".css",
+    ".html",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".sh",
+    ".sql"
+  ],
+  "image_media_types": [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp"
+  ],
+  "limits": {
+    "max_items_per_scope": 8,
+    "max_source_bytes_per_item": 20971520,
+    "max_source_bytes_per_scope": 67108864,
+    "max_global_source_bytes": 536870912,
+    "max_text_bytes_per_item": 1048576,
+    "max_text_bytes_per_scope": 4194304,
+    "max_image_dimension": 8192,
+    "max_image_pixels": 40000000,
+    "max_normalized_bytes_per_item": 26214400,
+    "max_normalized_bytes_per_scope": 67108864,
+    "max_basename_bytes": 255,
+    "max_display_code_points": 128,
+    "unclaimed_expiry_seconds": 86400,
+    "max_concurrent_admissions": 4
+  }
+}

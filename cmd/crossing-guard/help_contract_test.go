@@ -28,7 +28,7 @@ func TestTopLevelHelpClassifiesEveryDispatchedVerbOnce(t *testing.T) {
 			t.Errorf("help missing stability heading %q", heading)
 		}
 	}
-	if strings.Contains(topLevelUsage, "Passport") || strings.Contains(topLevelUsage, "not built yet") {
+	if strings.Contains(topLevelUsage, "not built yet") {
 		t.Fatal("top-level help advertises an unbuilt path")
 	}
 }

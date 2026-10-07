@@ -147,10 +147,19 @@ func runUnderstandShow(path string, args []string) int {
 			fmt.Fprintln(os.Stderr, "resolve repository:", resolveErr)
 			return 1
 		}
-		generations, _, listErr := index.UnderstandingGenerations(repository.ID, repository.CheckoutID, 1)
+		// The default is the newest attempt retention has not pruned (it may be a
+		// failed attempt, as before); a checkout whose every generation was pruned
+		// shows the newest one.
+		generations, _, listErr := index.UnderstandingGenerations(repository.ID, repository.CheckoutID, 0)
 		err = listErr
 		if len(generations) > 0 {
 			generation, found = generations[0], true
+		}
+		for _, candidate := range generations {
+			if candidate.FactsState != store.UnderstandingFactsPruned {
+				generation = candidate
+				break
+			}
 		}
 	}
 	if err != nil || !found {
@@ -169,6 +178,9 @@ func runUnderstandShow(path string, args []string) int {
 			fmt.Fprintln(os.Stderr, "--center must be KIND:REF")
 			return 2
 		}
+	}
+	if generation.FactsState == store.UnderstandingFactsPruned {
+		return showPrunedUnderstanding(path, generation, compare != "", jsonOutput)
 	}
 	units, unitTotal, err := index.UnderstandingUnits(generation.ID, unitOffset, unitLimit)
 	if err != nil {
@@ -220,6 +232,27 @@ func runUnderstandShow(path string, args []string) int {
 			fmt.Printf("%-40s shared names=%d body-shapes=%d internal-dependencies=%d external-dependencies=%d\n", row.RightPath, row.SharedDeclarations.Total, row.SharedBodyShapes.Total, row.SharedInternalDependencies.Total, row.SharedExternalDependencies.Total)
 		}
 	}
+	fmt.Println("store:", path)
+	return 0
+}
+
+// showPrunedUnderstanding prints a generation whose facts retention removed. It
+// reads no unit, edge or coverage rows: rows not yet deleted are garbage no reader
+// resolves, and an empty page would read as "measured nothing".
+func showPrunedUnderstanding(path string, generation store.UnderstandingGeneration, compared, jsonOutput bool) int {
+	const reason = "analysis facts were removed by retention"
+	view := understandingShow{Store: path, Generation: generation, Units: []store.UnderstandingUnit{},
+		Edges: []store.UnderstandingEdge{}, Coverage: []store.UnderstandingCoverage{}}
+	if compared {
+		view.CandidateState, view.CandidateReason = "unavailable", reason
+	}
+	if jsonOutput {
+		body, _ := json.MarshalIndent(view, "", "  ")
+		fmt.Println(string(body))
+		return 0
+	}
+	fmt.Printf("generation %d  %s  snapshot %s\n", generation.ID, generation.Status, generation.SnapshotDigest)
+	fmt.Printf("%s; the scan measured %d units and %d edges\n", reason, generation.UnitTotal, generation.EdgeTotal)
 	fmt.Println("store:", path)
 	return 0
 }

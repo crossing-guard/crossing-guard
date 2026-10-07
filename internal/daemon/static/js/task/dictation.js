@@ -63,7 +63,7 @@ export function formatClock(ms) {
 
 // --- controller ------------------------------------------------------------
 
-export function createDictation({ root, controls, composer, cwd, api = speechAPI, doc = document,
+export function createDictation({ root, controls, anchor = controls, composer, cwd, api = speechAPI, doc = document,
   media = navigator.mediaDevices, AudioContextCtor = window.AudioContext, workletURL = 'js/task/audio-worklet.js' } = {}) {
   const mic = el('button', 'iconbtn dictation-mic');
   mic.type = 'button'; mic.innerHTML = ICON_MIC; mic.title = 'Dictate';
@@ -76,8 +76,8 @@ export function createDictation({ root, controls, composer, cwd, api = speechAPI
   const disclose = el('div', 'dictation-disclose hidden');
   const overlay = el('div', 'dictation-overlay');
   overlay.setAttribute('aria-hidden', 'true');
-  root.insertBefore(strip, controls); root.insertBefore(hint, controls);
-  root.insertBefore(review, controls); root.insertBefore(disclose, controls);
+  root.insertBefore(strip, anchor); root.insertBefore(hint, anchor);
+  root.insertBefore(review, anchor); root.insertBefore(disclose, anchor);
   root.appendChild(overlay);
   const textarea = composer.textarea;
 
@@ -118,7 +118,7 @@ export function createDictation({ root, controls, composer, cwd, api = speechAPI
     const paused = Date.now() < pausedUntil;
     mic.classList.toggle('off', !ready() || paused);
     mic.classList.toggle('live', state === 'listening');
-    if (!ready()) mic.title = caps?.reason ? 'Dictation is not set up. ' + caps.reason : 'Dictation is not set up. Open Settings → Speech.';
+    if (!ready()) mic.title = caps?.reason ? 'Dictation is not set up. ' + caps.reason : 'Dictation is not set up. Open Settings → Dictation.';
     else if (state === 'listening') mic.title = 'Stop dictating';
     else mic.title = 'Dictate — hold ' + caps.ui.push_to_talk + ', or click to toggle';
   };

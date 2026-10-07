@@ -15,7 +15,7 @@ func TestMigratedRulebookReachesCommandVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CG_RULES", path)
-	verdict, err := CheckCommand("please touch-me")
+	verdict, err := CheckCommand("please touch-me", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

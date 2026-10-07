@@ -51,9 +51,9 @@ func closeSessionActivityService() {
 }
 
 // presenceIdentity is the collapse key (session-presence-honesty plan, Slice
-// A): one presence item per LOGICAL session — the native identity when the
-// runtime publishes one (codex resume/forks share it across rollout files),
-// else the catalog identity.
+// A): one presence item per LOGICAL session — the canonical native identity
+// from the runtime's identity owner, else the catalog identity. A resume handle
+// is not an identity: a child may carry its parent's resume handle.
 func presenceIdentity(runtime, catalogID, nativeID string) string {
 	identity := nativeID
 	if identity == "" {
@@ -73,11 +73,9 @@ func presenceIdentity(runtime, catalogID, nativeID string) string {
 // capability and drops items past ExpiresAt; the browser store reads neither,
 // downgrading an expired item to freshness "stale" and still drawing a dot.
 //
-// The key is deliberately NOT the presence collapse key presenceIdentity(): a
-// codex row's ResumeID is its parent's ThreadID, and resumed multi-rollout
-// threads share it (17 shared ids in the owner's own store on 2026-09-04, one
-// across four rows), so keying by it would mark sibling rows Open that the dot
-// leaves dark.
+// The key is deliberately NOT the presence collapse key presenceIdentity():
+// resumed multi-rollout threads share a canonical identity, so keying by it
+// would mark sibling rows Open that the dot leaves dark.
 type presenceOpenSet struct {
 	Capability sessionactivity.Capability
 	Open       map[string]bool
@@ -178,66 +176,122 @@ func sampleNativeSessionActivity(ctx context.Context, now time.Time) (sessionact
 		Status: observation.Capability.Status,
 		Detail: observation.Capability.Detail,
 	}
-	if capability.Status != "available" {
-		// The file-open probe gates the whole sampler: without it the hook and
-		// recent-turn lanes never run, so an unsupported platform reports the
-		// service unavailable rather than answering from the lanes that could.
-		// Named here because the rail renders this sentence to the reader.
-		return capability, []sessionactivity.Item{}
+	var items []sessionactivity.Item
+	if capability.Status == "available" {
+		// One published sentence for what "open" means, so the browser renders the
+		// daemon's answer instead of keeping its own copy that a fourth lane would
+		// silently falsify.
+		capability.Detail = "Open means a live vendor process holds the exact session file, " +
+			"or the runtime's own lifecycle hooks saw the session start and act inside the " +
+			"liveness window; it does not mean a model turn is generating."
+		items = assemblePresenceItems(now, sessions, observation.OpenPaths, hookLiveSessionItems(now, sessions))
 	}
-	// One published sentence for what "open" means, so the browser renders the
-	// daemon's answer instead of keeping its own copy that a fourth lane would
-	// silently falsify.
-	capability.Detail = "Open means a live vendor process holds the exact session file, " +
-		"or the runtime's own lifecycle hooks saw the session start and act inside the " +
-		"liveness window; it does not mean a model turn is generating."
-	items := assemblePresenceItems(now, sessions, observation.OpenPaths, hookLiveSessionItems(now, sessions))
-	items = appendRecentTurnSessions(now, sessions, items)
+	// Status candidate folding continues even when exact presence probing is
+	// unavailable (plan invariant 18): an unavailable probe suppresses Open
+	// membership but not durable status candidates from turn/action rows.
+	// One owner-attention read per pass serves both the candidate source
+	// (an unresolved ask keeps a quiet session on the rail) and the fold.
+	attention := readOwnerAttentionBatch(now)
+	items = mergeOwnerAttentionCandidates(now, sessions, items, attention)
+	items = mergeStatusCandidates(now, sessions, items)
 	// Every item carries the ONE decider's frame, so a sampler pass and an
 	// event-driven replace can never disagree about a session.
-	return capability, decorateSessionStatus(now, items)
+	return capability, pruneResolvedAttentionCandidates(decorateSessionStatusWith(now, items, attention), attention)
 }
 
-// appendRecentTurnSessions adds sessions that produced a turn-boundary row
+// mergeStatusCandidates adds sessions that produced a status-deciding fact
 // inside the quiet window but which no presence lane holds — a session that
-// handed back a moment ago belongs on the rail even if nothing holds its file.
-func appendRecentTurnSessions(now time.Time, sessions []SessionSummary, items []sessionactivity.Item) []sessionactivity.Item {
+// handed back a moment ago, or one with a recent governed action, belongs on
+// the rail even if nothing holds its file. Candidates carry presence=unknown;
+// they never enter presenceOpenSetFrom, whose presence == "open" gate is
+// unchanged (plan D2).
+//
+// Turn candidates: active turn.started/input.requested inside quiet and the
+// latest turn.ended across the turn-retention horizon. Action candidates:
+// latest action facts inside quiet_seconds. Both are bounded, deduplicated by
+// (runtime, native session id), ordered by newest deciding fact, and one
+// final max_rail_sessions cap applies to status-only items.
+func mergeStatusCandidates(now time.Time, sessions []SessionSummary, items []sessionactivity.Item) []sessionactivity.Item {
 	if governor == nil || governor.ix == nil {
 		return items
 	}
+	config := sessionActivityConfig()
 	quiet := sessionStreamConfig().Quiet()
-	recent, err := governor.ix.SessionsWithRecentTurns(now.Add(-quiet).UnixMilli(), sessionActivityConfig().MaxRailSessions)
-	if err != nil {
-		// A store hiccup must not wedge the sampler; the other lanes still answer.
-		return items
-	}
 	seen := map[string]bool{}
 	for _, item := range items {
 		seen[presenceIdentity(item.Runtime, item.CatalogSessionID, item.NativeSessionID)] = true
 	}
-	for _, turn := range recent {
-		var resolved *SessionSummary
-		for index := range sessions {
-			session := &sessions[index]
-			if session.Runtime == turn.Runtime && (session.ID == turn.SessionID || session.ResumeID == turn.SessionID) {
-				resolved = session
-				break
+
+	type candidate struct {
+		item     sessionactivity.Item
+		deciding int64 // newest deciding fact timestamp (ms)
+	}
+	var candidates []candidate
+
+	// Turn candidates: recent turn-boundary rows inside the quiet window.
+	recentTurns, err := governor.ix.SessionsWithRecentTurns(now.Add(-quiet).UnixMilli(), config.MaxRailSessions)
+	if err == nil {
+		for _, turn := range recentTurns {
+			resolved, found := identifySession(sessions, turn.Runtime, turn.SessionID)
+			if !found {
+				continue
 			}
+			nativeID := harvest.CanonicalID(resolved)
+			key := presenceIdentity(resolved.Runtime, resolved.ID, nativeID)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			candidates = append(candidates, candidate{
+				item: sessionactivity.Item{
+					Runtime: resolved.Runtime, CatalogSessionID: resolved.ID, NativeSessionID: nativeID,
+					Presence: "unknown", Execution: "unknown", Evidence: "native_protocol", Freshness: "live",
+					Authority: "observed", Controllable: false, ObservedAt: now, ExpiresAt: now.Add(quiet),
+					Detail: "Recently active; whether it is still open is unknown.",
+				},
+				deciding: turn.ReceivedAtMS,
+			})
 		}
-		if resolved == nil {
-			continue
+	}
+
+	// Action candidates: sessions with a recent governed action inside quiet.
+	actionCandidates, err := governor.ix.SessionActionCandidates(now.Add(-quiet).UnixMilli(), config.MaxRailSessions)
+	if err == nil {
+		for _, ac := range actionCandidates {
+			resolved, found := identifySession(sessions, ac.Runtime, ac.SessionID)
+			if !found {
+				continue
+			}
+			nativeID := harvest.CanonicalID(resolved)
+			key := presenceIdentity(resolved.Runtime, resolved.ID, nativeID)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			candidates = append(candidates, candidate{
+				item: sessionactivity.Item{
+					Runtime: resolved.Runtime, CatalogSessionID: resolved.ID, NativeSessionID: nativeID,
+					Presence: "unknown", Execution: "unknown", Evidence: "native_protocol", Freshness: "live",
+					Authority: "observed", Controllable: false, ObservedAt: now, ExpiresAt: now.Add(quiet),
+					Detail: "Recently active; whether it is still open is unknown.",
+				},
+				deciding: ac.NewestActionAt * 1000,
+			})
 		}
-		key := presenceIdentity(resolved.Runtime, resolved.ID, resolved.ResumeID)
-		if seen[key] {
-			continue
+	}
+
+	// Order by newest deciding fact and apply one final status-only cap.
+	for i := 1; i < len(candidates); i++ {
+		for j := i; j > 0 && candidates[j].deciding > candidates[j-1].deciding; j-- {
+			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
 		}
-		seen[key] = true
-		items = append(items, sessionactivity.Item{
-			Runtime: resolved.Runtime, CatalogSessionID: resolved.ID, NativeSessionID: resolved.ResumeID,
-			Presence: "unknown", Execution: "unknown", Evidence: "native_protocol", Freshness: "live",
-			Authority: "observed", Controllable: false, ObservedAt: now, ExpiresAt: now.Add(quiet),
-			Detail: "Recently active; whether it is still open is unknown.",
-		})
+	}
+	maxRail := config.MaxRailSessions
+	if len(items)+len(candidates) > maxRail && maxRail > len(items) {
+		candidates = candidates[:maxRail-len(items)]
+	}
+	for _, c := range candidates {
+		items = append(items, c.item)
 	}
 	return items
 }
@@ -257,11 +311,12 @@ func assemblePresenceItems(now time.Time, sessions []SessionSummary, openPaths m
 		if session.Path == "" || !openPaths[filepath.Clean(session.Path)] {
 			continue
 		}
-		key := presenceIdentity(session.Runtime, session.ID, session.ResumeID)
+		nativeID := harvest.CanonicalID(session)
+		key := presenceIdentity(session.Runtime, session.ID, nativeID)
 		item := sessionactivity.Item{
 			Runtime:          session.Runtime,
 			CatalogSessionID: session.ID,
-			NativeSessionID:  session.ResumeID,
+			NativeSessionID:  nativeID,
 			Presence:         "open",
 			Execution:        "unknown",
 			Evidence:         "file_open",
@@ -330,15 +385,8 @@ func hookLiveSessionItems(now time.Time, sessions []SessionSummary) []sessionact
 		if harvest.ActivityEvidence(row.Runtime)["session.started"] != "hook-exact" {
 			continue
 		}
-		var resolved *SessionSummary
-		for index := range sessions {
-			session := &sessions[index]
-			if session.Runtime == row.Runtime && (session.ID == row.SessionID || session.ResumeID == row.SessionID) {
-				resolved = session
-				break
-			}
-		}
-		if resolved == nil {
+		resolved, found := identifySession(sessions, row.Runtime, row.SessionID)
+		if !found {
 			continue
 		}
 		age := now.Sub(time.Unix(row.LastEventAt, 0))
@@ -351,7 +399,7 @@ func hookLiveSessionItems(now time.Time, sessions []SessionSummary) []sessionact
 		items = append(items, sessionactivity.Item{
 			Runtime:          row.Runtime,
 			CatalogSessionID: resolved.ID,
-			NativeSessionID:  resolved.ResumeID,
+			NativeSessionID:  harvest.CanonicalID(resolved),
 			Presence:         "open",
 			Execution:        "unknown",
 			Evidence:         "hook_liveness",

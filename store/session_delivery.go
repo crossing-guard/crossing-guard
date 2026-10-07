@@ -111,23 +111,54 @@ const (
 	sessionDeliveryExpireScan   = 200
 )
 
-// ClaimSessionDeliveries marks pending records for the session delivered at
-// this boundary, in creation order, until the next record would push the
-// drained bytes past maxBytes (the first record always drains), and returns
-// them; records past the budget stay pending for the next boundary. The
+// SessionDeliveryClaim is one boundary's claim: the session, the observation that
+// carries it, and what the boundary may carry.
+type SessionDeliveryClaim struct {
+	Runtime, SessionID string
+	Kind               string // OUR observation kind
+	ObservationID      string
+	NativeCallID       string
+	Now                int64
+	MaxBytes           int
+	// CarriesHandoff says this boundary may carry a handoff's brief (a row whose
+	// run_id has HandoffDeliveryRunPrefix): true only at a kind where the runtime's
+	// hook can tell a nested call from the session's own, so a brief is never handed
+	// to a child (team rest-of-release plan §6.5, K-1). Helper rows are unaffected.
+	CarriesHandoff bool
+}
+
+// ClaimSessionDeliveries is ClaimSessionDeliveriesAt for a boundary that carries no
+// handoff brief — the default, so a caller that does not say so never hands one over.
+func (ix *Index) ClaimSessionDeliveries(runtime, sessionID, kind, observationID, nativeCallID string, now int64, maxBytes int) ([]SessionDelivery, error) {
+	return ix.ClaimSessionDeliveriesAt(SessionDeliveryClaim{Runtime: runtime, SessionID: sessionID, Kind: kind,
+		ObservationID: observationID, NativeCallID: nativeCallID, Now: now, MaxBytes: maxBytes})
+}
+
+// ClaimSessionDeliveriesAt marks pending records for the session delivered at
+// this boundary until the next record would push the drained bytes past
+// MaxBytes (the first record always drains), and returns them; records past the
+// budget stay pending for the next boundary. A handoff's brief sorts first,
+// ahead of older helper rows, so the encoder's own cap can only ever cut what
+// follows it; the rest drain in creation order. The
 // session may be named by either identity. The claim commits before the
 // caller responds, so a boundary that dies after reading loses the message
 // rather than seeing it again (invariant 6). Records past their expiry are
 // left for expiry. An empty session takes no write transaction.
-func (ix *Index) ClaimSessionDeliveries(runtime, sessionID, kind, observationID, nativeCallID string, now int64, maxBytes int) ([]SessionDelivery, error) {
+func (ix *Index) ClaimSessionDeliveriesAt(claim SessionDeliveryClaim) ([]SessionDelivery, error) {
+	runtime, sessionID, kind, now, maxBytes := claim.Runtime, claim.SessionID, claim.Kind, claim.Now, claim.MaxBytes
 	if runtime == "" || sessionID == "" || kind == "" {
 		return nil, nil
 	}
 	if maxBytes <= 0 {
 		maxBytes = sessionDeliveryClaimDefault
 	}
+	// Rows this boundary may not carry are invisible to it and stay pending.
+	carried := ` AND run_id NOT LIKE '` + HandoffDeliveryRunPrefix + `%'`
+	if claim.CarriesHandoff {
+		carried = ""
+	}
 	var pending int
-	if err := ix.db.QueryRow(`SELECT count(*) FROM session_delivery WHERE state='pending' AND runtime=? AND (native_session_id=? OR catalog_session_id=?) AND expires_at>?`,
+	if err := ix.db.QueryRow(`SELECT count(*) FROM session_delivery WHERE state='pending' AND runtime=? AND (native_session_id=? OR catalog_session_id=?) AND expires_at>?`+carried,
 		runtime, sessionID, sessionID, now).Scan(&pending); err != nil {
 		return nil, err
 	}
@@ -141,8 +172,8 @@ func (ix *Index) ClaimSessionDeliveries(runtime, sessionID, kind, observationID,
 	}
 	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.Query(`SELECT `+sessionDeliveryCols+` FROM session_delivery
-		WHERE state='pending' AND runtime=? AND (native_session_id=? OR catalog_session_id=?) AND expires_at>?
-		ORDER BY created_at ASC, delivery_id ASC LIMIT ?`, runtime, sessionID, sessionID, now, limit)
+		WHERE state='pending' AND runtime=? AND (native_session_id=? OR catalog_session_id=?) AND expires_at>?`+carried+`
+		ORDER BY (run_id LIKE '`+HandoffDeliveryRunPrefix+`%') DESC, created_at ASC, delivery_id ASC LIMIT ?`, runtime, sessionID, sessionID, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -168,12 +199,12 @@ func (ix *Index) ClaimSessionDeliveries(runtime, sessionID, kind, observationID,
 	for index := range claimed {
 		if _, err := tx.Exec(`UPDATE session_delivery SET state='delivered',delivered_at=?,delivered_kind=?,
 			delivered_native_call_id=?,delivered_observation_id=? WHERE delivery_id=? AND state='pending'`,
-			now, kind, nativeCallID, observationID, claimed[index].DeliveryID); err != nil {
+			now, kind, claim.NativeCallID, claim.ObservationID, claimed[index].DeliveryID); err != nil {
 			return nil, err
 		}
 		claimed[index].State, claimed[index].DeliveredAt = "delivered", now
-		claimed[index].DeliveredKind, claimed[index].DeliveredNativeCallID = kind, nativeCallID
-		claimed[index].DeliveredObservationID = observationID
+		claimed[index].DeliveredKind, claimed[index].DeliveredNativeCallID = kind, claim.NativeCallID
+		claimed[index].DeliveredObservationID = claim.ObservationID
 	}
 	if len(claimed) == 0 {
 		return claimed, nil
@@ -185,7 +216,11 @@ func (ix *Index) ClaimSessionDeliveries(runtime, sessionID, kind, observationID,
 // when the reply carrying them never reached the hook (delivery-claim-on-reply
 // plan D4). Only rows still marked delivered by that same observation are
 // touched, so a record a later boundary re-claimed is never disturbed. A
-// released record is indistinguishable from one never claimed.
+// released record is indistinguishable from one never claimed. A handoff's brief
+// is the exception: while it was handed over, its handoff may have been
+// withdrawn, its claim moved, or the device given up on it, and none of those
+// could cancel a row that was not pending. Such a row ends here, expired with
+// the named detail, instead of going back to pending (handoffBriefReleaseEndTx).
 func (ix *Index) ReleaseSessionDeliveries(deliveryIDs []string, observationID string) (int64, error) {
 	if len(deliveryIDs) == 0 || observationID == "" {
 		return 0, nil
@@ -197,6 +232,18 @@ func (ix *Index) ReleaseSessionDeliveries(deliveryIDs []string, observationID st
 	defer func() { _ = tx.Rollback() }()
 	var released int64
 	for _, id := range deliveryIDs {
+		ended, err := handoffBriefReleaseEndTx(tx, id)
+		if err != nil {
+			return 0, err
+		}
+		if ended != "" {
+			if _, err := tx.Exec(`UPDATE session_delivery SET state='expired',detail=?,delivered_at=0,delivered_kind='',
+				delivered_native_call_id='',delivered_observation_id='' WHERE delivery_id=? AND state='delivered' AND delivered_observation_id=?`,
+				ended, id, observationID); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		result, err := tx.Exec(`UPDATE session_delivery SET state='pending',delivered_at=0,delivered_kind='',
 			delivered_native_call_id='',delivered_observation_id='' WHERE delivery_id=? AND state='delivered' AND delivered_observation_id=?`,
 			id, observationID)

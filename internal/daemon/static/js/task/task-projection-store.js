@@ -38,6 +38,8 @@ export function reduceTaskProjection(state, event) {
   }
   const task = {
     ...previous,
+    created_at: previous.created_at || (event.kind === 'task.queued' ? event.observed_at : undefined),
+    requested_settings: payload.requested_settings || previous.requested_settings,
 		session_runtime: event.session_runtime || previous.session_runtime,
     catalog_session_id: event.catalog_session_id || previous.catalog_session_id,
     lifecycle,

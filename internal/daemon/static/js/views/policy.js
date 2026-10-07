@@ -591,7 +591,7 @@ async function renderPolicy(container, mutationNotice) {
         gt.innerHTML = '<tr><th>pattern (regex on the command)</th><th></th></tr>';
         patterns.forEach((pat, pi) => {
           const tr = el('tr');
-          const gp = el('input'); gp.value = pat; gp.style.width = '100%'; gp.style.fontFamily = 'var(--mono)'; gp.style.fontSize = '12px';
+          const gp = el('input'); gp.value = pat; gp.style.width = '100%'; gp.style.fontFamily = 'var(--mono)'; gp.style.fontSize = 'var(--fs-8)';
           gp.oninput = () => { patterns[pi] = gp.value; setPatterns(rule, patterns); };
           const gd = el('button', 'btn', '✕'); gd.title = 'remove pattern';
           gd.onclick = () => { patterns.splice(pi, 1); setPatterns(rule, patterns); renderCards(); };
@@ -740,6 +740,12 @@ async function renderPolicy(container, mutationNotice) {
       else row.appendChild(el('span', 'sub', 'no rule matched'));
       card.appendChild(row);
       card.appendChild(el('div', 'sub', 'evaluator: ' + r.evaluator));
+      if (r.state_rules_not_evaluated > 0) {
+        card.appendChild(el('div', 'sub', r.state_rules_not_evaluated + ' deny/ask state rule(s) are decided at run time by the daemon, not by this preview'));
+      }
+      if (r.rules_undecided > 0) {
+        card.appendChild(el('div', 'sub', r.rules_undecided + ' deny/ask rule(s) could not be decided here: they read a fact a command preview does not have (the tool, a path, a destination, or a detector fact when no detector set is loaded)'));
+      }
       testOut.appendChild(card);
     } catch (e) { testOut.appendChild(el('div', 'sysline err', '✖ ' + e.message)); }
   };
@@ -763,7 +769,7 @@ async function renderPolicy(container, mutationNotice) {
       tr.appendChild(el('td', '', fmtTime(d.ts)));
       const c = el('td'); c.appendChild(el('span', 'chip ' + (d.decision === 'allow' ? 'st-verified' : 'st-disputed'), d.decision || d.action)); tr.appendChild(c);
       tr.appendChild(el('td', '', (d.rule || '') + (d.guard ? ' / ' + d.guard : '')));
-      const cmd = el('td', '', d.command || ''); cmd.style.fontFamily = 'var(--mono)'; cmd.style.fontSize = '11.5px'; tr.appendChild(cmd);
+      const cmd = el('td', '', d.command || ''); cmd.style.fontFamily = 'var(--mono)'; cmd.style.fontSize = 'var(--fs-7)'; tr.appendChild(cmd);
       tr.appendChild(el('td', '', d.prompt || ''));
       t.appendChild(tr);
     }

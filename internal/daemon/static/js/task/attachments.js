@@ -21,7 +21,9 @@ export function inputCapabilityIssue(capability, inputs) {
   return '';
 }
 
-export function createAttachments({ root, controls, storageKey, capability, api = inputAPI } = {}) {
+// root is the bordered input; anchor (default: controls) is the child of root
+// that the tray and messages sit before. The add button goes into controls.
+export function createAttachments({ root, controls, anchor = controls, storageKey, capability, api = inputAPI } = {}) {
   const tray = el('div', 'attachment-tray hidden');
   tray.setAttribute('aria-live', 'polite');
   const error = el('div', 'attachment-error hidden');
@@ -31,9 +33,9 @@ export function createAttachments({ root, controls, storageKey, capability, api 
   const add = el('button', 'iconbtn attachment-add', '+');
   add.type = 'button'; add.title = 'Attach images or files'; add.setAttribute('aria-label', 'Attach images or files');
   controls.insertBefore(add, controls.firstChild);
-  root.insertBefore(tray, controls);
-  root.insertBefore(error, controls);
-  root.insertBefore(warning, controls);
+  root.insertBefore(tray, anchor);
+  root.insertBefore(error, anchor);
+  root.insertBefore(warning, anchor);
   root.appendChild(picker);
 
   const controller = new AbortController();
@@ -139,9 +141,15 @@ export function createAttachments({ root, controls, storageKey, capability, api 
     hasPending() { return busy > 0; },
     snapshot() { return inputs.map(input => ({ ...input })); },
     setCapability(next) { selectedCapability = next; paint(); },
-    claimed() {
-      for (const url of previews.values()) URL.revokeObjectURL(url);
-      previews.clear(); scopeID = ''; inputs = []; saveScope(); paint(); setError('');
+    claimed(references) {
+      if (references?.input_scope_id !== scopeID) return;
+      const submitted = new Set(references.input_ids || []);
+      for (const id of submitted) {
+        const url = previews.get(id); if (url) URL.revokeObjectURL(url); previews.delete(id);
+      }
+      inputs = inputs.filter(input => !submitted.has(input.id));
+      if (!inputs.length) scopeID = '';
+      saveScope(); paint(); setError('');
     },
     dispose() {
       controller.abort(); for (const url of previews.values()) URL.revokeObjectURL(url); previews.clear();

@@ -118,8 +118,16 @@ type Skill struct {
 type SkillsReport struct {
 	GeneratedAt string                `json:"generated_at"`
 	Skills      []Skill               `json:"skills"`
+	Providers   []SkillsProviderInfo  `json:"providers"`
 	Probes      map[string]*ProbeInfo `json:"probes"`
 	RepoDir     string                `json:"repo_dir,omitempty"`
+}
+
+// SkillsProviderInfo is the registry's browser-safe enumeration, including
+// providers whose inventory is empty and those without a native probe seam.
+type SkillsProviderInfo struct {
+	Runtime  string `json:"runtime"`
+	CanProbe bool   `json:"can_probe"`
 }
 
 type ProbeInfo struct {
@@ -220,6 +228,9 @@ func scanSkills(repo string) *SkillsReport {
 	}
 
 	report := &SkillsReport{GeneratedAt: time.Now().UTC().Format(time.RFC3339), RepoDir: repo}
+	for _, p := range skillsProviderList() {
+		report.Providers = append(report.Providers, SkillsProviderInfo{Runtime: p.Name(), CanProbe: p.CanProbe()})
+	}
 	for _, sk := range byName {
 		// drift: same name, more than one distinct hash among non-symlink entries
 		hashes := map[string]bool{}
@@ -339,7 +350,7 @@ func handleSkillsProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	p := skillsProviders[req.Runtime]
 	if p == nil || !p.CanProbe() {
-		http.Error(w, "probe not available for this runtime (claude has no zero-model enumeration seam)", http.StatusBadRequest)
+		http.Error(w, "probe not available for this runtime", http.StatusBadRequest)
 		return
 	}
 	pi := p.Probe()

@@ -62,7 +62,8 @@ func TestRefreshTranscriptIndexIncrementalAndForcePreserveSharedStore(t *testing
 
 	first, err := refreshTranscriptIndex(transcriptindex.RefreshModeIncremental)
 	if err != nil || first.Stats.Discovered != 1 || first.Stats.Updated != 1 ||
-		first.Coverage.State != transcriptindex.CoverageCurrent {
+		first.Coverage.State != transcriptindex.CoverageCurrent ||
+		len(first.Coverage.Limitations) != 0 {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	second, err := refreshTranscriptIndex(transcriptindex.RefreshModeIncremental)
@@ -92,5 +93,57 @@ func TestRefreshTranscriptIndexIncrementalAndForcePreserveSharedStore(t *testing
 	transcriptHits, err := ix.SearchEvents("cli projection", 10)
 	if err != nil || len(transcriptHits) == 0 {
 		t.Fatalf("transcript hits=%+v err=%v", transcriptHits, err)
+	}
+}
+
+func TestRefreshIndexesAntigravityMeasuredTextAndResume(t *testing.T) {
+	indexPath := writeCLITranscriptFixture(t, "Claude fixture", "claude phrase")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "abcdef00-aaaa-4bbb-8ccc-000000000014"
+	path := filepath.Join(home, ".gemini", "antigravity-cli", "brain", id,
+		".system_generated", "logs", "transcript_full.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>orbit search phrase</USER_REQUEST><ADDITIONAL_METADATA>hidden metadata</ADDITIONAL_METADATA>"}` + "\n" +
+		`{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"gravity response phrase"}` + "\n" +
+		`{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"view_file","args":{"AbsolutePath":"/fixture/native-tool-marker"}}]}` + "\n" +
+		`{"source":"MODEL","type":"GENERIC","status":"DONE","content":"secret generic phrase"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := refreshTranscriptIndex(transcriptindex.RefreshModeIncremental)
+	if err != nil || first.Coverage.State != transcriptindex.CoverageCurrent ||
+		first.Stats.Discovered != 2 || first.Stats.Updated != 2 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	ix, err := store.OpenRO(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"orbit search", "gravity response", "native-tool-marker"} {
+		hits, searchErr := ix.SearchEvents(phrase, 10)
+		if searchErr != nil || len(hits) == 0 || hits[0].Vendor != "antigravity" || hits[0].SessionID != id {
+			t.Fatalf("phrase %q hits=%+v err=%v", phrase, hits, searchErr)
+		}
+	}
+	for _, phrase := range []string{"hidden metadata", "secret generic"} {
+		hits, searchErr := ix.SearchEvents(phrase, 10)
+		if searchErr != nil || len(hits) != 0 {
+			t.Fatalf("non-searchable %q hits=%+v err=%v", phrase, hits, searchErr)
+		}
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body+`{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>resumed orbit phrase</USER_REQUEST>"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := refreshTranscriptIndex(transcriptindex.RefreshModeIncremental)
+	if err != nil || second.Coverage.State != transcriptindex.CoverageCurrent || second.Stats.Updated != 1 || second.Stats.Discovered != 2 {
+		t.Fatalf("resumed=%+v err=%v", second, err)
 	}
 }

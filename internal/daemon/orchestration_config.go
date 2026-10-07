@@ -12,6 +12,7 @@ package daemon
 
 import (
 	"crossing-guard/internal/observation"
+	"crossing-guard/internal/orchestration/profilefs"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,13 +34,35 @@ type OrchestrationConfig struct {
 	Context       OrchestrationContextConfig `json:"context"`
 	Delivery      DeliveryConfig             `json:"delivery"`
 	HelperSession HelperSessionConfig        `json:"helper_session"`
+	Roster        RosterConfig               `json:"roster"`
+}
+
+// RosterConfig bounds the Agents pages' reads and writes
+// (agents-settings-redesign plan inv. 9): when an agent needs attention, how
+// many runs a page or the overview shows, the stats window, and how many
+// places one batch may change.
+type RosterConfig struct {
+	// AttentionFailedRuns is how many newest settled runs, all failed, mark an
+	// agent as needing attention.
+	AttentionFailedRuns int `json:"attention_failed_runs"`
+	// PageSize is how many runs one Activity page reads.
+	PageSize int `json:"page_size"`
+	// StatsDays is the stats window in local days.
+	StatsDays int `json:"stats_days"`
+	// OverviewRuns is how many newest runs the Overview lists.
+	OverviewRuns int `json:"overview_runs"`
+	// MaxBatch caps the changes one batch write may carry.
+	MaxBatch int `json:"max_batch"`
 }
 
 // HelperSessionConfig paces the helper-session sweep (helper-persistent-
 // session plan D4): how many wedged runs, lost launches, and pending groups
-// one 30 s lifecycle pass reconciles and drains.
+// one 30 s lifecycle pass reconciles and drains. TurnDeadlineCheckMS is how
+// often the deadline watcher looks for a helper turn past its profile timeout
+// (managed-turn-profile-limits plan §4.2) — the precision of that timeout.
 type HelperSessionConfig struct {
-	SweepBatch int `json:"sweep_batch"`
+	SweepBatch          int `json:"sweep_batch"`
+	TurnDeadlineCheckMS int `json:"turn_deadline_check_ms"`
 }
 
 // NaturalSignalConfig paces the hook-row → signal emitter.
@@ -87,6 +110,21 @@ type DeliveryConfig struct {
 	// to the registered driver's optional chatDeliveryConfigurer port. The
 	// generic loader never reads inside a blob.
 	RuntimeOptions map[string]json.RawMessage `json:"runtime_options,omitempty"`
+	// DeliverAttended selects agent-initiated cross-vendor sends
+	// (session-message-cross-vendor-plan §5, owner decision D7): off until the
+	// deployment opts in. The route handler checks it beside scope, budgets,
+	// and the loop bound; the profile-authority owner does not apply here.
+	DeliverAttended bool `json:"deliver_attended"`
+	// SendScope bounds an agent session's targets: "repository" (the caller's
+	// own repository and its worktrees; D8) or "all". "all" is an
+	// owner-selected deployment setting, never a tool parameter.
+	SendScope string `json:"send_scope"`
+	// MaxSendsPerCallerWindow caps one caller session's sends inside the
+	// delivery TTL (plan RT-12). Zero disables the per-caller ceiling.
+	MaxSendsPerCallerWindow int `json:"max_sends_per_caller_window"`
+	// SendMessageMaxBytes bounds one send's message text before the wrapper
+	// is applied, mirroring the socket tier's post bound.
+	SendMessageMaxBytes int `json:"send_message_max_bytes"`
 }
 
 func defaultOrchestrationConfig() OrchestrationConfig {
@@ -96,8 +134,10 @@ func defaultOrchestrationConfig() OrchestrationConfig {
 		Context:       OrchestrationContextConfig{TranscriptTailEvents: 200},
 		Delivery: DeliveryConfig{TTLSeconds: 1800, MaxPendingPerSession: 3,
 			CarrierKinds: []string{"turn.started", "tool.started", "tool.completed"}, AdapterTimeoutSeconds: 15,
-			ClaimBytes: 7000, ClaimMarginMS: 300},
-		HelperSession: HelperSessionConfig{SweepBatch: 50},
+			ClaimBytes: 7000, ClaimMarginMS: 300, DeliverAttended: false, SendScope: "repository",
+			MaxSendsPerCallerWindow: 10, SendMessageMaxBytes: 64 << 10},
+		HelperSession: HelperSessionConfig{SweepBatch: 50, TurnDeadlineCheckMS: 5000},
+		Roster:        RosterConfig{AttentionFailedRuns: 5, PageSize: 50, StatsDays: 7, OverviewRuns: 5, MaxBatch: 64},
 	}
 }
 
@@ -138,16 +178,17 @@ func (c OrchestrationConfig) validate() error {
 		return fmt.Errorf("unsupported format_version %d", c.FormatVersion)
 	}
 	positive := map[string]int{
-		"natural_signal.sweep_seconds":     c.NaturalSignal.SweepSeconds,
-		"natural_signal.coalesce_ms":       c.NaturalSignal.CoalesceMS,
-		"natural_signal.task_settle_ms":    c.NaturalSignal.TaskSettleMS,
-		"context.transcript_tail_events":   c.Context.TranscriptTailEvents,
-		"delivery.ttl_seconds":             c.Delivery.TTLSeconds,
-		"delivery.max_pending_per_session": c.Delivery.MaxPendingPerSession,
-		"delivery.adapter_timeout_seconds": c.Delivery.AdapterTimeoutSeconds,
-		"delivery.claim_bytes":             c.Delivery.ClaimBytes,
-		"delivery.claim_margin_ms":         c.Delivery.ClaimMarginMS,
-		"helper_session.sweep_batch":       c.HelperSession.SweepBatch,
+		"natural_signal.sweep_seconds":          c.NaturalSignal.SweepSeconds,
+		"natural_signal.coalesce_ms":            c.NaturalSignal.CoalesceMS,
+		"natural_signal.task_settle_ms":         c.NaturalSignal.TaskSettleMS,
+		"context.transcript_tail_events":        c.Context.TranscriptTailEvents,
+		"delivery.ttl_seconds":                  c.Delivery.TTLSeconds,
+		"delivery.max_pending_per_session":      c.Delivery.MaxPendingPerSession,
+		"delivery.adapter_timeout_seconds":      c.Delivery.AdapterTimeoutSeconds,
+		"delivery.claim_bytes":                  c.Delivery.ClaimBytes,
+		"delivery.claim_margin_ms":              c.Delivery.ClaimMarginMS,
+		"helper_session.sweep_batch":            c.HelperSession.SweepBatch,
+		"helper_session.turn_deadline_check_ms": c.HelperSession.TurnDeadlineCheckMS,
 	}
 	names := make([]string, 0, len(positive))
 	for name := range positive {
@@ -164,6 +205,20 @@ func (c OrchestrationConfig) validate() error {
 		// off claiming for every hook that states a deadline (review F4).
 		return fmt.Errorf("delivery.claim_margin_ms must be less than the hook delivery budget (%d ms)", observation.HookDeliveryBudget.Milliseconds())
 	}
+	for _, bound := range []struct {
+		name          string
+		value, lo, hi int
+	}{
+		{"roster.attention_failed_runs", c.Roster.AttentionFailedRuns, 1, 50},
+		{"roster.page_size", c.Roster.PageSize, 1, 200},
+		{"roster.stats_days", c.Roster.StatsDays, 1, 90},
+		{"roster.overview_runs", c.Roster.OverviewRuns, 1, 20},
+		{"roster.max_batch", c.Roster.MaxBatch, 1, 256},
+	} {
+		if bound.value < bound.lo || bound.value > bound.hi {
+			return fmt.Errorf("%s must be between %d and %d", bound.name, bound.lo, bound.hi)
+		}
+	}
 	if len(c.Delivery.CarrierKinds) == 0 {
 		return errors.New("delivery.carrier_kinds must name at least one observation kind")
 	}
@@ -172,8 +227,23 @@ func (c OrchestrationConfig) validate() error {
 			return fmt.Errorf("delivery.carrier_kinds may not include %q", kind)
 		}
 	}
+	switch c.Delivery.SendScope {
+	case "", "repository", "all":
+	default:
+		return fmt.Errorf("delivery.send_scope must be repository or all, not %q", c.Delivery.SendScope)
+	}
+	if c.Delivery.SendMessageMaxBytes <= 0 {
+		return errors.New("delivery.send_message_max_bytes must be positive")
+	}
+	if c.Delivery.MaxSendsPerCallerWindow < 0 {
+		return errors.New("delivery.max_sends_per_caller_window may not be negative")
+	}
 	return nil
 }
+
+// SendScopeAll reports whether agent-initiated sends may target sessions in
+// any repository (owner decision D8: the default is the caller's own).
+func (c OrchestrationConfig) SendScopeAll() bool { return c.Delivery.SendScope == "all" }
 
 // IsCarrierKind reports whether a receipt for this observation kind may carry
 // pending deliveries.
@@ -199,6 +269,11 @@ func (c OrchestrationConfig) Sweep() time.Duration {
 // Coalesce is how long an ingest nudge is held before one emitter pass.
 func (c OrchestrationConfig) Coalesce() time.Duration {
 	return time.Duration(c.NaturalSignal.CoalesceMS) * time.Millisecond
+}
+
+// TurnDeadlineCheck is the deadline watcher's cadence.
+func (c OrchestrationConfig) TurnDeadlineCheck() time.Duration {
+	return time.Duration(c.HelperSession.TurnDeadlineCheckMS) * time.Millisecond
 }
 
 // TaskSettle is the launch window a fresh hook row waits before it is routed
@@ -258,20 +333,30 @@ func applyOrchestrationRuntimeOptions(config OrchestrationConfig) error {
 var (
 	orchestrationConfigOnce  sync.Once
 	orchestrationConfigValue OrchestrationConfig
-	orchestrationConfigMu    sync.RWMutex
+	// orchestrationConfigRejected is the decoder's reason when the owner's
+	// file was refused and the defaults are in force; "" otherwise.
+	orchestrationConfigRejected string
+	orchestrationConfigMu       sync.RWMutex
 )
+
+// resolveOrchestrationConfig loads the owner's values, or the defaults with
+// the rejection reason when the file is unusable.
+func resolveOrchestrationConfig(dataDir string) (OrchestrationConfig, string, string) {
+	config, origin, err := loadOrchestrationConfig(dataDir)
+	if err != nil {
+		log.Printf("orchestration configuration unusable, using defaults: %v", err)
+		return defaultOrchestrationConfig(), "builtin-default-after-error", err.Error()
+	}
+	return config, origin, ""
+}
 
 // orchestrationConfig resolves once per process. A configuration error is
 // reported and the defaults are used, so a typo cannot take the agents host
-// offline — the log line is the operator's signal.
+// offline; the rejection is a roster problem the owner sees on the Agents
+// page (escalation-delivery plan §5), and clearing it takes a restart.
 func orchestrationConfig() OrchestrationConfig {
 	orchestrationConfigOnce.Do(func() {
-		config, origin, err := loadOrchestrationConfig(filepath.Dir(indexPath()))
-		if err != nil {
-			log.Printf("orchestration configuration unusable, using defaults: %v", err)
-			config = defaultOrchestrationConfig()
-			origin = "builtin-default-after-error"
-		}
+		config, origin, rejected := resolveOrchestrationConfig(filepath.Dir(indexPath()))
 		log.Printf("orchestration configuration: origin=%s sweep=%s coalesce=%s settle=%s ttl=%s pending_cap=%d carriers=%v claim_margin=%s",
 			origin, config.Sweep(), config.Coalesce(), config.TaskSettle(), config.TTL(),
 			config.Delivery.MaxPendingPerSession, config.Delivery.CarrierKinds, config.ClaimMargin())
@@ -280,11 +365,28 @@ func orchestrationConfig() OrchestrationConfig {
 		}
 		orchestrationConfigMu.Lock()
 		orchestrationConfigValue = config
+		orchestrationConfigRejected = rejected
 		orchestrationConfigMu.Unlock()
 	})
 	orchestrationConfigMu.RLock()
 	defer orchestrationConfigMu.RUnlock()
 	return orchestrationConfigValue
+}
+
+// orchestrationConfigProblems is the roster's view of a rejected file: one
+// problem naming the decoder's reason, empty when the file was used.
+func orchestrationConfigProblems() []profilefs.ListProblem {
+	orchestrationConfig()
+	orchestrationConfigMu.RLock()
+	rejected := orchestrationConfigRejected
+	orchestrationConfigMu.RUnlock()
+	if rejected == "" {
+		return nil
+	}
+	return []profilefs.ListProblem{{SelectionKey: "orchestration.json", Problem: profilefs.Problem{
+		Code:     "orchestration_config_rejected",
+		Message:  "The orchestration configuration was rejected (" + rejected + "); built-in defaults are in force.",
+		Recovery: "Fix the file, then restart the daemon: the configuration is read once per start."}}}
 }
 
 // swapOrchestrationConfig substitutes the resolved configuration for tests and
@@ -296,12 +398,12 @@ func swapOrchestrationConfig(config OrchestrationConfig) func() {
 		orchestrationConfigMu.Unlock()
 	})
 	orchestrationConfigMu.Lock()
-	previous := orchestrationConfigValue
-	orchestrationConfigValue = config
+	previous, previousRejected := orchestrationConfigValue, orchestrationConfigRejected
+	orchestrationConfigValue, orchestrationConfigRejected = config, ""
 	orchestrationConfigMu.Unlock()
 	return func() {
 		orchestrationConfigMu.Lock()
-		orchestrationConfigValue = previous
+		orchestrationConfigValue, orchestrationConfigRejected = previous, previousRejected
 		orchestrationConfigMu.Unlock()
 	}
 }

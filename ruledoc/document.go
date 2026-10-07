@@ -22,6 +22,17 @@ import (
 // should contain it; demo and verification use it to prove the real hook path.
 const CanaryMarker = "crossing-guard-canary"
 
+// CanaryRuleID is the shipped proof rule's id. A live deny event carrying it is the only
+// durable evidence that a block reaches a runtime's agent, so it is what verification and
+// the device report look for. A rulebook that renames or deletes the rule, or puts an
+// earlier deny rule in front of it, forfeits that evidence — reported as "no canary rule
+// active", which is a different fact from "never observed".
+const CanaryRuleID = "canary-deny"
+
+// DemoRuntime is the runtime name `crossing-guard demo` drives the hook under. It never
+// credits a real runtime: a canary the demo sends proves the hook path, not an agent's.
+const DemoRuntime = "demo"
+
 //go:embed rules.default.json
 var defaultRules []byte
 
@@ -57,6 +68,12 @@ func Parse(raw []byte) (*engine.Policy, error) {
 		return nil, err
 	}
 	if err := engine.CompilePredicates(&policy); err != nil {
+		return nil, err
+	}
+	// A rule that reads a route: fact beside a term route admission cannot answer has
+	// no evaluation site that holds both, so it is refused here, where every document
+	// is written and loaded (team rest-of-release plan §5.4, OD-25).
+	if err := engine.ValidateRouteRules(&policy); err != nil {
 		return nil, err
 	}
 	return &policy, nil

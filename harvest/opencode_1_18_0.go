@@ -8,6 +8,7 @@ package harvest
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,23 +32,23 @@ func init() { register(opencodeRuntime{}) }
 func (opencodeRuntime) Name() string        { return opencodeRuntimeName }
 func (opencodeRuntime) CLIRevision() string { return "1.18.0" }
 
-// ActivityEvidence: OpenCode has no lifecycle hooks — start/active facts are
-// presence-derived, and there is NO end fact in v1 (red-team B3): its absence
-// here is the honest statement, never a guessed closure.
+// ActivityEvidence: OpenCode 1.18 publishes session.status {busy|retry|idle}
+// (the supported lifecycle contract). The installed plugin transition-dedupes
+// busy/retry/idle through a process-global state map and emits our
+// turn.started/turn.ended vocabulary on a non-carrier path. The deprecated
+// session.idle event is ignored for the exact 1.18 contract.
 func (opencodeRuntime) ActivityEvidence() map[string]string {
-	// Session-scoped work facts (helper-session-attachment plan D1): the
-	// plugin's tool.execute.after writes live post-tool rows; session.idle is
-	// installed probe-gated, so turn-ended is published as such; there is no
-	// turn-started hook.
 	return map[string]string{"session.started": "presence-derived", "session.active": "presence-derived",
-		"session.tool-completed": "hook-exact", "session.turn-ended": "probe-gated"}
+		"session.tool-completed": "hook-exact",
+		"session.turn-started":   "hook-exact",
+		"session.turn-ended":     "hook-exact"}
 }
 func (opencodeRuntime) CanonicalID(s SessionSummary) string      { return s.ID }
 func (opencodeRuntime) MatchID(s SessionSummary, id string) bool { return s.ID == id }
 func (opencodeRuntime) CouldMatchID(id string) bool              { return strings.HasPrefix(id, "ses_") }
 func (opencodeRuntime) Collect() []fileJob                       { return nil }
-func (opencodeRuntime) Summarize(fileJob) (SessionSummary, *SessionUsage, map[string]*DayBucket, bool) {
-	return SessionSummary{}, nil, nil, false
+func (opencodeRuntime) Summarize(fileJob) (SessionSummary, bool) {
+	return SessionSummary{}, false
 }
 func (opencodeRuntime) Normalize(string) ([]CanonicalEvent, int, *SessionUsage, error) {
 	return nil, 0, nil, fmt.Errorf("OpenCode sessions require a logical session reference")
@@ -82,6 +83,12 @@ func opencodeDataDir() string {
 		return filepath.Join(h, ".local", "share", "opencode")
 	}
 	return ""
+}
+
+// openOpenCodeReadOnly opens OpenCode's database for reading only, failing
+// fast rather than waiting on OpenCode's own writer.
+func openOpenCodeReadOnly(path string) (*sql.DB, error) {
+	return driver.Open("file:" + path + "?mode=ro&_pragma=busy_timeout(100)&_pragma=query_only(1)")
 }
 
 func opencodeDBPath() string {
@@ -142,14 +149,13 @@ func listOpenCodeProjectionRecords(ctx context.Context, path, sessionID string,
 		}
 		return nil, err
 	}
-	db, err := driver.Open("file:" + path + "?mode=ro&_pragma=busy_timeout(100)&_pragma=query_only(1)")
+	db, err := openOpenCodeReadOnly(path)
 	if err != nil {
 		return nil, fmt.Errorf("open OpenCode database read-only: %w", err)
 	}
 	defer db.Close()
 	query := `SELECT s.id,COALESCE(s.parent_id,''),s.directory,s.title,s.version,COALESCE(s.model,''),
-		s.tokens_input,s.tokens_output,s.tokens_reasoning,s.tokens_cache_read,s.tokens_cache_write,
-		s.time_created,s.time_updated,
+		s.time_updated,
 		(SELECT count(*) FROM message m WHERE m.session_id=s.id AND json_extract(m.data,'$.role')='assistant'),
 		(SELECT count(*) FROM message m WHERE m.session_id=s.id AND json_extract(m.data,'$.role')='user'),
 		(SELECT count(*) FROM part p WHERE p.session_id=s.id),`
@@ -167,6 +173,10 @@ func listOpenCodeProjectionRecords(ctx context.Context, path, sessionID string,
 		args = append(args, sessionID)
 	}
 	query += ` ORDER BY s.time_updated DESC,s.id`
+	facts, err := openCodeUsageFacts(ctx, db, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query OpenCode sessions: %w", err)
@@ -175,30 +185,27 @@ func listOpenCodeProjectionRecords(ctx context.Context, path, sessionID string,
 	records := []openCodeProjectionRecord{}
 	for rows.Next() {
 		var id, parent, directory, title, version, modelRaw string
-		var input, output, reasoning, cacheRead, cacheWrite, created, updated, sourceBytes, partUpdated int64
+		var updated, sourceBytes, partUpdated int64
 		var turns, userTurns, parts int
 		if err := rows.Scan(&id, &parent, &directory, &title, &version, &modelRaw,
-			&input, &output, &reasoning, &cacheRead, &cacheWrite, &created, &updated,
-			&turns, &userTurns, &parts, &sourceBytes, &partUpdated); err != nil {
+			&updated, &turns, &userTurns, &parts, &sourceBytes, &partUpdated); err != nil {
 			return nil, err
 		}
+		// Session totals are recorded per call (usage_opencode_1_18_0.go); the
+		// summary keeps only the rail's model, call count and context.
 		model := parseOpenCodeModel(modelRaw)
-		usage := &SessionUsage{Model: model.ID, Turns: turns, InputTokens: input,
-			OutputTokens: output, CacheRead: cacheRead, CacheCreate: cacheWrite}
-		finishUsage(usage)
 		ref := SessionRef{Runtime: opencodeRuntimeName, ID: id, Source: path, Segment: id,
 			UpdateMarker: openCodeMarker(updated, version, modelRaw, parts)}
 		sum := SessionSummary{Runtime: opencodeRuntimeName, ID: id, ParentID: parent,
 			Project: filepath.Base(directory), Title: truncate(title, titleMaxLen), TitleSource: "vendor",
 			Modified: unixMilli(updated), Lines: parts, Path: path, SourceRef: path,
 			SourceSegment: id, UpdateMarker: ref.UpdateMarker, Cwd: directory, Model: model.ID,
-			Provider: model.ProviderID, ActivityStatus: "unknown", Turns: turns, UserTurns: userTurns, HasTranscript: parts > 0}
+			Provider: model.ProviderID, ActivityStatus: "unknown", Turns: turns, UserTurns: userTurns, HasTranscript: parts > 0,
+			Context: facts.context[id]}
 		records = append(records, openCodeProjectionRecord{Record: SessionRecord{
-			Ref: ref, Summary: sum, Usage: usage}, SourceBytes: sourceBytes,
+			Ref: ref, Summary: sum}, SourceBytes: sourceBytes,
 			GenerationMarker: ref.UpdateMarker + ":" + strconv.FormatInt(partUpdated, 10) +
 				":" + strconv.FormatInt(sourceBytes, 10)})
-		_ = created
-		_ = reasoning
 	}
 	return records, rows.Err()
 }
@@ -216,6 +223,8 @@ type openCodePart struct {
 	Tool   string          `json:"tool"`
 	CallID string          `json:"callID"`
 	State  json.RawMessage `json:"state"`
+	// Synthetic marks text OpenCode wrote itself: an attached file, a tool read-out.
+	Synthetic bool `json:"synthetic"`
 }
 
 type openCodeToolState struct {
@@ -327,7 +336,7 @@ func (opencodeRuntime) NormalizeLogicalLifecycle(request LogicalLifecycleReadReq
 			return LogicalLifecyclePage{}, fmt.Errorf("invalid OpenCode lifecycle cursor")
 		}
 	}
-	db, err := driver.Open("file:" + request.Source + "?mode=ro&_pragma=busy_timeout(100)&_pragma=query_only(1)")
+	db, err := openOpenCodeReadOnly(request.Source)
 	if err != nil {
 		return LogicalLifecyclePage{}, err
 	}
@@ -427,17 +436,24 @@ func (opencodeRuntime) NormalizeSession(ref SessionRef, full bool) ([]CanonicalE
 
 func normalizeOpenCodeSession(ctx context.Context, ref SessionRef, full bool,
 	maxSourceBytes int64) ([]CanonicalEvent, int, *SessionUsage, int64, error) {
-	db, err := driver.Open("file:" + ref.Source + "?mode=ro&_pragma=busy_timeout(100)&_pragma=query_only(1)")
+	db, err := openOpenCodeReadOnly(ref.Source)
 	if err != nil {
 		return nil, 0, nil, 0, err
 	}
 	defer db.Close()
 	var modelRaw string
-	var input, output, cacheRead, cacheWrite int64
+	var input, output, reasoning, cacheRead, cacheWrite int64
+	var cost float64
 	var turns int
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(model,''),tokens_input,tokens_output,tokens_cache_read,tokens_cache_write,
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(model,''),tokens_input,tokens_output,tokens_reasoning,
+		tokens_cache_read,tokens_cache_write,COALESCE(cost,0),
 		(SELECT count(*) FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant')
-		FROM session WHERE id=?`, ref.Segment, ref.Segment).Scan(&modelRaw, &input, &output, &cacheRead, &cacheWrite, &turns); err != nil {
+		FROM session WHERE id=?`, ref.Segment, ref.Segment).Scan(&modelRaw, &input, &output, &reasoning,
+		&cacheRead, &cacheWrite, &cost, &turns); err != nil {
+		return nil, 0, nil, 0, err
+	}
+	facts, err := openCodeUsageFacts(ctx, db, ref.Segment)
+	if err != nil {
 		return nil, 0, nil, 0, err
 	}
 	var sourceBytes int64
@@ -453,9 +469,8 @@ func normalizeOpenCodeSession(ctx context.Context, ref SessionRef, full bool,
 		}
 	}
 	model := parseOpenCodeModel(modelRaw)
-	usage := &SessionUsage{Model: model.ID, Turns: turns, InputTokens: input, OutputTokens: output,
-		CacheRead: cacheRead, CacheCreate: cacheWrite}
-	finishUsage(usage)
+	usage := openCodeSessionUsage(model.ID, turns, input, output, reasoning, cacheRead, cacheWrite, cost)
+	usage.Context = facts.context[ref.Segment]
 	rows, err := db.QueryContext(ctx, `SELECT m.data,p.data,p.time_created,p.id FROM message m
 		JOIN part p ON p.message_id=m.id WHERE m.session_id=? ORDER BY p.time_created,p.id`, ref.Segment)
 	if err != nil {
@@ -473,6 +488,15 @@ func normalizeOpenCodeSession(ctx context.Context, ref SessionRef, full bool,
 		events = append(events, CanonicalEvent{Seq: seq, Kind: kind, Ts: ts, Name: name, Text: clipped, FullLen: fullLen})
 		seq++
 	}
+	// addWhole emits conversation text unclipped, like emit in the other adapters.
+	addWhole := func(kind, ts, text string) {
+		events = append(events, CanonicalEvent{Seq: seq, Kind: kind, Ts: ts, Text: strings.TrimSpace(text)})
+		seq++
+	}
+	// anchorLast gives the event just emitted its record identity, the part id
+	// OpenCode's live stream carries too. Only kinds the console draws live are
+	// anchored, so the console can skip their stored copies.
+	anchorLast := func(id string) { events[len(events)-1].TurnAnchor = id }
 	for rows.Next() {
 		var messageRaw, partRaw string
 		var created int64
@@ -490,16 +514,25 @@ func normalizeOpenCodeSession(ctx context.Context, ref SessionRef, full bool,
 		switch part.Type {
 		case "text":
 			kind := message.Role
-			if kind != "user" && kind != "assistant" {
-				kind = "other"
+			switch {
+			case kind != "user" && kind != "assistant":
+				add("other", ts, "", part.Text, metaCap)
+			case part.Synthetic:
+				add(kind, ts, "", part.Text, metaCap)
+			default:
+				addWhole(kind, ts, part.Text)
+				if kind == "assistant" {
+					anchorLast(partID)
+				}
 			}
-			add(kind, ts, "", part.Text, metaCap)
 		case "reasoning":
 			add("thinking", ts, "", part.Text, thinkingCap)
+			anchorLast(partID)
 		case "tool":
 			var state openCodeToolState
 			_ = json.Unmarshal(part.State, &state)
 			add("tool_call", opencodeTimestamp(state.Time.Start), part.Tool, string(state.Input), toolCap)
+			anchorLast(partID)
 			result := state.Output
 			if state.Error != "" {
 				result = state.Error
@@ -508,6 +541,7 @@ func normalizeOpenCodeSession(ctx context.Context, ref SessionRef, full bool,
 				result = string(state.Metadata)
 			}
 			add("tool_result", opencodeTimestamp(state.Time.End), part.Tool, result, toolCap)
+			anchorLast(partID)
 		case "step-start", "step-finish":
 			add("other", ts, part.Type, partID, metaCap)
 		default:
@@ -631,4 +665,59 @@ func (runtime opencodeRuntime) TranscriptProjectionGeneration(ctx context.Contex
 			current.SourceBytes, limits.MaxSourceBytes, nil)
 	}
 	return current.Generation, nil
+}
+
+// openCodeSessionUsage maps OpenCode's session columns into the neutral classes.
+// Measured on 1.18.0 (plan §4 step 0): OpenCode counts reasoning apart from
+// output (total = input + output + reasoning + cache), so the neutral output,
+// which includes reasoning, is their sum. Cost follows decision D-6: OpenCode's
+// stated figure, zero included, labelled runtime-stated; OpenCode cannot tell a
+// free model from an unpriced one, and neither can we. A session with no
+// assistant message stated nothing.
+func openCodeSessionUsage(model string, turns int, input, output, reasoning, cacheRead, cacheWrite int64,
+	cost float64) *SessionUsage {
+	usage := &SessionUsage{Model: model, Turns: turns, InputTokens: input,
+		OutputTokens: output + reasoning, CacheRead: cacheRead, CacheCreate: cacheWrite}
+	if turns > 0 {
+		usage.Reasoning = &reasoning
+		usage.Cost = &Cost{Amount: cost, Unit: "USD", Basis: CostBasisRuntime}
+	}
+	finishUsage(usage)
+	return usage
+}
+
+type openCodeFacts struct {
+	context map[string]int64 // session -> last call's occupancy
+}
+
+// openCodeUsageFacts reads the last assistant call's context occupancy for one
+// session (sessionID != "") or all of them: its input + cache read + cache
+// write — one call, never a sum across calls.
+func openCodeUsageFacts(ctx context.Context, db *sql.DB, sessionID string) (openCodeFacts, error) {
+	facts := openCodeFacts{context: map[string]int64{}}
+	filter, args := "", []any{}
+	if sessionID != "" {
+		filter, args = ` AND session_id=?`, []any{sessionID}
+	}
+	rows, err := db.QueryContext(ctx, `SELECT session_id,
+		COALESCE(json_extract(data,'$.tokens.input'),0)+COALESCE(json_extract(data,'$.tokens.cache.read'),0)+
+		COALESCE(json_extract(data,'$.tokens.cache.write'),0)
+		FROM (SELECT session_id, data, row_number() OVER (PARTITION BY session_id
+			ORDER BY json_extract(data,'$.time.created') DESC, id DESC) AS latest
+			FROM message WHERE json_extract(data,'$.role')='assistant'
+			AND COALESCE(json_extract(data,'$.tokens.total'),0) > 0`+filter+`)
+		WHERE latest=1`, args...)
+	if err != nil {
+		return facts, fmt.Errorf("query OpenCode context: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var session string
+		var occupancy int64
+		if err := rows.Scan(&session, &occupancy); err != nil {
+			return facts, err
+		}
+		facts.context[session] = occupancy
+	}
+	return facts, rows.Err()
 }

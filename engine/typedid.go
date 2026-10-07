@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// DeviceIDPrefix is the typed-id prefix of a device: the store mints one per install and
+// every signed request names it. One constant, because the store and the portable wire
+// package must agree on it without importing each other.
+const DeviceIDPrefix = "dev"
+
 // Typed ids are the wire identity of portable records (schemas/common.schema.json
 // `typedId`): a three-letter kind, an underscore, then 10–32 Crockford base32 chars.
 // The local store keeps its integer ids; these exist so two devices can never mint

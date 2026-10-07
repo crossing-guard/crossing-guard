@@ -47,7 +47,7 @@ func validateSessionEntryEnvelope(entry observation.SessionEntryEnvelope) error 
 	if entry.Runtime == "" || !validRuntimeName(entry.Runtime) || entry.SessionID == "" || len(entry.SessionID) > 512 {
 		return invalidObservation("session entry runtime/session identity is invalid")
 	}
-	if !validSessionEntryKind(entry.EntryKind) || len(entry.NativeSource) > 128 ||
+	if !validSessionEntryKind(entry.EntryKind) || len(entry.NativeSource) > observation.MaxNativeSourceBytes ||
 		len(entry.Cwd) > 16<<10 || len(entry.TranscriptPath) > 16<<10 {
 		return invalidObservation("session entry source/cwd metadata is invalid")
 	}
@@ -103,6 +103,12 @@ func ingestSessionEntryV1(ctx context.Context, g *Governor, entry observation.Se
 		DeliveryAttempts: entry.DeliveryAttempts, DeliveryMode: entry.DeliveryMode,
 	}
 	checkpointRequest := sessionEntryCheckpoint(entry)
+	// What this entry asks of the handoff owner is read before the write lock is
+	// taken; the claim itself commits in this first transaction, before the
+	// checkpoint capture below, so a slow capture cannot delay the brief past the
+	// session's first prompt (team rest-of-release plan §6.4 rule 6).
+	handoffStep := prepareHandoffEntry(ctx, g, entry)
+	handoffClaim := store.HandoffClaimResult{}
 	g.writeMu.Lock()
 	transaction, err := g.ix.BeginGov()
 	created := false
@@ -112,6 +118,9 @@ func ingestSessionEntryV1(ctx context.Context, g *Governor, entry observation.Se
 	}
 	if err == nil {
 		created, err = transaction.AppendSessionActivity(activity)
+	}
+	if err == nil {
+		handoffClaim, err = applyHandoffEntryTx(g, transaction, handoffStep, entry, created, receivedAt)
 	}
 	if err == nil {
 		checkpoint, _, err = transaction.EnsureSessionCheckpoint(checkpointRequest)
@@ -125,6 +134,7 @@ func ingestSessionEntryV1(ctx context.Context, g *Governor, entry observation.Se
 	if err != nil {
 		return observation.SessionEntryReceipt{}, err
 	}
+	afterHandoffEntry(handoffClaim, entry)
 	if created {
 		sessionStatusRefold(entry.Runtime, entry.SessionID)
 	}
@@ -166,7 +176,7 @@ func ingestSessionEntryV1(ctx context.Context, g *Governor, entry observation.Se
 
 func handleGovernSessionEntryV1(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, observation.MaxEnvelopeBytes)

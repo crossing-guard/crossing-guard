@@ -1,23 +1,19 @@
 package daemon
 
-// Transcript view profiles (transcript-view-profiles plan). A view profile is a
-// module: one self-contained JSON document whose rules decide whether each
-// transcript row is shown, collapsed to one line, or hidden behind a count.
-// Built-in modules are embedded in that same format; a module installed at
-// <dataDir>/view-profiles/<id>.json replaces the built-in of its id whole, and a
-// new id adds a module. A module never names who uses it: which module a session
-// opens with is selection, and lives in console.json.
+// Transcript view profiles (transcript-view-profiles plan; format v2 and the
+// console writer in session-view-and-console-preferences plan §B). A view
+// profile is a module: one self-contained JSON document whose rules decide
+// whether each transcript row is shown, collapsed to one line, or hidden behind
+// a count. Built-in modules are embedded in that same format; a module installed
+// at <dataDir>/view-profiles/<id>.json replaces the built-in of its id whole,
+// and a new id adds a module. A module never names who uses it: which module a
+// session opens with is selection, and lives in console.json.
 
 import (
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"net/http"
-	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -25,10 +21,11 @@ import (
 )
 
 const (
-	viewProfileFormatVersion = 1
-	// viewProfileReadLimit bounds one module; a rule list is a few hundred bytes.
-	viewProfileReadLimit = 64 << 10
-	viewProfileMaxRules  = 64
+	// Format 1 is the original rule vocabulary; format 2 adds fact and
+	// max_chars and refuses a collapse that cannot take effect.
+	viewProfileFormatV1 = 1
+	viewProfileFormatV2 = 2
+	viewProfileMaxRules = 64
 )
 
 //go:embed view-profiles/*.json
@@ -55,23 +52,27 @@ type ViewRule struct {
 type ViewMatch struct {
 	// Kind is a transcript row kind (harvest.CanonicalEvent.Kind).
 	Kind string `json:"kind,omitempty"`
-	// MinChars holds for rows whose full text is at least this long.
+	// MinChars and MaxChars bound the row's full text length.
 	MinChars int `json:"min_chars,omitempty"`
-	// Tool holds for tool rows of this tool name.
+	MaxChars int `json:"max_chars,omitempty"`
+	// Tool holds for tool rows of this exact tool name.
 	Tool string `json:"tool,omitempty"`
+	// Fact holds for tool rows the detector library classifies with this
+	// key:value fact (exec:run, fs:edit, …). Checked by syntax only: the
+	// detector library is layered and owner-overridable, so a fact no current
+	// detector emits is a rule that matches nothing, not an invalid module.
+	Fact string `json:"fact,omitempty"`
 }
 
 // ResolvedViewProfile is a module in use and where it came from: "builtin" or
-// the installed file's path.
+// the installed file's path. Builtin says a built-in of this id exists, so
+// deleting the installed file reverts rather than removes; StateToken is the
+// installed file's token ("" when none is installed).
 type ResolvedViewProfile struct {
 	ViewProfile
-	Origin string `json:"origin"`
-}
-
-// ViewProfileRejection is a module file that failed and was skipped.
-type ViewProfileRejection struct {
-	Path  string `json:"path"`
-	Error string `json:"error"`
+	Origin     string `json:"origin"`
+	Builtin    bool   `json:"builtin"`
+	StateToken string `json:"state_token"`
 }
 
 // viewProfilesResponse is the typed body of GET /api/console/view-profiles.
@@ -80,69 +81,37 @@ type viewProfilesResponse struct {
 	Rejected []ViewProfileRejection `json:"rejected"`
 }
 
+// viewProfileWriteRequest is the body of PUT /api/console/view-profiles/{id}.
+type viewProfileWriteRequest struct {
+	StateToken string      `json:"state_token"`
+	Profile    ViewProfile `json:"profile"`
+}
+
 var (
 	viewRowKinds = map[string]bool{"user": true, "assistant": true, "thinking": true, "tool_call": true,
 		"tool_result": true, "summary": true, "system": true, "context": true, "other": true}
-	viewDisplays  = map[string]bool{"show": true, "collapse": true, "hide": true}
-	viewProfileID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	viewDisplays = map[string]bool{"show": true, "collapse": true, "hide": true}
+	// viewChipKinds already render as one line that opens, so a v2 collapse
+	// rule on them would silently do nothing.
+	viewChipKinds = map[string]bool{"tool_call": true, "tool_result": true, "thinking": true}
+	viewFact      = regexp.MustCompile(`^[a-z][a-z0-9_-]*:[a-z0-9][a-z0-9_.-]*$`)
 )
 
-func viewProfilesDir(dataDir string) string { return filepath.Join(dataDir, "view-profiles") }
-
-// LoadViewProfiles resolves every module: the built-ins, then each installed
-// file, which replaces the built-in of its id or adds a module. A file that
-// fails is reported and skipped, so a built-in of that id stays in use.
-func LoadViewProfiles(dataDir string) ([]ResolvedViewProfile, []ViewProfileRejection) {
-	byID := map[string]ResolvedViewProfile{}
-	rejected := []ViewProfileRejection{}
-	builtins, _ := fs.Glob(builtinViewProfiles, "view-profiles/*.json")
-	for _, name := range builtins {
-		profile, err := readViewProfile(builtinViewProfiles.Open, name)
-		if err != nil {
-			rejected = append(rejected, ViewProfileRejection{Path: "builtin:" + path.Base(name), Error: err.Error()})
-			continue
-		}
-		byID[profile.ID] = ResolvedViewProfile{ViewProfile: profile, Origin: "builtin"}
-	}
-	installed, _ := filepath.Glob(filepath.Join(viewProfilesDir(dataDir), "*.json"))
-	for _, file := range installed {
-		profile, err := readViewProfile(func(name string) (fs.File, error) { return os.Open(name) }, file)
-		if err != nil {
-			rejected = append(rejected, ViewProfileRejection{Path: file, Error: err.Error()})
-			continue
-		}
-		byID[profile.ID] = ResolvedViewProfile{ViewProfile: profile, Origin: file}
-	}
-	profiles := make([]ResolvedViewProfile, 0, len(byID))
-	for _, profile := range byID {
-		profiles = append(profiles, profile)
-	}
-	sort.Slice(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
-	return profiles, rejected
+var viewProfileFamily = moduleFamily[ViewProfile]{
+	subdir:   "view-profiles",
+	builtins: builtinViewProfiles,
+	glob:     "view-profiles/*.json",
+	decode:   decodeViewProfile,
+	id:       func(p ViewProfile) string { return p.ID },
 }
 
-// readViewProfile decodes one module strictly and requires its id to be its
-// file name, so the file that replaces a module is always the one named for it.
-func readViewProfile(open func(string) (fs.File, error), name string) (ViewProfile, error) {
-	file, err := open(name)
-	if err != nil {
-		return ViewProfile{}, err
-	}
-	defer func() { _ = file.Close() }()
-	decoder := json.NewDecoder(io.LimitReader(file, viewProfileReadLimit))
-	decoder.DisallowUnknownFields()
+func decodeViewProfile(data []byte, _ bool) (ViewProfile, error) {
 	var profile ViewProfile
-	if err := decoder.Decode(&profile); err != nil {
-		return ViewProfile{}, fmt.Errorf("decode: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ViewProfile{}, errors.New("decode: trailing JSON data")
+	if err := decodeModuleStrict(data, &profile); err != nil {
+		return ViewProfile{}, err
 	}
 	if err := profile.validate(); err != nil {
 		return ViewProfile{}, err
-	}
-	if stem := strings.TrimSuffix(path.Base(filepath.ToSlash(name)), ".json"); stem != profile.ID {
-		return ViewProfile{}, fmt.Errorf("id %q must match the file name %q", profile.ID, stem)
 	}
 	if profile.Rules == nil {
 		profile.Rules = []ViewRule{}
@@ -150,11 +119,24 @@ func readViewProfile(open func(string) (fs.File, error), name string) (ViewProfi
 	return profile, nil
 }
 
+// LoadViewProfiles resolves every module: the built-ins, then each installed
+// file, which replaces the built-in of its id or adds a module. A file that
+// fails is reported and skipped, so a built-in of that id stays in use.
+func LoadViewProfiles(dataDir string) ([]ResolvedViewProfile, []ViewProfileRejection) {
+	modules, rejected := viewProfileFamily.load(dataDir)
+	profiles := make([]ResolvedViewProfile, 0, len(modules))
+	for _, module := range modules {
+		profiles = append(profiles, ResolvedViewProfile{ViewProfile: module.Module, Origin: module.Origin,
+			Builtin: module.Builtin, StateToken: module.StateToken})
+	}
+	return profiles, rejected
+}
+
 func (p ViewProfile) validate() error {
-	if p.FormatVersion != viewProfileFormatVersion {
+	if p.FormatVersion != viewProfileFormatV1 && p.FormatVersion != viewProfileFormatV2 {
 		return fmt.Errorf("unsupported format_version %d", p.FormatVersion)
 	}
-	if !viewProfileID.MatchString(p.ID) {
+	if !moduleIDPattern.MatchString(p.ID) {
 		return fmt.Errorf("id %q must be lowercase letters, digits and hyphens", p.ID)
 	}
 	if strings.TrimSpace(p.Name) == "" {
@@ -164,21 +146,47 @@ func (p ViewProfile) validate() error {
 		return fmt.Errorf("at most %d rules", viewProfileMaxRules)
 	}
 	for i, rule := range p.Rules {
-		if !viewDisplays[rule.Display] {
-			return fmt.Errorf("rules[%d].display %q must be show, collapse or hide", i, rule.Display)
-		}
-		if rule.Match.Kind != "" && !viewRowKinds[rule.Match.Kind] {
-			return fmt.Errorf("rules[%d].match.kind %q is not a transcript row kind", i, rule.Match.Kind)
-		}
-		if rule.Match.MinChars < 0 {
-			return fmt.Errorf("rules[%d].match.min_chars must be zero or positive", i)
+		if err := rule.validate(p.FormatVersion); err != nil {
+			return fmt.Errorf("rules[%d].%w", i, err)
 		}
 	}
 	return nil
 }
 
+func (r ViewRule) validate(format int) error {
+	match := r.Match
+	if !viewDisplays[r.Display] {
+		return fmt.Errorf("display %q must be show, collapse or hide", r.Display)
+	}
+	if match.Kind != "" && !viewRowKinds[match.Kind] {
+		return fmt.Errorf("match.kind %q is not a transcript row kind", match.Kind)
+	}
+	if match.MinChars < 0 || match.MaxChars < 0 {
+		return errors.New("match.min_chars and match.max_chars must be zero or positive")
+	}
+	if format == viewProfileFormatV1 {
+		if match.Fact != "" || match.MaxChars != 0 {
+			return errors.New("match.fact and match.max_chars need format_version 2")
+		}
+		return nil
+	}
+	if match.MaxChars > 0 && match.MinChars > match.MaxChars {
+		return errors.New("match.min_chars must not exceed match.max_chars")
+	}
+	if match.Tool != "" && strings.TrimSpace(match.Tool) == "" {
+		return errors.New("match.tool must not be blank")
+	}
+	if match.Fact != "" && !viewFact.MatchString(match.Fact) {
+		return fmt.Errorf("match.fact %q must be key:value, like exec:run", match.Fact)
+	}
+	if r.Display == "collapse" && viewChipKinds[match.Kind] {
+		return fmt.Errorf("display collapse has no effect on %s rows, which are already one line", match.Kind)
+	}
+	return nil
+}
+
 // validateTranscriptSelection requires every module console.json selects to
-// resolve, so a typo in an id is a refused file rather than a silent full view.
+// resolve, so a typo in an id is a refused section rather than a silent full view.
 func validateTranscriptSelection(selection ConsoleTranscriptDefaults, dataDir string) error {
 	profiles, _ := LoadViewProfiles(dataDir)
 	known := map[string]bool{}
@@ -201,9 +209,48 @@ func validateTranscriptSelection(selection ConsoleTranscriptDefaults, dataDir st
 	return nil
 }
 
+// transcriptSelectedBy names the console.json key that selects a view profile.
+func transcriptSelectedBy(id string) string {
+	config, _ := consoleConfig()
+	if config.Transcript.DefaultProfile == id {
+		return "transcript.default_profile"
+	}
+	roles := make([]string, 0, len(config.Transcript.RoleProfiles))
+	for role := range config.Transcript.RoleProfiles {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		if config.Transcript.RoleProfiles[role] == id {
+			return "transcript.role_profiles." + role
+		}
+	}
+	return ""
+}
+
+func consoleDataDir() string { return filepath.Dir(indexPath()) }
+
 // Modules are read on every request: dropping a file into view-profiles/ takes
 // effect at the browser's next load, with no daemon restart.
 func handleConsoleViewProfiles(w http.ResponseWriter, _ *http.Request) {
-	profiles, rejected := LoadViewProfiles(filepath.Dir(indexPath()))
+	profiles, rejected := LoadViewProfiles(consoleDataDir())
 	writeJSON(w, viewProfilesResponse{Profiles: profiles, Rejected: rejected})
+}
+
+func handleConsoleViewProfilePut(w http.ResponseWriter, r *http.Request) {
+	var request viewProfileWriteRequest
+	if !decodeConsoleWriteBody(w, r, &request) {
+		return
+	}
+	err := viewProfileFamily.put(consoleDataDir(), r.PathValue("id"), request.StateToken, request.Profile)
+	if respondModuleWrite(w, err) {
+		handleConsoleViewProfiles(w, r)
+	}
+}
+
+func handleConsoleViewProfileDelete(w http.ResponseWriter, r *http.Request) {
+	err := viewProfileFamily.remove(consoleDataDir(), r.PathValue("id"), r.URL.Query().Get("state_token"), transcriptSelectedBy)
+	if respondModuleWrite(w, err) {
+		handleConsoleViewProfiles(w, r)
+	}
 }

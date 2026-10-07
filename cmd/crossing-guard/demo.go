@@ -24,6 +24,7 @@ import (
 
 	"crossing-guard/engine"
 	"crossing-guard/internal/daemon"
+	"crossing-guard/internal/guardcli"
 	"crossing-guard/internal/rulebook"
 )
 
@@ -74,7 +75,7 @@ func demo(args []string) {
 		"tool_name":       "Bash",
 		"tool_input":      map[string]any{"command": canaryCommand},
 	})
-	cmd := exec.Command(self, "hook", "--runtime", "demo")
+	cmd := exec.Command(self, "hook", "--runtime", rulebook.DemoRuntime)
 	cmd.Stdin = bytes.NewReader(payload)
 	out, err := cmd.Output()
 	if err != nil && len(out) == 0 {
@@ -133,10 +134,15 @@ func demo(args []string) {
 // actually decides about the canary command — the same call the hook makes. The
 // first version grepped a JSON-marshalled predicate for the marker substring,
 // which cannot tell deny from ask from a rule wrapped in `not:`; the honest
-// answer was one engine.Decide away. Specifically a hard DENY: an `ask` rule
+// answer is the static tier's own decision (guardcli.StaticDecide), over the same
+// Bash tool identity the demo's hook run sends. Specifically a hard DENY: an `ask` rule
 // would send the demo's hook run to the live approvals inbox and hang there,
-// which is not a demo anyone asked for.
+// which is not a demo anyone asked for. A warn rule proceeds in the hook, so it
+// is no deny either.
 func canaryWouldBeDenied(pol *engine.Policy) bool {
-	d := engine.Decide([]engine.Tag{{Key: engine.CommandTagKey, Value: canaryCommand}}, pol)
-	return d.Decision != "allow" && d.Mode != engine.ConfirmAndRecord
+	dets, err := guardcli.ActiveDetectors()
+	if err != nil {
+		dets = nil // only the invocation's own facts are judged; CheckAction says so
+	}
+	return guardcli.CheckAction("Bash", canaryCommand, dets, pol).Decision.Mode == engine.HardBlock
 }

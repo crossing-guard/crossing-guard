@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,7 @@ func approvalsServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/approvals/request", handleApprovalRequest)
 	mux.HandleFunc("POST /api/approvals/decision", handleApprovalDecision)
+	mux.HandleFunc("POST /api/approvals/grant/revoke", handleApprovalGrantRevoke)
 	mux.HandleFunc("GET /api/approvals", handleApprovalsList)
 	mux.HandleFunc("GET /api/approvals/stream", handleApprovalsStream)
 	mux.HandleFunc("POST /api/approvals/presence", handleApprovalPresence)
@@ -137,7 +139,9 @@ func TestRuntimeToolApprovalUsesCanonicalInbox(t *testing.T) {
 			"origin": "runtime_tool", "runtime": "claude", "task_id": "task_123",
 			"catalog_session_id": "catalog_1", "native_session_id": "native_1",
 			"tool_call_id": "toolu_1", "tool_name": "Bash",
-			"summary": `{"tool":"Bash","input":{"command":"true"}}`, "timeout_ms": 5000,
+			"action": "Run a shell command", "targets": []string{"true"},
+			"approval_reason": "The runtime requires approval.",
+			"summary":         `{"tool":"Bash","input":{"command":"true"}}`, "timeout_ms": 5000,
 		})
 		done <- out
 	}()
@@ -162,6 +166,12 @@ func TestRuntimeToolApprovalUsesCanonicalInbox(t *testing.T) {
 		pending.ToolCallID != "toolu_1" || pending.ToolName != "Bash" {
 		t.Fatalf("runtime approval identity = %+v", pending)
 	}
+	if pending.Action != "Run a shell command" || len(pending.Targets) != 1 || pending.Targets[0] != "true" ||
+		pending.ApprovalReason != "The runtime requires approval." ||
+		pending.AllowLabel != "Allow once" || pending.GrantScope != "This request only" ||
+		pending.GrantDuration != "Until this request finishes; it is not remembered" {
+		t.Fatalf("runtime approval presentation = %+v", pending)
+	}
 	decision, _ := postJSON(t, srv.URL+"/api/approvals/decision",
 		map[string]any{"id": id, "decision": "allow"})
 	if decision.StatusCode != http.StatusOK {
@@ -181,6 +191,119 @@ func TestRuntimeToolApprovalRequiresExactIdentity(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("missing tool call id: want 400, got %d", resp.StatusCode)
 	}
+}
+
+func TestRuntimeToolApprovalRejectsClientOwnedGrantPresentation(t *testing.T) {
+	srv := approvalsServer(t)
+	resp, _ := postJSON(t, srv.URL+"/api/approvals/request", map[string]any{
+		"origin": "runtime_tool", "runtime": "claude", "task_id": "task_123",
+		"tool_call_id": "toolu_1", "tool_name": "Bash", "timeout_ms": 50,
+		"allow_label": "Allow forever",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("client-owned grant presentation: want 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRuntimeToolExactRunGrantAppliesRecordsAndRevokes(t *testing.T) {
+	srv := approvalsServer(t)
+	request := map[string]any{
+		"origin": "runtime_tool", "runtime": "opencode", "task_id": "task_run",
+		"native_session_id": "ses_run", "tool_call_id": "per_first",
+		"tool_name": "external_directory", "action": "Access outside",
+		"targets": []string{"/tmp/exact/**"}, "approval_reason": "Runtime ask",
+		"offer_exact_run_grant": true, "timeout_ms": 5000,
+	}
+	done := make(chan map[string]any, 1)
+	go func() {
+		_, out, _ := rawPost(srv.URL+"/api/approvals/request", request)
+		done <- out
+	}()
+	id := pendingID(t, srv.URL)
+	resp, _ := postJSON(t, srv.URL+"/api/approvals/decision", map[string]any{
+		"id": id, "decision": "allow", "grant_id": "forged",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("forged grant selection: want 400, got %d", resp.StatusCode)
+	}
+	resp, snapshot := postJSON(t, srv.URL+"/api/approvals/decision", map[string]any{
+		"id": id, "decision": "allow", "grant_id": approvalGrantRunExact,
+	})
+	if resp.StatusCode != http.StatusOK || snapshot["result"] != "allowed" {
+		t.Fatalf("exact-run decision status=%d body=%v", resp.StatusCode, snapshot)
+	}
+	first := <-done
+	token, _ := first["grant_token"].(string)
+	if first["grant_id"] != approvalGrantRunExact || !validRuntimeApprovalGrantToken(token) {
+		t.Fatalf("exact-run result = %v", first)
+	}
+
+	secondRequest := mapsClone(request)
+	secondRequest["tool_call_id"] = "per_second"
+	secondRequest["grant_token"] = token
+	secondRequest["offer_exact_run_grant"] = false
+	resp, second := postJSON(t, srv.URL+"/api/approvals/request", secondRequest)
+	if resp.StatusCode != http.StatusOK || second["decision"] != "allowed" ||
+		second["grant_id"] != approvalGrantRunExact {
+		t.Fatalf("remembered application status=%d body=%v", resp.StatusCode, second)
+	}
+	list, err := http.Get(srv.URL + "/api/approvals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := io.ReadAll(list.Body)
+	list.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("grant_token")) || bytes.Contains(encoded, []byte(token)) {
+		t.Fatal("opaque grant token leaked into the approvals projection")
+	}
+	var records struct {
+		History []Approval `json:"history"`
+	}
+	if err := json.Unmarshal(encoded, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records.History) != 2 || len(records.History[0].Responses) != 1 ||
+		records.History[0].Responses[0].Responder.ID != "remembered-run-grant" ||
+		records.History[0].SelectedGrantID != approvalGrantRunExact ||
+		len(records.History[0].GrantOptions) != 2 {
+		t.Fatalf("automatic application history = %+v", records.History)
+	}
+
+	newRun := mapsClone(secondRequest)
+	newRun["task_id"] = "task_next_run"
+	newRun["tool_call_id"] = "per_next_run"
+	resp, _ = postJSON(t, srv.URL+"/api/approvals/request", newRun)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("new-run grant: want 403, got %d", resp.StatusCode)
+	}
+
+	mismatch := mapsClone(secondRequest)
+	mismatch["tool_call_id"] = "per_mismatch"
+	mismatch["targets"] = []string{"/tmp/other/**"}
+	resp, _ = postJSON(t, srv.URL+"/api/approvals/request", mismatch)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("mismatched grant: want 403, got %d", resp.StatusCode)
+	}
+	resp, _ = postJSON(t, srv.URL+"/api/approvals/grant/revoke", map[string]any{"grant_token": token})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant revoke status = %d", resp.StatusCode)
+	}
+	secondRequest["tool_call_id"] = "per_released"
+	resp, _ = postJSON(t, srv.URL+"/api/approvals/request", secondRequest)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("released grant: want 403, got %d", resp.StatusCode)
+	}
+}
+
+func mapsClone(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
 }
 
 func postJSON(t *testing.T, url string, v any) (*http.Response, map[string]any) {

@@ -4,7 +4,10 @@ import { el, api } from '../core.js';
 import { provider } from '../infopanel.js';
 import { activatePane } from '../pane-host.js';
 import { governanceLink, openInGovernance } from './session-governance.js';
-import { renderUsageStrip } from './sessions.js';
+import { renderUsageStrip } from './usage-strip.js';
+import { loadSessionTags } from '../session-organization/organization-api.js';
+import { tagLabel } from '../session-organization/tag-chips.js';
+import { nativeOpenControl } from '../session/native-open.js';
 
 const FRESH_MS = 30000;
 const cache = new Map();
@@ -92,10 +95,19 @@ provider({id:'session.evidence.header', order:0, zone:'header', title:'Session e
     const report=await sessionEvidence(ctx,'summary'); if(!box.isConnected)return;
     const summary=report.summary || {};
     const meta=el('div','evidence-meta'); meta.append(el('span','',ctx.selection.runtime || summary.runtime || '? runtime'),el('span','',`source · ${ctx.selection.title_source || summary.title_source || 'unavailable'}`));
+    const native=nativeOpenControl(ctx.selection); if(native) meta.append(native);
     box.append(meta,el('h2','evidence-title',ctx.selection.title || summary.title || 'Untitled session'));
     const counts=el('div','evidence-value-strip evidence-header-values');
     for(const fact of headerFacts(summary)){const card=el('button','evidence-value evidence-value-button',String(fact.value));card.title=fact.title;card.setAttribute('aria-label',`${fact.label}: ${fact.value}. ${fact.title}`);card.appendChild(el('small','',fact.label));if(fact.open)card.addEventListener('click',fact.open);else card.addEventListener('click',()=>openInGovernance({id:summary.id||ctx.selection.thread_id||ctx.selection.id,runtime:ctx.selection.runtime,title:ctx.selection.title,title_source:ctx.selection.title_source,tags:[]}));counts.appendChild(card);} box.appendChild(counts);
     if(!summary.found) box.appendChild(el('div','evidence-boundary','? no captured session evidence'));
+    // What detectors saw: derived facts, shown
+    // as evidence (◆) rather than as tags beside the owner's own.
+    const derived=el('div','evidence-derived-facts');
+    box.appendChild(derived);
+    void loadSessionTags({runtime:ctx.selection.runtime,id:ctx.selection.id}).then(found=>{
+      if(!derived.isConnected)return;
+      for(const fact of found.sessions?.[0]?.facts||[]) derived.appendChild(el('span','evidence-fact','◆ '+tagLabel(fact)));
+    }).catch(()=>{});
   }});
 
 provider({id:'session.evidence.pinned', order:0, zone:'pinned', title:'Evidence boundary', required:true,
@@ -106,9 +118,17 @@ provider({id:'session.evidence.pinned', order:0, zone:'pinned', title:'Evidence 
     footer.appendChild(el('span','evidence-fresh',`${summary.facts?.results||0} results · ${summary.facts?.open_issues||0} gaps`));
     footer.appendChild(governanceLink(ctx.selection,summary));
     box.appendChild(footer);
+    const transcript=el('div','evidence-footer');
+    const events=(ctx.selection.events||[]).length;
+    transcript.appendChild(el('span','evidence-fresh',events+' transcript event'+(events===1?'':'s')));
+    if(ctx.selection.modified) transcript.appendChild(el('span','evidence-fresh','last written '+new Date(ctx.selection.modified).toLocaleString()));
+    box.appendChild(transcript);
     if(ctx.selection.usage){const usage=renderUsageStrip(ctx.selection.usage);usage.classList.add('evidence-footer-usage');box.appendChild(usage);}
     const diagnostics=document.createElement('details');diagnostics.className='evidence-detail-group evidence-diagnostics';
     const diagnosticsSummary=document.createElement('summary');diagnosticsSummary.dataset.sessionDiagnostics='';diagnosticsSummary.textContent='Diagnostics · provenance · capture';diagnostics.appendChild(diagnosticsSummary);
+    // Lines the transcript reader could not map are a count, stated plainly.
+    if(ctx.selection.unparsed>0) diagnostics.appendChild(el('div','sub',ctx.selection.unparsed+' transcript line'+(ctx.selection.unparsed===1?'':'s')+' not shown'));
+    if(ctx.selection.transcript_note) diagnostics.appendChild(el('div','sub',ctx.selection.transcript_note));
     const host=el('div','evidence-lazy-subview');diagnostics.appendChild(host);let loaded=false;
     diagnostics.addEventListener('toggle',()=>{if(!diagnostics.open||loaded)return;loaded=true;host.appendChild(el('div','sub','Loading capture diagnostics…'));void import('./session-reach.js').then(module=>module.renderSessionDiagnostics(ctx,host)).catch(()=>host.replaceChildren(el('div','evidence-state','Request failed'),el('div','sub','Capture diagnostics could not be loaded.')));});
     box.appendChild(diagnostics);

@@ -20,13 +20,18 @@ func TestSessionScopedKindsPublishedAndSuperseding(t *testing.T) {
 	if SupersededSignal("task.failed") != "" || SupersededSignal("task.message-completed") != "" || SupersededSignal("session.turn-ended") != "" {
 		t.Fatal("only kinds a session kind reports for every session are superseded")
 	}
-	cases := map[string]string{"task.started": "session.turn-started", "tool.completed": "session.tool-completed",
+	// Spawn is not a turn start: a new session has no identity there. The
+	// task's first session frame is (the caller decides which event that is).
+	cases := map[string]string{"task.started": "", "tool.completed": "session.tool-completed",
 		"task.completed": "session.turn-ended", "completed": "session.turn-ended",
 		"message.completed": "", "task.failed": "", "task.activity": ""}
 	for event, want := range cases {
-		if got := SessionSignalForTaskEvent(event); got != want {
+		if got := SessionSignalForTaskEvent(event, false); got != want {
 			t.Fatalf("SessionSignalForTaskEvent(%q)=%q want %q", event, got, want)
 		}
+	}
+	if got := SessionSignalForTaskEvent("task.activity", true); got != "session.turn-started" {
+		t.Fatalf("the first session frame must start the turn, got %q", got)
 	}
 	// The task-stream translation is unchanged: a task fact stays a task fact.
 	if SignalForTaskEvent("tool.completed") != "task.tool-completed" || SignalForTaskEvent("completed") != "task.completed" {

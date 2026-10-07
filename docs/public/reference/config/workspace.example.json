@@ -1,0 +1,35 @@
+{
+  "format_version": 1,
+  "allowed_roots": [
+    "/absolute/path/to/repository"
+  ],
+  "worktrees": {
+    "root": "/absolute/path/to/crossing-guard-worktrees",
+    "max_managed": 8,
+    "max_aggregate_bytes": 10737418240,
+    "max_replay_files": 2000,
+    "max_replay_bytes": 268435456,
+    "max_replay_file_bytes": 20971520,
+    "unused_warning_hours": 168,
+    "failed_create_recovery_hours": 24,
+    "include_untracked_default": false,
+    "copy_ignored_default": false
+  },
+  "review": {
+    "max_files": 500,
+    "max_rendered_file_bytes": 2097152,
+    "max_rendered_total_bytes": 8388608,
+    "max_hunks": 2000,
+    "max_rendered_line_bytes": 32768
+  },
+  "mutation": {
+    "max_patch_bytes": 2097152,
+    "max_patch_lines": 1000,
+    "max_paths": 500,
+    "preview_ttl_seconds": 300,
+    "approval_ttl_seconds": 600,
+    "max_active_per_selection": 1,
+    "max_recovery_bytes": 268435456,
+    "recovery_retention_hours": 24
+  }
+}

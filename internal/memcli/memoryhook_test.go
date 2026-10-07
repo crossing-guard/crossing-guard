@@ -121,7 +121,7 @@ func TestDoctorUsesRecordedCustomConfigBeforeAnySessionExists(t *testing.T) {
 	if err := os.WriteFile(custom, []byte(`command = "/opt/crossing-guard memory index"`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordAttachment("codex", custom); err != nil {
+	if err := recordAttachment("codex", custom, "", false, false); err != nil {
 		t.Fatal(err)
 	}
 	report := doctorReport(0)
@@ -168,7 +168,7 @@ func TestAttachmentRecordRoundTripIsOwnerOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CG_MEMORY_DIR", filepath.Join(home, ".crossing-guard", "memory"))
 	const config = "/custom/config.toml"
-	if err := recordAttachment("codex", config); err != nil {
+	if err := recordAttachment("codex", config, "", false, false); err != nil {
 		t.Fatal(err)
 	}
 	rec, found, err := readAttachmentRecord("codex")

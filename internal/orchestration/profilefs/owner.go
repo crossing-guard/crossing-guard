@@ -2,6 +2,7 @@ package profilefs
 
 import (
 	"bytes"
+	"crossing-guard/profiledoc"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -59,12 +60,17 @@ type Revision struct {
 	SelectedBy   string `json:"selected_by"`
 }
 
+// selectionRecord is one agent's selection file. It is decoded strictly and its
+// state token hashes the whole record, so Released is a pointer that is omitted when
+// nil: a record that was never released marshals to the bytes it always had, and its
+// token is unchanged. A build older than this field refuses a released record.
 type selectionRecord struct {
-	FormatVersion string     `json:"format_version"`
-	ProfileID     string     `json:"profile_id"`
-	StateToken    string     `json:"state_token"`
-	Current       Revision   `json:"current"`
-	History       []Revision `json:"history"`
+	FormatVersion string            `json:"format_version"`
+	ProfileID     string            `json:"profile_id"`
+	StateToken    string            `json:"state_token"`
+	Current       Revision          `json:"current"`
+	History       []Revision        `json:"history"`
+	Released      *SelectionRelease `json:"released,omitempty"`
 }
 
 type ProfileSummary struct {
@@ -98,6 +104,7 @@ type ProfileList struct {
 
 type Detail struct {
 	ProfileID      string           `json:"profile_id"`
+	StateToken     string           `json:"state_token,omitempty"`
 	SelectionState string           `json:"selection_state"`
 	RuntimeEffects bool             `json:"runtime_effects"`
 	Integrity      string           `json:"integrity"`
@@ -115,6 +122,21 @@ type SelectCommand struct {
 	ExpectedSourceDigest string
 	ExpectedBundleDigest string
 	ExpectedStateToken   string
+	// Pins lists the revisions bindings still run. It is called under the
+	// mutation lock, and only when this selection would trim the bounded
+	// history: a trim that would drop a pinned revision is refused, and so is
+	// one whose pins cannot be read, so a place never loses its version.
+	Pins PinSource
+}
+
+// PinSource lists the revisions that must stay stored for one agent.
+type PinSource func() ([]RevisionRef, error)
+
+// RevisionRef is one exact revision identity and, for a pin, what holds it.
+type RevisionRef struct {
+	SourceDigest string `json:"source_digest"`
+	BundleDigest string `json:"bundle_digest"`
+	Holder       string `json:"holder,omitempty"`
 }
 
 type SelectResult struct {
@@ -167,14 +189,8 @@ func (owner *Owner) Select(command SelectCommand) (SelectResult, error) {
 		return SelectResult{}, problem("state_conflict", "state_token", "The selection state token is missing.",
 			"Preview the current PROFILE.md bytes again before selecting.")
 	}
-	if err := owner.ensureOwnerRoot(); err != nil {
-		return SelectResult{}, storageProblem(err)
-	}
-	if err := owner.validateLockPath(); err != nil {
-		return SelectResult{}, storageProblem(err)
-	}
 	var result SelectResult
-	err = filelock.With(filepath.Join(owner.root, "mutation.lock"), 0o600, func() error {
+	err = owner.withMutationLock(func() error {
 		document, parseErr := Parse(command.SourceName, command.Source)
 		if parseErr != nil {
 			return parseErr
@@ -183,71 +199,131 @@ func (owner *Owner) Select(command SelectCommand) (SelectResult, error) {
 			return problem("state_conflict", "digests", "The profile bytes no longer match the preview.",
 				"Preview the current PROFILE.md bytes again before selecting.")
 		}
-		current, readErr := owner.readSelection(document.Profile.ID)
-		if readErr != nil {
-			return integrityConflict(readErr)
-		}
-		actualToken := absentStateToken(document.Profile.ID)
-		if current != nil {
-			actualToken = current.StateToken
-			if _, inspectErr := owner.inspectDocument(current.Current); inspectErr != nil {
-				return integrityConflict(inspectErr)
-			}
-		}
-		if actualToken != command.ExpectedStateToken {
-			return problem("state_conflict", "state_token", "The selected profile changed after this preview.",
-				"Preview the current PROFILE.md bytes again before selecting.")
-		}
-		if current != nil && current.Current.SourceDigest == document.SourceDigest &&
-			current.Current.BundleDigest == document.BundleDigest {
-			detail, detailErr := owner.detailFromRecord(*current)
-			if detailErr != nil {
-				return detailErr
-			}
-			result = SelectResult{Changed: false, Detail: detail,
-				Note: "This exact inert profile revision was already selected; nothing was changed."}
-			return nil
-		}
-		if installErr := owner.installDocument(document); installErr != nil {
-			return installErr
-		}
-		revision := Revision{ProfileID: document.Profile.ID, Version: document.Profile.Version,
-			Name: document.Profile.Name, Description: document.Profile.Description, Role: document.Profile.Role,
-			SourceName: command.SourceName, SourceDigest: document.SourceDigest, BundleDigest: document.BundleDigest,
-			SelectedAt: owner.now().UTC().Format(time.RFC3339Nano), SelectedBy: "authenticated-local-client"}
-		history := []Revision{}
-		if current != nil {
-			history = append(history, current.Current)
-			history = append(history, current.History...)
-			if len(history) > maxHistory {
-				history = history[:maxHistory]
-			}
-		}
-		next := selectionRecord{FormatVersion: selectionFormat, ProfileID: document.Profile.ID,
-			Current: revision, History: history}
-		next.StateToken, readErr = selectionStateToken(next)
-		if readErr != nil {
-			return readErr
-		}
-		if writeErr := owner.writeSelection(next); writeErr != nil {
-			return writeErr
-		}
-		detail, detailErr := owner.detailFromRecord(next)
-		if detailErr != nil {
-			return detailErr
-		}
-		result = SelectResult{Changed: true, Detail: detail,
-			Note: "Exact profile source was selected as inert reusable configuration. It cannot run."}
-		return nil
+		selected, selectErr := owner.selectLocked(document, command.SourceName, command.ExpectedStateToken, command.Pins)
+		result = selected
+		return selectErr
 	})
+	return result, err
+}
+
+// selectLocked is Select's body; the caller holds the mutation lock. It is
+// shared with PublishDraft so both select through one path under one lock.
+func (owner *Owner) selectLocked(document Document, sourceName, expectedToken string, pins PinSource) (SelectResult, error) {
+	current, readErr := owner.readSelection(document.Profile.ID)
+	if readErr != nil {
+		return SelectResult{}, integrityConflict(readErr)
+	}
+	actualToken := absentStateToken(document.Profile.ID)
+	if current != nil {
+		actualToken = current.StateToken
+		if _, inspectErr := owner.inspectDocument(current.Current); inspectErr != nil {
+			return SelectResult{}, integrityConflict(inspectErr)
+		}
+	}
+	if actualToken != expectedToken {
+		return SelectResult{}, problem("state_conflict", "state_token", "The selected profile changed after this preview.",
+			"Preview the current PROFILE.md bytes again before selecting.")
+	}
+	if err := adoptedReadOnly(current); err != nil {
+		return SelectResult{}, err
+	}
+	if current != nil && current.Current.SourceDigest == document.SourceDigest &&
+		current.Current.BundleDigest == document.BundleDigest {
+		detail, detailErr := owner.detailFromRecord(*current)
+		if detailErr != nil {
+			return SelectResult{}, detailErr
+		}
+		return SelectResult{Changed: false, Detail: detail,
+			Note: "This exact inert profile revision was already selected; nothing was changed."}, nil
+	}
+	next, nextErr := owner.nextSelection(current, document, sourceName, SelectedByLocalClient, pins)
+	if nextErr != nil {
+		return SelectResult{}, nextErr
+	}
+	if installErr := owner.installDocument(document); installErr != nil {
+		return SelectResult{}, installErr
+	}
+	if writeErr := owner.writeSelection(next); writeErr != nil {
+		return SelectResult{}, writeErr
+	}
+	detail, detailErr := owner.detailFromRecord(next)
+	if detailErr != nil {
+		return SelectResult{}, detailErr
+	}
+	return SelectResult{Changed: true, Detail: detail,
+		Note: "Exact profile source was selected as inert reusable configuration. It cannot run."}, nil
+}
+
+// nextSelection builds the record that makes document the current revision, written
+// by selectedBy, with the previous current pushed onto the bounded history. It writes
+// nothing. A trim that would drop a revision a place still runs is refused.
+func (owner *Owner) nextSelection(current *selectionRecord, document Document, sourceName, selectedBy string, pins PinSource) (selectionRecord, error) {
+	history := []Revision{}
+	if current != nil {
+		history = append(history, current.Current)
+		history = append(history, current.History...)
+		if len(history) > maxHistory {
+			if err := keepsPinned(history[maxHistory:], pins); err != nil {
+				return selectionRecord{}, err
+			}
+			history = history[:maxHistory]
+		}
+	}
+	revision := Revision{ProfileID: document.Profile.ID, Version: document.Profile.Version,
+		Name: document.Profile.Name, Description: document.Profile.Description, Role: document.Profile.Role,
+		SourceName: sourceName, SourceDigest: document.SourceDigest, BundleDigest: document.BundleDigest,
+		SelectedAt: owner.now().UTC().Format(time.RFC3339Nano), SelectedBy: selectedBy}
+	next := selectionRecord{FormatVersion: selectionFormat, ProfileID: document.Profile.ID,
+		Current: revision, History: history}
+	token, tokenErr := selectionStateToken(next)
+	if tokenErr != nil {
+		return selectionRecord{}, tokenErr
+	}
+	next.StateToken = token
+	return next, nil
+}
+
+// keepsPinned refuses a history trim that would drop a revision a binding
+// still runs; pins that cannot be read refuse it too rather than guess.
+func keepsPinned(evicted []Revision, pins PinSource) error {
+	if pins == nil {
+		return nil
+	}
+	pinned, err := pins()
+	if err != nil {
+		return problem("pins_unavailable", "history", "Which places run this agent's versions could not be read.",
+			"Nothing was published. Try again.")
+	}
+	for _, revision := range evicted {
+		for _, ref := range pinned {
+			if ref.SourceDigest == revision.SourceDigest && ref.BundleDigest == revision.BundleDigest {
+				return problem("pinned_revision", "history",
+					"A place still runs the oldest stored version of this agent: "+ref.Holder+".",
+					"Move that place to a newer version or turn it off, then publish again.")
+			}
+		}
+	}
+	return nil
+}
+
+// withMutationLock runs apply under the one profile mutation lock, keeping
+// domain problems and wrapping everything else as storage problems.
+func (owner *Owner) withMutationLock(apply func() error) error {
+	if err := owner.ensureOwnerRoot(); err != nil {
+		return storageProblem(err)
+	}
+	if err := owner.validateLockPath(); err != nil {
+		return storageProblem(err)
+	}
+	err := filelock.With(filepath.Join(owner.root, "mutation.lock"), 0o600, apply)
 	if err != nil {
 		var domain *Problem
 		if errors.As(err, &domain) {
-			return SelectResult{}, err
+			return err
 		}
-		return SelectResult{}, storageProblem(err)
+		return storageProblem(err)
 	}
-	return result, nil
+	return nil
 }
 
 func (owner *Owner) List() (ProfileList, error) {
@@ -395,7 +471,7 @@ func (owner *Owner) detailFromRecord(record selectionRecord) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
-	return Detail{ProfileID: record.ProfileID, SelectionState: "selected_inert", RuntimeEffects: false,
+	return Detail{ProfileID: record.ProfileID, StateToken: record.StateToken, SelectionState: "selected_inert", RuntimeEffects: false,
 		Integrity: "verified", Current: record.Current, History: append([]Revision(nil), record.History...),
 		Manifest: &inspected.manifest, Source: string(inspected.document.Source),
 		Normalized: &inspected.document.Profile}, nil
@@ -523,8 +599,13 @@ func (owner *Owner) writeSelection(record selectionRecord) error {
 	if err != nil {
 		return err
 	}
-	body = append(body, '\n')
-	temporary, err := os.CreateTemp(dir, ".selection-*")
+	return atomicReplace(dir, path, append(body, '\n'), ".selection-*")
+}
+
+// atomicReplace writes body to path through a synced temporary file in dir
+// and a rename, so a reader sees the old bytes or the new ones, never a mix.
+func atomicReplace(dir, path string, body []byte, pattern string) error {
+	temporary, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -611,6 +692,9 @@ func validateSelection(record selectionRecord) error {
 			return err
 		}
 	}
+	if err := validateRelease(record); err != nil {
+		return err
+	}
 	token, err := selectionStateToken(record)
 	if err != nil || token != record.StateToken {
 		return errors.New("profile selection state token mismatch")
@@ -621,7 +705,7 @@ func validateSelection(record selectionRecord) error {
 func validateRevision(revision Revision) error {
 	if !profileIDPattern.MatchString(revision.ProfileID) || revision.SourceName != "PROFILE.md" ||
 		!validDigest(revision.SourceDigest) || !validDigest(revision.BundleDigest) ||
-		revision.SelectedBy != "authenticated-local-client" || strings.TrimSpace(revision.Name) == "" ||
+		!oneOf(revision.SelectedBy, SelectedByLocalClient, SelectedByTeamAdoption) || strings.TrimSpace(revision.Name) == "" ||
 		!validSemver(revision.Version) || utf8.RuneCountInString(revision.Name) > 100 ||
 		utf8.RuneCountInString(revision.Description) > 500 ||
 		!oneOf(revision.Role, "reviewer", "follower", "coordinator", "course-corrector", "delegate") {
@@ -854,8 +938,8 @@ func integrityConflict(cause error) error {
 	if errors.As(cause, &domain) && domain.Code == "integrity_conflict" {
 		return cause
 	}
-	return &Problem{Code: "integrity_conflict", Message: "Stored profile state failed integrity checks.",
-		Recovery: "Preserve the local profile data for review; do not overwrite it as a normal update.", cause: cause}
+	return profiledoc.WrapProblem("integrity_conflict", "Stored profile state failed integrity checks.",
+		"Preserve the local profile data for review; do not overwrite it as a normal update.", cause)
 }
 
 func publicProblem(err error) Problem {

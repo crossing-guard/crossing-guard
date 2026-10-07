@@ -57,7 +57,9 @@ function stateFor(ctx) {
 }
 document.addEventListener('cg:panel-selection-reset', () => contexts.clear());
 
-const selectionRoot = ctx => ctx?.selection?.cwd || ctx?.selection?.project || '';
+// Only a declared working directory is a path; a project without one is a label
+// (session-view plan §A5).
+const selectionRoot = ctx => ctx?.selection?.cwd || '';
 const shortTime = seconds => seconds ? new Date(seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
 // ---- "This session": recorded edits, bodies fetched one at a time -----------------

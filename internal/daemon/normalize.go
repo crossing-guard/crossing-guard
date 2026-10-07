@@ -51,17 +51,7 @@ func Normalize(o Observation) Normalized {
 // present, else the write/edit body — so command patterns and content (secret/PII)
 // detectors both get what they need from a single field.
 func normalizedEvent(o Observation) engine.Event {
-	text := o.Command
-	if text == "" {
-		text = o.Content
-	}
-	return engine.Event{
-		Tool:        engine.BareTool(o.Tool),
-		Path:        o.FilePath,
-		Destination: o.URL,
-		Text:        text,
-		Role:        "tool_call",
-	}
+	return engine.ActionEvent(o.Tool, o.Command, o.Content, o.FilePath, o.URL)
 }
 
 // targetEntity resolves the single resource an action targets: file > url > skill >

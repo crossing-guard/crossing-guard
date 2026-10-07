@@ -3,9 +3,11 @@ import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill,
 import { S } from "../state.js";
 import { provider } from "../infopanel.js";
 import { hidePaneHost, showPaneHost } from "../pane-host.js";
+import { shareTeamMemory, takeTeamVersion } from "../team-link.js";
+import { teamRecordLines, conflictLine, promoteAction } from "./team-memory-text.js";
 
 const BLESSED = ['pending', 'active', 'verified', 'superseded'];
-const STATUS_CHIP = { pending: 'st-stale', active: 'st-draft', verified: 'st-verified', superseded: 'st-superseded' };
+const STATUS_CHIP = { pending: 'st-stale', active: 'st-draft', verified: 'st-verified', superseded: 'st-superseded', rejected: 'st-superseded' };
 const CLASS_NOTE = { // honesty: what each classification does and does NOT warrant (INV-1)
   'user-asserted': 'Stated by you. Trusted as intent — not independently verified.',
   'observed': 'Recorded from a session or tool. Evidence-backed.',
@@ -34,6 +36,29 @@ provider({
     line('updated', fmtTime(m.updated_at));
   },
 });
+// renderTeamFacts states a record's standing with the team and lists its conflict copies.
+async function renderTeamFacts(team, box) {
+  for (const line of teamRecordLines(team)) box.appendChild(el('div', 'sub', line));
+  if (!team.conflicts) return;
+  let out;
+  try { out = await api('/api/memory/conflicts?id=' + encodeURIComponent(team.global_id)); } catch (_) { return; }
+  if (!box.isConnected) return;
+  for (const c of out.conflicts || []) {
+    const card = el('div', 'banner');
+    card.appendChild(el('div', 'sub', conflictLine(c) + ' · ' + fmtTime(new Date(c.created_at / 1e6).toISOString())));
+    const body = el('div', 'sub'); body.style.whiteSpace = 'pre-wrap'; body.textContent = c.body;
+    card.appendChild(body);
+    box.appendChild(card);
+  }
+}
+
+// Team: where the record stands with the linked team, and the conflict copies kept for it
+// (a local version a teammate's revision or deletion displaced — kept, never merged).
+provider({
+  id: 'memory.team', order: 15, title: 'Team',
+  match: ctx => ctx.surface === 'memory' && !!ctx.selection && !!ctx.selection.team,
+  render: (ctx, box) => renderTeamFacts(ctx.selection.team, box),
+});
 provider({
   id: 'memory.classification', order: 20, title: 'Classification',
   match: ctx => ctx.surface === 'memory' && !!ctx.selection,
@@ -55,6 +80,17 @@ provider({
 });
 
 /* ---------- memory (list in the RAIL, detail/actions in the CENTER — §5) ---------- */
+// confirmedButton is one action behind a question: asked when there is something to say,
+// then run; done repaints, fail says why not.
+function confirmedButton(label, question, run, done, fail) {
+  const button = el('button', 'btn', label);
+  button.onclick = async () => {
+    if (question && !confirm(question)) return;
+    try { await run(); done(); } catch (e) { fail(e); }
+  };
+  return button;
+}
+
 async function renderMemory() {
   S.selMemory = null; // fresh visit starts with no record selected (right panel hidden)
   const main = $('#main'), side = $('#sidebody');
@@ -151,6 +187,32 @@ async function renderMemory() {
       sr.append(sel);
     }
     center.appendChild(sr);
+    if (m.team) teamActions(m);
+  }
+
+  // Team actions on one record: promote a record rejected here, or share one that has
+  // not been shared. Sending a version that differs from the team's is said before the click.
+  function teamActions(m) {
+    const facts = el('div'); facts.style.marginTop = '10px';
+    center.appendChild(facts);
+    renderTeamFacts(m.team, facts);
+    const acts = el('div', 'row'); acts.style.marginTop = '8px';
+    const fail = e => acts.appendChild(el('span', 'sub', '✖ ' + e.message));
+    if (m.team.rejected_here) {
+      const action = promoteAction(m.team);
+      acts.appendChild(confirmedButton(action.label, action.confirm,
+        () => api('/api/memory/promote', { method: 'POST', body: JSON.stringify({ id: m.id }) }), renderMemory, fail));
+    } else if (!m.team.shared && m.team.can_travel && m.status !== 'pending') {
+      acts.appendChild(confirmedButton('Share with the team',
+        'Send this record to the team? It is checked against the secret patterns and matches redacted first. Every member\'s devices receive it.',
+        () => shareTeamMemory([m.id]), renderMemory, fail));
+    }
+    if (m.team.refused && !m.team.in_sync) {
+      acts.appendChild(confirmedButton('Take the team\'s version',
+        'Replace this record with the team\'s current version? The edit made on this device is kept as a conflict copy and is not sent.',
+        () => takeTeamVersion(m.id), renderMemory, fail));
+    }
+    if (acts.childNodes.length) center.appendChild(acts);
   }
 
   function showInbox(pend) {

@@ -140,8 +140,24 @@ func parseDetectors(b []byte) ([]Detector, error) {
 	return wrap.Detectors, nil
 }
 
+// CompileDetectors is the load-time gate every detector document passes through: it
+// compiles pattern regexes and rejects a tag key in a state namespace or one of the two
+// invocation keys (every tier decides over detector tags and invocation facts together,
+// so a detector emitting `tool` or `command` would answer an invocation term). State keys are
+// built only by the daemon's stateful tier (folded session/target state, model claims);
+// a detector emitting one would put a state fact into the static tag set, where a
+// stateful rule term would match a fact the session never folded.
+// Every entry is checked, tombstones included: Classify does not skip Disabled.
 func CompileDetectors(dets []Detector) error {
 	for i := range dets {
+		if IsStateTag(dets[i].Tag.Key) {
+			return fmt.Errorf("detector %s: tag key %q is in a reserved state namespace (%s, %s, %s are built by the stateful tier; a detector cannot emit them)",
+				dets[i].ID, dets[i].Tag.Key, SessionStatePrefix, TargetStatePrefix, AgentStatePrefix)
+		}
+		if k := dets[i].Tag.Key; k == CommandTagKey || k == ToolTagKey {
+			return fmt.Errorf("detector %s: tag key %q is reserved for the invocation's own facts (engine.InvocationTags); a detector cannot emit it",
+				dets[i].ID, k)
+		}
 		if dets[i].Kind == "pattern" && dets[i].Regex != "" {
 			re, err := regexp.Compile(dets[i].Regex)
 			if err != nil {
@@ -248,6 +264,9 @@ func destClass(d Detector, dest string) (string, string) {
 }
 
 func mkTag(d Detector, key, value, evidence string) Tag {
+	if key == DataClassKey {
+		value = CanonicalDataClass(value) // a pinned or overlay document may carry a legacy spelling
+	}
 	return Tag{Key: key, Value: value, Detector: d.ID, Provenance: Observed,
 		Scope: "event", Evidence: evidence, Coverage: d.Coverage}
 }

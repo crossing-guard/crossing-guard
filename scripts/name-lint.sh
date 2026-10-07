@@ -22,7 +22,7 @@ cd "$(dirname "$0")/.." || exit 2
 # which is why the gate step below is worth having at all.
 # This script is the one file allowed to spell the old name — it has to, to
 # explain itself — so it excludes itself rather than being written around.
-files=$(find engine store harvest memory infer internal cmd ruledoc schemas scripts docs README.md \
+files=$(find engine store harvest memory infer internal cmd ruledoc profiledoc schemas teamwire scripts docs README.md \
 	\( -name '*.go' -o -name '*.md' -o -name '*.sh' \) -type f \
 	| grep -v 'internal/daemon/static/' \
 	| grep -v 'scripts/name-lint.sh') || exit 2
@@ -59,7 +59,7 @@ if ! printf '%s\n' 'CP_POLICY' | perl -ne '$found ||= /$ENV{RETIRED_CONTRACT_RE}
 	echo "FAIL — retired-contract lint self-check did not detect its planted name"
 	exit 1
 fi
-retired_hits=$(find engine store harvest memory infer internal cmd ruledoc schemas \
+retired_hits=$(find engine store harvest memory infer internal cmd ruledoc profiledoc schemas teamwire \
 	\( -name '*.go' -o -name '*.js' -o -name '*.html' \) -type f \
 	| grep -v '_test\.go$' \
 	| grep -v 'scripts/name-lint.sh' \

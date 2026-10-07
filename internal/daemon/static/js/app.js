@@ -1,14 +1,16 @@
 // Entry point: bootstrap, nav dispatch, keyboard, rail, init. Imports every view.
 import { S } from './state.js';
-import { $, el, cpHeaders, api, fmtTime, normMemId, escapeHtml, mdInline, mdToHtml, debounce, fillSelect, mkSelectKV, mkSelect, lblWrap, fmtTok, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults } from './core.js';
+import { $, el, cpHeaders, storeTokenFromHash, api, fmtTime, normMemId, escapeHtml, mdInline, mdToHtml, debounce, fillSelect, mkSelectKV, mkSelect, lblWrap, fmtTok, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults } from './core.js';
 import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp } from './ui.js';
-import { openSession, renderSessionList, renderRail, renderTranscript, renderHandoffComposer } from './views/sessions.js';
+import { loadAppearanceCatalog, schemeMode, setSchemeMode, migrateLegacyTheme, previewTokens } from './appearance-api.js';
+import { openSession, renderSessionList, renderRail, renderTranscript } from './views/sessions.js';
+import { renderHandoffDocument, continueElsewhere } from './handoff/handoff-view.js';
 import { clearBar } from './session-organization/query-bar.js';
 import { renderUsage } from './views/usage.js';
 import { renderMemory } from './views/memory.js';
 import { renderChat } from './views/chat.js';
 import { renderSkills } from './views/skills.js';
-import { renderSettings } from './views/settings.js';
+import { renderSettings, refreshAttention } from './views/settings.js';
 import { renderGovernance } from './views/governance.js';
 import { refreshApprovalsBadge, renderInterrupt } from './views/approvals.js';
 import { approvalProjectionStore } from './approval/approval-projection-store.js';
@@ -30,10 +32,13 @@ import './views/session-governance.js'; // Governance-page bridge reused by the 
 import './views/session-change.js'; // registers Changes (C6 P/T/Δ/C evidence)
 import './views/session-impact.js'; // registers Effects (C7 bounded typed facts)
 import './views/session-plan.js'; // registers Plan over the existing P/Δ/C projection
+import './views/session-usage.js'; // registers Usage: main, subagents and agents (session usage breakdown plan)
 import './views/session-evidence.js'; // registers C9 persistent header + evidence boundary
+import './views/session-team.js'; // registers the session's team sends line + content consent
 import './views/session-trace.js'; // reusable exact action/resource Activity subview
 import './views/session-verification.js'; // reusable verification subview
 import './views/session-reach.js'; // reusable lazy capture diagnostics
+import { setNativeOpenEnabled } from './session/native-open.js';
 
 registerPaneSource(evidencePaneSource);
 registerPaneSource(workspacePaneSource);
@@ -57,12 +62,6 @@ function parseGoto(hash) {
   const g = hash.match(/[#&]session=([A-Za-z0-9_.:-]+)/);
   if (!g) return null;
   return { tab: (hash.match(/[#&]tab=([a-z]+)/) || [, 'capture'])[1], session: g[1] };
-}
-function storeTokenFromHash(hash) {
-  const m = hash.match(/[#&]t=([A-Za-z0-9_-]+)/);
-  if (!m) return false;
-  localStorage.setItem('cg_token', m[1]);
-  return true;
 }
 // Primary session identity is browser navigation state, not cached evidence.
 // Keep it in the query so refresh/Back/Forward can re-run the one authoritative
@@ -89,6 +88,8 @@ function sessionLocation(selection) {
 let bootGoto = null;
 let bootSession = parseSessionLocation();
 (() => {
+  // core.js stored the token as it loaded, before any module read the API; the
+  // fragment is still here, so this says whether there is one to strip.
   const storedToken = storeTokenFromHash(location.hash);
   bootGoto = parseGoto(location.hash);
   // A normal auth bootstrap must not erase a session query. Governance handoff
@@ -117,7 +118,8 @@ window.addEventListener('hashchange', () => {
     { detail: { tab: g.tab, session: { id: g.session } } }));
 });
 
-applyTheme(localStorage.getItem('cp_theme') || 'auto');
+// The old per-browser theme choice becomes the saved appearance once.
+void migrateLegacyTheme();
 
 // ONE long-lived connection per tab (workspace-panes plan, Slice T). Every feed
 // keeps its own projection store; only the transport is shared, so a second tab
@@ -125,6 +127,10 @@ applyTheme(localStorage.getItem('cp_theme') || 'auto');
 const feedStatus = el('div', 'taskfeedstatus hidden');
 feedStatus.setAttribute('role', 'status');
 feedStatus.setAttribute('aria-live', 'polite');
+// The text is clamped to two lines (a store reason runs several); its title keeps
+// the whole of it. The title sits on the span, not the live region, so it is not
+// read as the region's name.
+const feedStatusText = feedStatus.appendChild(el('span'));
 document.body.appendChild(feedStatus);
 const approvalAttentionClient = new ApprovalAttentionClient();
 const eventStreamClient = new EventStreamClient({
@@ -133,9 +139,10 @@ const eventStreamClient = new EventStreamClient({
   clientID: approvalAttentionClient.clientID,
   notify: detail => {
     const visible = detail.state !== 'connected';
-    feedStatus.textContent = visible
+    feedStatusText.textContent = visible
       ? (detail.state === 'reconnecting' ? 'Live updates reconnecting…' : (detail.detail || 'Live updates degraded.'))
       : '';
+    feedStatusText.title = feedStatusText.textContent;
     feedStatus.classList.toggle('hidden', !visible);
     document.dispatchEvent(new CustomEvent('cg:task-stream-state', { detail }));
   },
@@ -175,6 +182,10 @@ function restorePane(view) {
   // 30s later on the next poll tick — a stale LIVE badge over a dead pipeline is the
   // exact freshness-lie the strip exists to kill.
   if (view === 'governance') document.dispatchEvent(new CustomEvent('cg:refresh-liveness'));
+  // A restored pane also carries state that may have changed while it was
+  // stashed (session views edited in Settings, or in the file by hand):
+  // surfaces that care repaint from adopted state on this generic signal.
+  document.dispatchEvent(new CustomEvent('cg:view-restored'));
 }
 
 // One dispatch for both the nav list and the account menu (Settings/Skills live
@@ -235,6 +246,20 @@ document.addEventListener('cg:session-selected', e => {
   if (current?.runtime === target.runtime && current.id === target.id) return;
   history.pushState(null, '', sessionLocation(target));
 });
+// Session links (Related sessions, the helper-session link) carry their own
+// class, never ref-ok: the reference handler below swallowed them and left the
+// right column on a reference that was no session. A plain click opens the
+// session in place through the one open path; on failure the centre says so
+// and the panel keeps the session still open. A modified click keeps the real
+// href, so a new tab boots on that session.
+document.addEventListener('click', e => {
+  const link = e.target.closest?.('a.session-link');
+  if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const runtime = link.dataset.sessionRuntime, id = link.dataset.sessionId;
+  if (!runtime || !id) return;
+  e.preventDefault();
+  void restoreLocatedSession({ runtime, id });
+});
 window.addEventListener('popstate', () => {
   const target = parseSessionLocation();
   if (target) {
@@ -263,17 +288,16 @@ document.addEventListener('cg:continue', e => {
 document.addEventListener('cg:mount-chat', e => {
   const d = e.detail || {};
   if (!(d.container instanceof Element) || !(d.log instanceof Element) || !d.log.isConnected) return;
-  renderChat(d.container, d.inline === true, d.log);
+  renderChat(d.container, d.inline === true, d.log, d.activity || null);
 });
 
-// Handoff bus: the composer's cross-runtime gate asks for the handoff draft.
-// Routed over the bus so chat.js need not import sessions.js — that pair is
-// already a cycle resolving only via hoisting, and this would be a third edge.
-// The center swaps; rail and reference panel persist (panel contract §5).
+// Handoff bus: the composer's cross-runtime gate hands the session off on this
+// device and opens it in the other runtime (team rest-of-release plan §6.6).
+// Routed over the bus so chat.js need not know how a handoff is sent.
 document.addEventListener('cg:handoff', e => {
   const d = e.detail || {};
   if (!d.id) return;
-  renderHandoffComposer({ runtime: d.runtime, id: d.id }, d.liveTurns || 0, d.target);
+  void continueElsewhere({ runtime: d.runtime, id: d.id, liveTurns: d.liveTurns || 0, target: d.target || '', cwd: d.cwd || '' });
 });
 
 // Reference clicks — the "open" half of the reference model (console-and-info-panel
@@ -404,6 +428,7 @@ document.addEventListener('cg:center', e => {
   document.querySelectorAll('#sidebody .sess').forEach(x => x.classList.remove('sel'));
   $('#main').replaceChildren(); $('#main').classList.remove('split');
   if (what === 'usage') renderUsage($('#main'));
+  if (what === 'handoff') void renderHandoffDocument(String(e.detail.id || ''));
 });
 
 // account / settings menu (pinned bottom of the left panel)
@@ -414,14 +439,22 @@ acctBtn.onclick = e => { e.stopPropagation();
 document.querySelectorAll('#acctmenu button[data-view]').forEach(b => b.onclick = () => { go(b.dataset.view); closeAcct(); });
 document.addEventListener('click', e => { if (!$('#account').contains(e.target)) closeAcct(); });
 const themeBtn = $('#themebtn');
+// The account menu's theme button cycles the saved appearance's scheme.
 const THEMES = ['auto', 'dark', 'light'];
-const setThemeLabel = () => { themeBtn.querySelector('span').textContent = 'Theme: ' + (localStorage.getItem('cp_theme') || 'auto'); };
+let themeMode = 'auto';
+const setThemeLabel = () => { themeBtn.querySelector('span').textContent = 'Theme: ' + themeMode; };
 setThemeLabel();
+loadAppearanceCatalog().then(catalog => {
+  themeMode = schemeMode(catalog.appearances.find(item => item.id === catalog.selected));
+  setThemeLabel();
+}).catch(() => {});
 themeBtn.onclick = e => { e.stopPropagation();
-  const cur = localStorage.getItem('cp_theme') || 'auto';
-  applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); setThemeLabel(); };
+  const next = THEMES[(THEMES.indexOf(themeMode) + 1) % THEMES.length];
+  setSchemeMode(next).then(mode => { themeMode = mode; setThemeLabel(); themeBtn.title = ''; })
+    .catch(() => { themeBtn.title = 'The theme could not be saved. Try again from Settings › Appearance.'; }); };
 
 async function render(reclick) {
+  previewTokens(null); // an unsaved appearance preview never follows the reader out of the editor
   $('#search').classList.toggle('hidden', S.view !== 'sessions');
   $('#searchstatus')?.classList.toggle('hidden', S.view !== 'sessions');
   const policy = FRESH[S.view] || 'keep';
@@ -550,6 +583,7 @@ const consoleConfigReady = api('/api/console/config').then(body => {
   configureWorkspaceDiff(config);
   consoleKeymap = config.keymap || {};
   EDITOR_SCHEME = config.editor_scheme || '';
+  setNativeOpenEnabled(config.native_open_links);
   // The workspace column's first width is policy too; a width the reader chose wins.
   if (config.workspace_width_px > 0 && !localStorage.getItem('cp-ref-w')) {
     document.documentElement.style.setProperty('--ref-w', config.workspace_width_px + 'px');
@@ -571,6 +605,9 @@ document.addEventListener('keydown', event => {
 void activatePane; // re-exported through the host for provider drill-downs
 consoleConfigReady.then(render).finally(async () => {
   updateInfo();
+  // What needs the owner in Settings shows on the account button without
+  // opening Settings; read once here, then whenever Settings opens.
+  void refreshAttention();
   // Deliver a deep link once the first view exists. Reuses the bus the session
   // panel already uses to hand a session to Governance, so there is one path into
   // that surface rather than a second one that can drift from it. Only the id is

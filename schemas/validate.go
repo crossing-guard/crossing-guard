@@ -110,8 +110,10 @@ type SchemaInfo struct {
 // wireRecords are the records that cross between a device and the team server (team
 // plan §5.13). common is shared definitions, not a record; the 0.1 drafts are not wire.
 var wireRecords = map[string]bool{"event.schema.json": true, "memory.schema.json": true,
-	"handoff.schema.json": true, "tombstone.schema.json": true,
-	"device-report.schema.json": true, "bundle.schema.json": true}
+	"handoff.schema.json": true, "handoff-receipt.schema.json": true, "tombstone.schema.json": true,
+	"device-report.schema.json": true, "bundle.schema.json": true,
+	"session.schema.json": true, "session-checkpoint-fact.schema.json": true,
+	"session-content.schema.json": true}
 
 // IsWire reports whether file is one of the wire records.
 func IsWire(file string) bool { return wireRecords[file] }
@@ -321,18 +323,53 @@ func Validate(schemaFile string, doc []byte) error {
 	return fmt.Errorf("%s: %s", schemaFile, strings.Join(v.errs, "; "))
 }
 
+// Violation is one failed constraint in a form that is safe to return to the party that
+// submitted the document, to log, and to store: WHERE and WHICH RULE, never the value.
+// Validate's error string quotes offending values because a developer at a terminal needs
+// them; a server answering a device must not echo them into responses and logs. Path
+// never contains a submitted key either — a key admitted only by a schema-valued
+// additionalProperties is written ".*".
+type Violation struct {
+	Path    string `json:"path"`
+	Keyword string `json:"keyword"`
+}
+
+// Violations validates doc against the named embedded schema and reports what failed
+// without quoting any part of the document. An empty result means the document is valid.
+func Violations(schemaFile string, doc []byte) ([]Violation, error) {
+	all, err := load()
+	if err != nil {
+		return nil, err
+	}
+	root, ok := all[schemaFile]
+	if !ok {
+		return nil, fmt.Errorf("no embedded schema %q", schemaFile)
+	}
+	var value any
+	if err := json.Unmarshal(doc, &value); err != nil {
+		return nil, fmt.Errorf("document is not JSON")
+	}
+	v := &validator{all: all, valueFree: true}
+	v.check(root, schemaFile, value, "$")
+	return v.violations, nil
+}
+
 type validator struct {
 	all  map[string]map[string]any
 	errs []string
+	// valueFree makes paths safe to disclose (see Violation) and collects violations.
+	valueFree  bool
+	violations []Violation
 }
 
-func (v *validator) fail(path, format string, args ...any) {
+func (v *validator) fail(path, keyword, format string, args ...any) {
 	v.errs = append(v.errs, path+": "+fmt.Sprintf(format, args...))
+	v.violations = append(v.violations, Violation{Path: path, Keyword: keyword})
 }
 
 // passes evaluates a subschema without recording its errors (oneOf, if).
 func (v *validator) passes(s map[string]any, file string, value any, path string) bool {
-	probe := &validator{all: v.all}
+	probe := &validator{all: v.all, valueFree: v.valueFree}
 	probe.check(s, file, value, path)
 	return len(probe.errs) == 0
 }
@@ -341,17 +378,17 @@ func (v *validator) check(s map[string]any, file string, value any, path string)
 	if r, ok := s["$ref"].(string); ok {
 		target, targetFile, err := resolve(r, file, v.all)
 		if err != nil {
-			v.fail(path, "%v", err)
+			v.fail(path, "$ref", "%v", err)
 			return
 		}
 		v.check(target, targetFile, value, path)
 	}
 	if t, ok := s["type"]; ok && !typeMatches(t, value) {
-		v.fail(path, "is %s, want type %v", jsonType(value), t)
+		v.fail(path, "type", "is %s, want type %v", jsonType(value), t)
 		return
 	}
 	if c, ok := s["const"]; ok && !reflect.DeepEqual(c, value) {
-		v.fail(path, "must equal %v", c)
+		v.fail(path, "const", "must equal %v", c)
 	}
 	if e, ok := s["enum"].([]any); ok {
 		found := false
@@ -362,7 +399,7 @@ func (v *validator) check(s map[string]any, file string, value any, path string)
 			}
 		}
 		if !found {
-			v.fail(path, "%v is not in enum %v", value, e)
+			v.fail(path, "enum", "%v is not in enum %v", value, e)
 		}
 	}
 	switch val := value.(type) {
@@ -370,10 +407,10 @@ func (v *validator) check(s map[string]any, file string, value any, path string)
 		v.checkString(s, val, path)
 	case float64:
 		if m, ok := s["minimum"].(float64); ok && val < m {
-			v.fail(path, "%v is below minimum %v", val, m)
+			v.fail(path, "minimum", "%v is below minimum %v", val, m)
 		}
 		if m, ok := s["maximum"].(float64); ok && val > m {
-			v.fail(path, "%v is above maximum %v", val, m)
+			v.fail(path, "maximum", "%v is above maximum %v", val, m)
 		}
 	case []any:
 		v.checkArray(s, file, val, path)
@@ -388,20 +425,25 @@ func (v *validator) check(s map[string]any, file string, value any, path string)
 	if list, ok := s["oneOf"].([]any); ok {
 		matches := 0
 		var why []string
+		var whyFree []Violation
 		for i, sub := range list {
-			probe := &validator{all: v.all}
+			probe := &validator{all: v.all, valueFree: v.valueFree}
 			probe.check(sub.(map[string]any), file, value, path)
 			if len(probe.errs) == 0 {
 				matches++
 				continue
 			}
 			why = append(why, fmt.Sprintf("alternative %d: %s", i, strings.Join(probe.errs, ", ")))
+			for _, inner := range probe.violations {
+				whyFree = append(whyFree, Violation{Path: inner.Path, Keyword: fmt.Sprintf("oneOf/%d/%s", i, inner.Keyword)})
+			}
 		}
 		if matches == 0 {
 			// Say WHY each alternative failed: "matches 0" alone names no cause.
-			v.fail(path, "matches 0 of the oneOf alternatives, want exactly 1 (%s)", strings.Join(why, " | "))
+			v.fail(path, "oneOf", "matches 0 of the oneOf alternatives, want exactly 1 (%s)", strings.Join(why, " | "))
+			v.violations = append(v.violations, whyFree...)
 		} else if matches > 1 {
-			v.fail(path, "matches %d of the oneOf alternatives, want exactly 1", matches)
+			v.fail(path, "oneOf", "matches %d of the oneOf alternatives, want exactly 1", matches)
 		}
 	}
 	if cond, ok := s["if"].(map[string]any); ok {
@@ -414,29 +456,29 @@ func (v *validator) check(s map[string]any, file string, value any, path string)
 func (v *validator) checkString(s map[string]any, val, path string) {
 	n := float64(utf8.RuneCountInString(val))
 	if m, ok := s["minLength"].(float64); ok && n < m {
-		v.fail(path, "length %v is below minLength %v", n, m)
+		v.fail(path, "minLength", "length %v is below minLength %v", n, m)
 	}
 	if m, ok := s["maxLength"].(float64); ok && n > m {
-		v.fail(path, "length %v is above maxLength %v", n, m)
+		v.fail(path, "maxLength", "length %v is above maxLength %v", n, m)
 	}
 	if p, ok := s["pattern"].(string); ok {
 		if re, err := compiled(p); err == nil && !re.MatchString(val) {
-			v.fail(path, "%q does not match pattern %s", val, p)
+			v.fail(path, "pattern", "%q does not match pattern %s", val, p)
 		}
 	}
 	if f, ok := s["format"].(string); ok {
 		switch f {
 		case "date-time":
 			if _, err := time.Parse(time.RFC3339Nano, val); err != nil {
-				v.fail(path, "%q is not an RFC 3339 date-time", val)
+				v.fail(path, "format", "%q is not an RFC 3339 date-time", val)
 			}
 		case "date":
 			if _, err := time.Parse("2006-01-02", val); err != nil {
-				v.fail(path, "%q is not a date", val)
+				v.fail(path, "format", "%q is not a date", val)
 			}
 		case "uri":
 			if u, err := url.Parse(val); err != nil || u.Scheme == "" {
-				v.fail(path, "%q is not an absolute URI", val)
+				v.fail(path, "format", "%q is not an absolute URI", val)
 			}
 		}
 	}
@@ -444,16 +486,16 @@ func (v *validator) checkString(s map[string]any, val, path string) {
 
 func (v *validator) checkArray(s map[string]any, file string, val []any, path string) {
 	if m, ok := s["minItems"].(float64); ok && float64(len(val)) < m {
-		v.fail(path, "has %d items, below minItems %v", len(val), m)
+		v.fail(path, "minItems", "has %d items, below minItems %v", len(val), m)
 	}
 	if m, ok := s["maxItems"].(float64); ok && float64(len(val)) > m {
-		v.fail(path, "has %d items, above maxItems %v", len(val), m)
+		v.fail(path, "maxItems", "has %d items, above maxItems %v", len(val), m)
 	}
 	if u, ok := s["uniqueItems"].(bool); ok && u {
 		for i := range val {
 			for j := i + 1; j < len(val); j++ {
 				if reflect.DeepEqual(val[i], val[j]) {
-					v.fail(path, "items %d and %d are not unique", i, j)
+					v.fail(path, "uniqueItems", "items %d and %d are not unique", i, j)
 				}
 			}
 		}
@@ -470,12 +512,13 @@ func (v *validator) checkObject(s map[string]any, file string, val map[string]an
 		for _, r := range req {
 			name, _ := r.(string)
 			if _, present := val[name]; !present {
-				v.fail(path, "missing required property %q", name)
+				// name is the schema's, not the document's, so it is safe in a value-free path.
+				v.fail(path+"."+name, "required", "missing required property %q", name)
 			}
 		}
 	}
 	if m, ok := s["minProperties"].(float64); ok && float64(len(val)) < m {
-		v.fail(path, "has %d properties, below minProperties %v", len(val), m)
+		v.fail(path, "minProperties", "has %d properties, below minProperties %v", len(val), m)
 	}
 	props, _ := s["properties"].(map[string]any)
 	keys := make([]string, 0, len(val))
@@ -491,10 +534,14 @@ func (v *validator) checkObject(s map[string]any, file string, val map[string]an
 		switch ap := s["additionalProperties"].(type) {
 		case bool:
 			if !ap {
-				v.fail(path, "additional property %q is not allowed", k)
+				v.fail(path, "additionalProperties", "additional property %q is not allowed", k)
 			}
 		case map[string]any:
-			v.check(ap, file, val[k], path+"."+k)
+			child := path + "." + k
+			if v.valueFree {
+				child = path + ".*" // k is submitted data, not a schema-known name
+			}
+			v.check(ap, file, val[k], child)
 		}
 	}
 }

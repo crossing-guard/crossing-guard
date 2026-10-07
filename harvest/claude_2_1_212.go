@@ -21,9 +21,8 @@ import (
 
 // claudeTitle scans for a summary line or first user text; counts lines and
 // real user turns (injected "<...>" context and tool_result-only lines are
-// not user turns and never make a title). It also collects usage telemetry +
-// per-day buckets in the same pass (each assistant line carries
-// message.usage + timestamp).
+// not user turns and never make a title). It also folds the session's model
+// calls in the same pass, for the rail's model, call count and context.
 // claudeScan is one pass over a claude transcript. A struct, not a six-value
 // return: the vendor titles pushed it past what a tuple can carry legibly.
 type claudeScan struct {
@@ -32,7 +31,6 @@ type claudeScan struct {
 	AITitle     string // the runtime's generated title
 	Lines       int
 	Usage       *SessionUsage
-	Days        map[string]*DayBucket
 	Cwd         string
 	UserTurns   int
 }
@@ -53,15 +51,11 @@ func claudeTitle(path string) claudeScan {
 	// still shown in the transcript (it is real context), but it is not counted as
 	// this session's work. Anything that aggregates must use `owns`.
 	own := stem(path)
-	owns := func(obj map[string]any) bool {
-		sid, _ := obj["sessionId"].(string)
-		return sid == "" || sid == own // no id = pre-resume format; treat as ours
-	}
+	owns := func(obj map[string]any) bool { return claudeOwnsLine(obj, own) }
 	sc := newLineScanner(f)
 	title, firstUser, cwd, n, userTurns := "", "", "", 0, 0
 	customTitle, aiTitle := "", ""
-	usage := &SessionUsage{}
-	days := map[string]*DayBucket{}
+	calls := newUsageCallFolder()
 	for sc.Scan() {
 		var obj map[string]any
 		if json.Unmarshal(sc.Bytes(), &obj) != nil {
@@ -108,37 +102,8 @@ func claudeTitle(path string) claudeScan {
 			if !owns(obj) {
 				continue // copied history: its tokens were already counted at the source
 			}
-			msg, _ := obj["message"].(map[string]any)
-			if msg == nil {
-				continue
-			}
-			u, ok := msg["usage"].(map[string]any)
-			if !ok {
-				continue
-			}
-			in, cr, cc, out := asInt64(u["input_tokens"]), asInt64(u["cache_read_input_tokens"]), asInt64(u["cache_creation_input_tokens"]), asInt64(u["output_tokens"])
-			usage.Turns++
-			usage.InputTokens += in
-			usage.CacheRead += cr
-			usage.CacheCreate += cc
-			usage.OutputTokens += out
-			if ctx := in + cr + cc; ctx > 0 {
-				usage.Context = ctx
-			}
-			if m := anyString(msg["model"]); isConcreteClaudeModel(m) {
-				usage.Model = m
-			}
-			if ts := anyString(obj["timestamp"]); len(ts) >= 10 {
-				b := days[ts[:10]]
-				if b == nil {
-					b = &DayBucket{}
-					days[ts[:10]] = b
-				}
-				b.Input += in
-				b.CacheRead += cr
-				b.CacheCreate += cc
-				b.Output += out
-				b.Turns++
+			if call, ok := claudeUsageCall(obj, own, ""); ok {
+				calls.observe(call)
 			}
 		}
 	}
@@ -152,13 +117,9 @@ func claudeTitle(path string) claudeScan {
 	case title == "":
 		title = firstUser
 	}
-	finishUsage(usage)
-	if usage.Turns == 0 {
-		usage, days = nil, nil
-	}
 	return claudeScan{
 		Title: truncate(title, titleMaxLen), CustomTitle: customTitle, AITitle: aiTitle,
-		Lines: n, Usage: usage, Days: days, Cwd: cwd, UserTurns: userTurns,
+		Lines: n, Usage: FoldCalls(calls.admitted()), Cwd: cwd, UserTurns: userTurns,
 	}
 }
 
@@ -173,16 +134,13 @@ func normalizeClaude(path string, caps textCaps) ([]CanonicalEvent, int, *Sessio
 
 func normalizeClaudeReader(path string, reader io.Reader, caps textCaps) ([]CanonicalEvent, int, *SessionUsage, error) {
 	var events []CanonicalEvent
-	usage := &SessionUsage{}
+	calls := newUsageCallFolder()
 	unparsed, seq := 0, 0
 	// Same resume-copy rule as claudeTitle: copied records are EMITTED (they are real
 	// context the reader wants) but never re-counted — their tokens already belong to
 	// the session that produced them.
 	own := stem(path)
-	owns := func(obj map[string]any) bool {
-		sid, _ := obj["sessionId"].(string)
-		return sid == "" || sid == own
-	}
+	owns := func(obj map[string]any) bool { return claudeOwnsLine(obj, own) }
 	sc := newLineScanner(reader)
 	for sc.Scan() {
 		var obj map[string]any
@@ -217,21 +175,8 @@ func normalizeClaudeReader(path string, reader io.Reader, caps textCaps) ([]Cano
 				continue
 			}
 			if obj["type"] == "assistant" && owns(obj) {
-				if u, ok := msg["usage"].(map[string]any); ok {
-					in, cr, cc := asInt64(u["input_tokens"]), asInt64(u["cache_read_input_tokens"]), asInt64(u["cache_creation_input_tokens"])
-					usage.Turns++
-					usage.InputTokens += in
-					usage.OutputTokens += asInt64(u["output_tokens"])
-					usage.CacheRead += cr
-					usage.CacheCreate += cc
-					// context occupancy of the LAST turn; sidechains (isSidechain)
-					// would skew this — main-chain filter is a canonical-store task.
-					if ctx := in + cr + cc; ctx > 0 {
-						usage.Context = ctx
-					}
-					if m := anyString(msg["model"]); isConcreteClaudeModel(m) {
-						usage.Model = m
-					}
+				if call, ok := claudeUsageCall(obj, own, ""); ok {
+					calls.observe(call)
 				}
 			}
 			role := anyString(msg["role"])
@@ -278,7 +223,10 @@ func normalizeClaudeReader(path string, reader io.Reader, caps textCaps) ([]Cano
 	if sc.Err() != nil {
 		unparsed++ // scanner stopped early (e.g. over-long line) — count, never hide
 	}
-	finishUsage(usage)
+	usage := FoldCalls(calls.admitted())
+	if usage == nil {
+		usage = &SessionUsage{} // callers read zero calls as "no telemetry observed"
+	}
 	return events, unparsed, usage, nil
 }
 
@@ -358,7 +306,17 @@ func (claudeRuntime) RepositoryGroupKey(_ SessionSummary, key string) string {
 	}
 	return key
 }
-func (claudeRuntime) CouldMatchID(id string) bool         { return looksLikeUUID(id) }
+func (claudeRuntime) CouldMatchID(id string) bool { return looksLikeUUID(id) }
+
+// NativeOpen: the desktop app's resume route takes a CLI session uuid and
+// imports the session if the desktop does not hold it (measured 2026-10-03,
+// desktop 2.19675.0). A sidecar subagent is not a CLI session.
+func (claudeRuntime) NativeOpen(s SessionSummary) (NativeOpenLink, bool) {
+	if !looksLikeUUID(s.ID) || filepath.Base(filepath.Dir(s.Path)) == claudeSubagentsDirName {
+		return NativeOpenLink{}, false
+	}
+	return NativeOpenLink{URL: "claude://resume?session=" + s.ID, App: "Claude"}, true
+}
 func (claudeRuntime) CanonicalID(s SessionSummary) string { return s.ID }
 func (claudeRuntime) MatchID(s SessionSummary, id string) bool {
 	return s.ID == id || s.ThreadID == id
@@ -405,25 +363,32 @@ func collectClaudeJobs(strict bool) ([]fileJob, error) {
 			}
 			jobs = append(jobs, fileJob{
 				runtime: "claude", path: filepath.Join(dir, f.Name()),
-				project: prettyProject(p.Name()), mod: info.ModTime(), size: info.Size(),
+				project: p.Name(), mod: info.ModTime(), size: info.Size(),
 			})
 		}
 	}
 	return jobs, nil
 }
 
-func (claudeRuntime) Summarize(j fileJob) (SessionSummary, *SessionUsage, map[string]*DayBucket, bool) {
+func (claudeRuntime) Summarize(j fileJob) (SessionSummary, bool) {
 	s := SessionSummary{Runtime: j.runtime, ID: stem(j.path), Project: j.project, Modified: j.mod, Path: j.path, HasTranscript: true}
-	if s.Project == "" { // SummarizeFile builds a bare job — derive the display project
-		s.Project = prettyProject(filepath.Base(filepath.Dir(j.path)))
+	if s.Project == "" { // SummarizeFile builds a bare job
+		s.Project = filepath.Base(filepath.Dir(j.path))
 	}
 	scan := claudeTitle(j.path)
 	s.Title, s.Lines, s.Cwd, s.UserTurns = scan.Title, scan.Lines, scan.Cwd, scan.UserTurns
+	// The project is the directory the transcript declares. Claude's escaped
+	// folder name cannot be turned back into a path (a dash in a directory name
+	// is indistinguishable from a separator), so without a cwd the raw folder
+	// name stays as a label and is never used as a path.
+	if s.Cwd != "" {
+		s.Project = s.Cwd
+	}
 	s.CustomTitle, s.AITitle = scan.CustomTitle, scan.AITitle
 	if scan.Usage != nil {
 		s.Context, s.Model, s.Turns = scan.Usage.Context, scan.Usage.Model, scan.Usage.Turns
 	}
-	return s, scan.Usage, scan.Days, s.Lines > 0
+	return s, s.Lines > 0
 }
 
 func (claudeRuntime) NormalizeFull(path string) ([]CanonicalEvent, int, *SessionUsage, error) {

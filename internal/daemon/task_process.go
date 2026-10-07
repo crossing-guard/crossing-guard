@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 )
@@ -23,11 +24,19 @@ func runTaskProcess(launch taskExecutionLaunch, interrupted func() bool) executi
 	if err != nil {
 		return executionOutcome{Err: err}
 	}
-	launch.cmd.Stdin = nil
+	// Stdin is empty unless the driver gave the process its input there (a
+	// prompt). The daemon's own stdin is never handed down: a CLI that reads
+	// stdin would otherwise consume it.
+	if launch.cmd.Stdin == os.Stdin {
+		launch.cmd.Stdin = nil
+	}
 	prepareTaskProcess(launch.cmd)
 	if err := launch.cmd.Start(); err != nil {
 		return executionOutcome{Err: err}
 	}
+	// The registry learns here that the command may be read by Interrupt. An
+	// interrupt recorded before this point is honored by the check that follows,
+	// so started must stay ahead of it.
 	launch.started()
 	if interrupted() {
 		_ = interruptTaskProcess(launch.cmd)
@@ -59,6 +68,29 @@ func runTaskProcess(launch taskExecutionLaunch, interrupted func() bool) executi
 			launch.event(ChatEvent{"type": "stderr", "text": "Runtime diagnostics stream ended: " + truncate(err.Error(), 300)})
 		}
 	}()
+	if launch.protocol != nil {
+		protocolErr := launch.protocol.Run(stdout, launch.event)
+		if lifetime, ok := launch.protocol.(chatProtocolNaturalExit); ok &&
+			lifetime.WaitForNaturalExit() && protocolErr == nil {
+			// The one-shot protocol read through EOF. Its exit status matters:
+			// a terminal success record followed by a nonzero process exit is
+			// still a failed task. Server protocols need the kill path below.
+			readers.Wait()
+			waitErr := launch.cmd.Wait()
+			return executionOutcome{Err: waitErr, Interrupted: interrupted()}
+		}
+		// Servers remain alive after a turn. The protocol ends the conversation;
+		// this owner stops and reaps the exact process it launched.
+		stopErr := interruptTaskProcess(launch.cmd)
+		// Wait closes StderrPipe even when its callback is still processing a
+		// previous line. Drain after termination so late diagnostics survive.
+		readers.Wait()
+		_ = launch.cmd.Wait() // expected termination after the protocol has settled
+		if protocolErr == nil {
+			protocolErr = stopErr
+		}
+		return executionOutcome{Err: protocolErr, Interrupted: interrupted()}
+	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), taskStdoutRecordMax)
@@ -75,8 +107,7 @@ func runTaskProcess(launch taskExecutionLaunch, interrupted func() bool) executi
 	if err := scanner.Err(); err != nil {
 		launch.event(ChatEvent{"type": "stderr", "text": "Runtime output stream ended: " + truncate(err.Error(), 300)})
 	}
-	// Cmd.Wait closes StderrPipe. Drain diagnostics first so provider failures
-	// are classified before process completion can discard the unread tail.
+	// Wait closes StdoutPipe/StderrPipe: consume diagnostics before reaping.
 	readers.Wait()
 	waitErr := launch.cmd.Wait()
 	return executionOutcome{Err: waitErr, Interrupted: interrupted()}

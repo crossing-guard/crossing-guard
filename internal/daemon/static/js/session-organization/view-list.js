@@ -6,6 +6,7 @@
 import { el } from '../core.js';
 import { deleteView, loadViewCounts, loadViews, reorderViews, updateView } from './organization-api.js';
 import { organization, recallSelectedView, selectView } from './organization-state.js';
+import { moveOrder, confirmDeleteText, renameSettle } from './view-actions.js';
 import { sessionActivityStore } from '../session/session-activity-store.js';
 
 let settings = { viewsVisible: 12, countRefreshMs: 4000 };
@@ -104,8 +105,12 @@ function viewButton(host, view) {
 export async function refreshViewCounts() {
   if (!organization.views.length) return;
   lastCountAt = Date.now();
-  let counts = {};
-  try { counts = (await loadViewCounts()).view_counts || {}; } catch { return; }
+  let counts = {}, notes = {};
+  try {
+    const read = await loadViewCounts();
+    counts = read.view_counts || {};
+    notes = read.view_notes || {};
+  } catch { return; }
   document.querySelectorAll('.viewlist .view[data-view-id]').forEach(button => {
     const id = button.dataset.viewId;
     const count = button.querySelector('.vc');
@@ -114,8 +119,23 @@ export async function refreshViewCounts() {
     count.textContent = known ? String(counts[id]) : '';
     count.classList.toggle('hot', known && counts[id] > 0);
     const name = button.querySelector('.vn')?.textContent || '';
-    button.setAttribute('aria-label', known ? name + ', ' + counts[id] + (counts[id] === 1 ? ' session' : ' sessions') : name);
+    const label = known ? name + ', ' + counts[id] + (counts[id] === 1 ? ' session' : ' sessions') : name;
+    const problems = paintViewNote(button, notes[id]);
+    button.setAttribute('aria-label', problems ? label + '. ' + problems : label);
   });
+}
+
+// paintViewNote shows a view's query notes as one visible short line under
+// its name (the rejected-entry precedent); the full sentences go in the
+// entry's accessible name, which this returns. A view with no notes loses
+// any stale line.
+function paintViewNote(button, notes) {
+  button.querySelector('.view-problem')?.remove();
+  const noted = Array.isArray(notes) && notes.length > 0;
+  button.classList.toggle('view-noted', noted);
+  if (!noted) return '';
+  button.appendChild(el('span', 'view-problem', notes.map(note => note.term + ' matches no tag — try ' + note.suggest).join('; ')));
+  return notes.map(note => note.problem).join(' ');
 }
 
 // Session activity changes often; counts follow it no faster than configured.
@@ -127,6 +147,19 @@ function scheduleCountRefresh() {
 
 sessionActivityStore.subscribe(scheduleCountRefresh);
 window.addEventListener('focus', scheduleCountRefresh);
+
+// Another surface (Settings › Views, or this one after a rail-side write)
+// adopted a new views document; repaint every connected list from the adopted
+// state. The pinned Sessions pane is NOT re-rendered on navigation, so this is
+// the only way a rename/reorder/delete made in Settings shows here. Never
+// loadViews() inside the handler: writes already adopt, and a load would
+// self-trigger this listener.
+if (typeof document !== 'undefined') {
+  document.addEventListener('cg:views-changed', () => {
+    document.querySelectorAll('.viewlist').forEach(host => paintViewList(host));
+    refreshViewCounts();
+  });
+}
 
 function openViewMenu(host, anchor, view) {
   closeViewMenu();
@@ -173,7 +206,7 @@ function closeViewMenu() {
 }
 
 // renameView edits the name where it stands: Enter saves, Escape or leaving
-// the field keeps the old name.
+// the field keeps the old name. The commit rule lives in view-actions.
 function renameView(button, view) {
   return new Promise(resolve => {
     const input = el('input', 'view-rename');
@@ -184,8 +217,8 @@ function renameView(button, view) {
     const finish = async save => {
       if (settled) return;
       settled = true;
-      const name = input.value.trim();
-      if (save && name && name !== view.name) await guarded(() => updateView({ ...view, name }));
+      const { commit, name } = renameSettle(view.name, save ? input.value : '');
+      if (commit) await guarded(() => updateView({ ...view, name }));
       resolve();
     };
     input.addEventListener('keydown', event => {
@@ -200,15 +233,13 @@ function renameView(button, view) {
 }
 
 async function moveView(view, step) {
-  const order = organization.views.map(each => each.id);
-  const from = order.indexOf(view.id), to = from + step;
-  if (from < 0 || to < 0 || to >= order.length) return;
-  order.splice(to, 0, order.splice(from, 1)[0]);
+  const order = moveOrder(organization.views.map(each => each.id), view.id, step);
+  if (!order) return;
   await guarded(() => reorderViews(order));
 }
 
 async function removeView(view) {
-  if (!window.confirm('Delete the view “' + view.name + '”? No session is changed.')) return;
+  if (!window.confirm(confirmDeleteText(view.name))) return;
   await guarded(() => deleteView(view.id));
   if (organization.viewID === view.id) { selectView(''); onSelect(); }
 }

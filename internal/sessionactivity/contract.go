@@ -39,6 +39,21 @@ type Item struct {
 	// else, including every rail item — it is transient and never stored.
 	Progress     string `json:"progress,omitempty"`
 	ProgressTool string `json:"progress_tool,omitempty"`
+	// Owner attention from helper agents (escalation-delivery plan §6.2),
+	// carried beside the attention ladder, never inside it. AskID is the
+	// ask's place in claim-settle order, its own id space (source "agent"):
+	// acknowledging it acknowledges every ask settled up to it. AskText is the newest unresolved ask's
+	// line, cut at the configured bound; AskAgent names the agent; AskCount
+	// counts unresolved asks. DraftCount and DraftText describe proposed
+	// replies that were not sent. AskState is "unknown" when the ask source
+	// could not be read — the other fields are then absent, never zero-as-fact.
+	AskID      int64  `json:"ask_id,omitempty"`
+	AskText    string `json:"ask_text,omitempty"`
+	AskAgent   string `json:"ask_agent,omitempty"`
+	AskCount   int    `json:"ask_count,omitempty"`
+	DraftCount int    `json:"draft_count,omitempty"`
+	DraftText  string `json:"draft_text,omitempty"`
+	AskState   string `json:"ask_state,omitempty"`
 }
 
 type Capability struct {

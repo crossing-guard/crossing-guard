@@ -1,0 +1,2 @@
+error-contains: additional property "checkout_root"
+An absolute checkout root never ships (invariant 8).

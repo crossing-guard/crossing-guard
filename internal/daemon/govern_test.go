@@ -97,7 +97,7 @@ func TestNaturalCodexSummaryJoinsCanonicalGovernanceEvents(t *testing.T) {
 	old := governor
 	governor = NewGovernor(ix, nil)
 	t.Cleanup(func() { governor = old })
-	canonical := "019ff0ef-2580-71c3-ac44-ced66776230b"
+	canonical := "abcdef00-aaaa-7bbb-8ccc-000000000004"
 	if err := governor.Observe(Observation{SessionID: canonical, Runtime: "codex", Tool: "apply_patch",
 		FilePaths: []string{"/repo/a.go", "/repo/b.go"}, TS: 1}); err != nil {
 		t.Fatal(err)
@@ -422,7 +422,7 @@ func TestUnrecordedDecisionsAreLabelledUnknown(t *testing.T) {
 // non-deterministic loss, which is worse than double-counting.
 func TestLoadSessionDeclaresSiblingSegments(t *testing.T) {
 	// Drive the real resolution logic over a synthetic two-segment thread.
-	thread := "019f4f13-c53a-77f3-8d20-cace9fdaac7b"
+	thread := "abcdef00-aaaa-7bbb-8ccc-000000000002"
 	older := SessionSummary{Runtime: "codex", ID: "rollout-A-" + thread, ThreadID: thread,
 		Modified: time.Unix(1000, 0), Lines: 665}
 	newer := SessionSummary{Runtime: "codex", ID: "rollout-B-" + thread, ThreadID: thread,

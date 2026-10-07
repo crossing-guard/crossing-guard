@@ -33,9 +33,11 @@ func cmdSessions(args []string) {
 // printSessionRow is the ONE session-list row format, used by both the index
 // fast path and the scan fallback so they cannot drift (they had a duplicated
 // Printf before).
-func printSessionRow(vendor, id, when, project string, turns int, title string) {
-	fmt.Printf("%-6s %-10s %s  %-28s %3d turns  %s\n",
-		vendor, shortID(id), when, truncate(project, 28), turns, title)
+// The count is model calls (token-usage-analytics plan §20): the summary's
+// Turns counts calls for every runtime.
+func printSessionRow(vendor, id, when, project string, calls int, title string) {
+	fmt.Printf("%-6s %-10s %s  %-28s %3d calls  %s\n",
+		vendor, shortID(id), when, truncate(project, 28), calls, title)
 }
 
 // printSessionHit is the one indexed search-hit row format. Title documents are

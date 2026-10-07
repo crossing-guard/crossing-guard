@@ -158,7 +158,7 @@ func TestSchemaV22MigratesPopulatedTranscriptAndMemorySearchContent(t *testing.T
 		CREATE VIRTUAL TABLE events_fts USING fts5(vendor,session_id,ts,kind,text);
 		INSERT INTO sessions(vendor,id,path,cwd,project,title,modified,turns)
 			VALUES('claude','legacy','/legacy','/repo','repo','Legacy title',1,1);
-		INSERT INTO events_fts VALUES('claude','legacy','1','user','due diligence legacy');
+		INSERT INTO events_fts VALUES('claude','legacy','1','user','sprint retro legacy');
 		INSERT INTO events_fts VALUES('memory','memory-1','2','memory','remember migration token');
 		CREATE TABLE unrelated_fixture(value TEXT);
 		INSERT INTO unrelated_fixture VALUES('preserve me');
@@ -174,7 +174,7 @@ func TestSchemaV22MigratesPopulatedTranscriptAndMemorySearchContent(t *testing.T
 		t.Fatal(err)
 	}
 	defer migrated.Close()
-	for query, wantVendor := range map[string]string{"diligence": "claude", "migration token": "memory"} {
+	for query, wantVendor := range map[string]string{"retro": "claude", "migration token": "memory"} {
 		hits, searchErr := migrated.SearchEvents(query, 10)
 		if searchErr != nil || len(hits) != 1 || hits[0].Vendor != wantVendor {
 			t.Fatalf("query %q hits=%+v err=%v", query, hits, searchErr)

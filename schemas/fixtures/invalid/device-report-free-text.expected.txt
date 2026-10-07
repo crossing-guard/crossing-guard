@@ -1,0 +1,2 @@
+error-contains: additional property "evidence" is not allowed
+A report carries no free text: a string an admin console renders is a social-engineering channel from any process that can write the device key.

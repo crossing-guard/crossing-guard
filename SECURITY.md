@@ -1,7 +1,7 @@
 # Security reporting
 
 Use [GitHub private vulnerability reporting](https://github.com/crossing-guard/crossing-guard/security/advisories/new),
-or email **crossingguarddev@gmail.com**. Patrick receives reports for Crossing Guard.
+or email **crossingguarddev@gmail.com**. The maintainer receives reports for Crossing Guard.
 Avoid public exploit details while a report is assessed.
 
 Include the version or commit, operating system, client version, minimal reproduction,
@@ -15,3 +15,5 @@ Crossing Guard acts on supported observed events and explicitly granted actions.
 hooks and unsupported paths are outside that coverage. Memory and agent output cannot grant
 permission. Local evidence is not a guarantee against an attacker controlling the process
 and storage. Providers and commands may use the network under their own configuration.
+A device linked with `crossing-guard link` sends records to the team server its user
+named; that server is a separate project and is outside this repository's scope.

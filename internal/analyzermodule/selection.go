@@ -1,6 +1,7 @@
 package analyzermodule
 
 import (
+	"crossing-guard/internal/atomicfile"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -254,7 +255,7 @@ func writeSelection(dataDir string, selection Selection) error {
 	selectionPath := filepath.Join(root, "selection.json")
 	previousPath := filepath.Join(root, "selection.previous.json")
 	if current, err := os.ReadFile(selectionPath); err == nil {
-		if err := writeAtomicFile(previousPath, current, 0o600); err != nil {
+		if err := atomicfile.WriteNoDirSync(previousPath, current, 0o600); err != nil {
 			return fmt.Errorf("preserve previous analyzer selection: %w", err)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -263,30 +264,5 @@ func writeSelection(dataDir string, selection Selection) error {
 	if err := os.Rename(temporaryPath, selectionPath); err != nil {
 		return fmt.Errorf("publish analyzer selection: %w", err)
 	}
-	return syncDirectory(root)
-}
-
-func writeAtomicFile(path string, body []byte, mode fs.FileMode) error {
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".atomic-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(body); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
+	return atomicfile.SyncDir(root)
 }

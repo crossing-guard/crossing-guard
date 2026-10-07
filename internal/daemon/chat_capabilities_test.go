@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"crossing-guard/internal/guardcli"
+	"crossing-guard/internal/orchestration/profilefs"
+	"crossing-guard/store"
 )
 
 func TestChatCapabilitiesUseRegisteredDrivers(t *testing.T) {
@@ -57,6 +59,36 @@ func TestNewChatAdapterNeedsNoGenericRegistrationEdit(t *testing.T) {
 	}
 }
 
+// futureLocalChatDriver is a new adapter that declares a local route by adding
+// only its own method (managed-turn-profile-limits plan §4.1, VR-7).
+type futureLocalChatDriver struct{ futureChatDriver }
+
+func (futureLocalChatDriver) LocalRoute(req ChatRequest) (bool, string) {
+	return req.Model == "on-device", "future adapter: on-device model"
+}
+
+// A new runtime satisfies a local-only destination by adding its own
+// LocalRoute — no generic edit — and a runtime without one is never local.
+func TestNewAdapterDeclaresLocalRoutesWithoutGenericEdits(t *testing.T) {
+	original := chatDrivers
+	chatDrivers = map[string]ChatDriver{}
+	t.Cleanup(func() { chatDrivers = original })
+	registerChatDriver("future-local", futureLocalChatDriver{})
+	registerChatDriver("future", futureChatDriver{})
+	document, err := profilefs.Parse("PROFILE.md", helperAgentProfileSource())
+	if err != nil || document.Profile.Requirements.Destination.Locality != "local-only" {
+		t.Fatalf("fixture profile must default to local-only: %v", err)
+	}
+	if problem := managedRouteDestinationProblem(document.Profile, store.ManagedRoute{Runtime: "future-local", Model: "on-device"}); problem != "" {
+		t.Fatalf("a declared local route was refused: %s", problem)
+	}
+	for _, route := range []store.ManagedRoute{{Runtime: "future-local", Model: "hosted"}, {Runtime: "future", Model: "on-device"}} {
+		if managedRouteDestinationProblem(document.Profile, route) == "" {
+			t.Fatalf("route %+v was treated as local without the adapter claiming it", route)
+		}
+	}
+}
+
 func TestHandleChatCapabilities(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handleChatCapabilities(rec, httptest.NewRequest("GET", "/api/chat/capabilities", nil))
@@ -64,13 +96,23 @@ func TestHandleChatCapabilities(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var caps []ChatCapability
-	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil || len(caps) != 3 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &caps); err != nil || len(caps) != len(chatDrivers) {
 		t.Fatalf("capabilities=%+v err=%v", caps, err)
 	}
+	foundAntigravity := false
 	for _, capability := range caps {
 		if capability.Runtime == "opencode" && capability.CanSignIn {
 			t.Fatal("OpenCode must not advertise Crossing Guard credential brokerage")
 		}
+		if capability.Runtime == "antigravity" {
+			foundAntigravity = true
+			if !capability.CanStart || !capability.CanResume || capability.CanSignIn || capability.MessageDelivery.Supported {
+				t.Fatalf("Antigravity capability exceeds the verified source candidate: %+v", capability)
+			}
+		}
+	}
+	if !foundAntigravity {
+		t.Fatal("Antigravity is missing from the registered capability API")
 	}
 }
 
@@ -146,7 +188,7 @@ func TestChatAdapterCommands(t *testing.T) {
 	}{
 		{name: "claude canonical mode", driver: claudeChatDriver{}, req: ChatRequest{Binary: bin, Cwd: cwd, Prompt: "hello", Mode: "plan", Model: "sonnet"}, want: []string{"--permission-mode", "plan", "--model", "sonnet", "--permission-prompt-tool", "--mcp-config"}},
 		{name: "codex local provider", driver: codexChatDriver{}, req: ChatRequest{Binary: bin, Cwd: cwd, Prompt: "hello", Mode: "workspace-write", Model: "local:ollama"}, want: []string{"--sandbox", "workspace-write", "--oss", "--local-provider", "ollama"}, not: []string{"-m", "local:ollama", "--permission-prompt-tool", "--mcp-config"}},
-		{name: "opencode safe resume", driver: openCodeChatDriver{}, req: ChatRequest{Binary: bin, Cwd: cwd, Prompt: "hello", SessionID: "ses_exact", Model: "ollama/qwen2.5-coder:7b"}, want: []string{"run", "--format", "json", "--dir", cwd, "--session", "ses_exact", "--model", "ollama/qwen2.5-coder:7b"}, not: []string{"--auto", "--permission-prompt-tool", "--mcp-config"}},
+		{name: "opencode safe resume", driver: openCodeChatDriver{}, req: ChatRequest{Binary: bin, Cwd: cwd, Prompt: "hello", SessionID: "ses_exact", Model: "ollama/qwen2.5-coder:7b"}, want: []string{"serve", "--hostname", "127.0.0.1", "--port", "0"}, not: []string{"--auto", "--permission-prompt-tool", "--mcp-config"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -184,7 +226,7 @@ func TestOpenCodeEventProjection(t *testing.T) {
 		"cost": float64(0), "tokens": map[string]any{"total": float64(10)}}})...)
 	encoded, _ := json.Marshal(events)
 	body := string(encoded)
-	for _, expected := range []string{`"type":"session"`, `"id":"ses_exact"`, `"type":"text"`, `"text":"Hello"`, `"type":"result"`} {
+	for _, expected := range []string{`"type":"session"`, `"id":"ses_exact"`, `"type":"text"`, `"text":"Hello"`, `"type":"usage"`, `"accumulation":"additive"`} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("projection %q missing %q", body, expected)
 		}

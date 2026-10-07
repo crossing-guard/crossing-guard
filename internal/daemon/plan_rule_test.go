@@ -100,7 +100,7 @@ func TestCodeWithoutAPlanIsHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := g.DecideStateful(write)
+	d, _, err := g.DecideStateful(write)
 	if err != nil {
 		t.Fatalf("a stateful evaluation must not error on a healthy store: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestCodeAfterAPlanProceeds(t *testing.T) {
 	}
 
 	write := Observation{SessionID: sid, Tool: "Edit", FilePath: "/repo/internal/daemon/thing.go", TS: 3}
-	d, err := g.DecideStateful(write)
+	d, _, err := g.DecideStateful(write)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestCodeAfterAPlanProceeds(t *testing.T) {
 // evaluate, and it is expressible without touching the engine.
 func TestPlanRuleIsPureConfig(t *testing.T) {
 	pol := planPolicy(t)
-	if !predicateReferencesState(pol.Rules[0].If) {
+	if !engine.ReferencesState(pol.Rules[0].If) {
 		t.Fatal("the rule must reference session state, or the hook's static tier " +
 			"would evaluate it and the daemon's fold would be bypassed")
 	}
@@ -192,8 +192,14 @@ func TestPlanRuleFiresInAuditDryRun(t *testing.T) {
 	blind.Events = []harvestEvent{
 		{Kind: "tool_call", Name: "Edit", Text: `{"file_path":"/repo/internal/daemon/thing.go"}`},
 	}
-	if got := livePolicyFindings(live, sessionTags(blind, 0), sum("blind")); len(got) != 1 {
-		t.Errorf("a code-only session must be flagged by the armed rule in dry-run, got %d findings", len(got))
+	got := livePolicyFindings(live, sessionTags(blind), nil, sum("blind"))
+	if len(got) != 1 {
+		t.Fatalf("a code-only session must be flagged by the armed rule in dry-run, got %d findings", len(got))
+	}
+	// A finding that fired by absence names what was absent — for any `not:` term,
+	// not only agent: ones.
+	if len(got[0].Absent) != 1 || got[0].Absent[0] != "session:phase=plan" {
+		t.Errorf("absent = %v, want [session:phase=plan]", got[0].Absent)
 	}
 
 	// A session that also read a design doc — must NOT be flagged, or the rule is noise.
@@ -202,7 +208,7 @@ func TestPlanRuleFiresInAuditDryRun(t *testing.T) {
 		{Kind: "tool_call", Name: "Read", Text: `{"file_path":"/repo/docs/design/thing.md"}`},
 		{Kind: "tool_call", Name: "Edit", Text: `{"file_path":"/repo/internal/daemon/thing.go"}`},
 	}
-	if got := livePolicyFindings(live, sessionTags(planned, 0), sum("planned")); len(got) != 0 {
+	if got := livePolicyFindings(live, sessionTags(planned), nil, sum("planned")); len(got) != 0 {
 		t.Errorf("a session that opened a doc must pass the armed rule in dry-run, got %d findings: %+v",
 			len(got), got)
 	}

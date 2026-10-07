@@ -126,7 +126,10 @@ func UninstallHooks() []HookStatus {
 		return []HookStatus{{Vendor: "?", Action: "error", Detail: "cannot resolve own path: " + err.Error()}}
 	}
 	executable, _ = filepath.Abs(executable)
-	var statuses []HookStatus
+	// Recall registrations first, for every runtime and whatever consent says:
+	// a hook already gone, or a runtime no longer resolvable, must not leave
+	// our MCP entry behind (recall-mcp-v1-plan §3.7).
+	statuses := uninstallRecall(executable)
 	for _, name := range installerNames() {
 		installer := hookInstallers[name]
 		config := installer.ResolveConfig()

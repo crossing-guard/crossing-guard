@@ -1,0 +1,2 @@
+error-contains: $.recipient: is string, want type object
+The recipient is a typed server user id, never a free string a device chose.

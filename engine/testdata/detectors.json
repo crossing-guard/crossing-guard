@@ -4,21 +4,21 @@
     {
       "id": "srcmap:orders",
       "kind": "source",
-      "match": { "tool": ["getOrderAddress", "getOrder", "getOrders", "getFbaOrders", "getSingleOrder"] },
+      "match": { "tool": ["getCustomerAddress", "getOrder", "getOrders", "getWarehouseOrders", "getOrderById"] },
       "tag": { "key": "data-class", "value": "personal-data" },
       "coverage": { "enumerable": true, "gaps": ["only the listed order tools; a new order tool is a visible, closable hole"] }
     },
     {
       "id": "srcmap:finance",
       "kind": "source",
-      "match": { "tool": ["listFinancialEvents", "getSettlementReportByDate", "getMyFeesEstimateForAsin"] },
+      "match": { "tool": ["listPayments", "getPayoutReport", "getFeeEstimate"] },
       "tag": { "key": "data-class", "value": "regulated" },
       "coverage": { "enumerable": true, "gaps": ["listed finance tools only"] }
     },
     {
       "id": "srcmap:vendor-cost",
       "kind": "source",
-      "match": { "tool": ["getVendorProduct", "compareVendorsForProduct", "getPurchaseOrder"] },
+      "match": { "tool": ["getSupplierPrice", "compareSupplierPrices", "getPurchaseRecord"] },
       "tag": { "key": "data-class", "value": "internal" },
       "coverage": { "enumerable": true, "gaps": ["listed cost/margin tools only"] }
     },
@@ -39,7 +39,7 @@
     {
       "id": "allowlist:in-house",
       "kind": "destination",
-      "in_house_hosts": ["pim.example.internal", "admin.example.internal", "internal.example.com"],
+      "in_house_hosts": ["inventory.example.internal", "admin.example.internal", "internal.example.com"],
       "in_house_suffixes": [".internal.example.com"],
       "in_house_cidrs": ["10.0.0.0/8", "192.168.0.0/16"],
       "coverage": { "enumerable": true, "gaps": ["everything NOT listed resolves to 'external' (fail-safe)"] }

@@ -22,8 +22,9 @@ func init() { registerHookInstaller(openCodeInstaller{}) }
 const (
 	openCodeVendor         = "opencode"
 	openCodePluginFile     = "crossing-guard-collection.js"
-	openCodePluginMarker   = "// crossing-guard-owned: opencode-collection-v2"
+	openCodePluginMarker   = "// crossing-guard-owned: opencode-collection-v3"
 	openCodePluginMarkerV1 = "// crossing-guard-owned: opencode-collection-v1"
+	openCodePluginMarkerV2 = "// crossing-guard-owned: opencode-collection-v2"
 	// openCodeDecisionMarker names the governed plugin shape (natural-session
 	// plan, Slice C): tool.execute.before evaluates through govern-opencode and
 	// blocks by throw — OpenCode's documented prevention mechanism.
@@ -354,6 +355,52 @@ export const CrossingGuardCollection = async (context) => {
       // Collection is intentionally fail-open and must never interrupt OpenCode.
     }
   }
+  // collectLifecycle emits a turn-boundary fact on a NON-CARRIER path: the
+  // status adapter cannot claim or acknowledge a pending helper message
+  // (opencode-session-visibility-and-status plan D7). It uses a tighter
+  // timeout because OpenCode does not await generic event hooks.
+  const collectLifecycle = (payload, observe) => {
+    try {
+      const child = spawnSync(crossingGuardBinary,
+        ["collect-hook", "--runtime", "opencode", "--observe", observe],
+        { input: JSON.stringify(payload), encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+          timeout: 1500, maxBuffer: 65536, windowsHide: true })
+      if (child.error) {
+        report(child.error.code === "ETIMEDOUT" ? "lifecycle.timeout" : "lifecycle.spawn-error")
+      } else if (child.signal) {
+        report("lifecycle.signal")
+      } else if (child.status !== 0) {
+        report("lifecycle.exit")
+      } else {
+        report("lifecycle.firing", "info")
+      }
+    } catch (_) {
+      report("lifecycle.exception")
+    }
+  }
+  // session.status transition filter (plan D5): OpenCode 1.18 publishes
+  // busy/retry/idle. Duplicate plugin loads in one process share the same
+  // transition state through a versioned globalThis symbol. busy↔retry is
+  // no new boundary; inactive→busy/retry is turn.started; active→idle is
+  // turn.ended. The deprecated session.idle event is ignored for the exact
+  // 1.18 contract because session.status: idle carries the same boundary.
+  const statusSymbol = Symbol.for("crossing-guard-opencode-status")
+  if (!globalThis[statusSymbol]) globalThis[statusSymbol] = new Map()
+  const statusState = globalThis[statusSymbol]
+  const statusTransition = (sessionID, statusType) => {
+    if (!sessionID || !statusType) return null
+    const key = sessionID
+    const prev = statusState.get(key) || "idle"
+    const active = prev === "busy" || prev === "retry"
+    let observe = null
+    if (statusType === "busy" || statusType === "retry") {
+      if (!active) observe = "turn.started"
+    } else if (statusType === "idle") {
+      if (active) observe = "turn.ended"
+    }
+    statusState.set(key, statusType)
+    return observe
+  }
 %s  return ({
 %s
   "tool.execute.after": async (input, output) => {
@@ -367,19 +414,26 @@ export const CrossingGuardCollection = async (context) => {
       tool_response: output,
     })
   },
-  // Bus events. session.idle is OpenCode saying the agent handed the
-  // conversation back — NOT the session ending (opencode-collection-plan).
-  // Installed on the owner's decision; PROBE-GATED until a canary has seen
-  // the row on this machine, so no adapter declares it yet.
+  // Bus events. OpenCode 1.18 publishes session.status {busy|retry|idle}
+  // (the supported lifecycle contract) and a deprecated session.idle event
+  // that carries the same idle boundary. The adapter consumes session.status
+  // only; deprecated session.idle is ignored for the exact 1.18 contract.
   "event": async ({ event }) => {
-    if (!event || event.type !== "session.idle") return
+    if (!event || !event.type) return
     const sessionID = event.properties && event.properties.sessionID
     if (!sessionID) return
-    collect({
-      hook_event_name: "session.idle",
-      session_id: sessionID,
-      cwd: context.directory,
-    }, "turn.ended")
+    if (event.type === "session.status") {
+      const statusType = event.properties && event.properties.status && event.properties.status.type
+      const observe = statusTransition(sessionID, statusType)
+      if (!observe) return
+      collectLifecycle({
+        hook_event_name: "session.status",
+        session_id: sessionID,
+        cwd: context.directory,
+      }, observe)
+    }
+    // Deprecated session.idle is intentionally not handled here: the
+    // session.status: idle event carries the same hand-back boundary.
   },
   })
 }
@@ -389,6 +443,7 @@ export const CrossingGuardCollection = async (context) => {
 func isOwnedOpenCodePlugin(data []byte) bool {
 	return bytes.Contains(data, []byte(openCodePluginMarker)) ||
 		bytes.Contains(data, []byte(openCodePluginMarkerV1)) ||
+		bytes.Contains(data, []byte(openCodePluginMarkerV2)) ||
 		bytes.Contains(data, []byte(openCodeDecisionMarker))
 }
 
@@ -452,7 +507,7 @@ func (openCodeInstaller) HookBinary(config string) string {
 func (openCodeInstaller) HookPhaseStatus(config, executable string) map[string]bool {
 	current := (openCodeInstaller{}).IsCurrent(config, executable)
 	return map[string]bool{"SessionStart": false, "PreToolUse": current, "PostToolUse": current, "SessionEnd": false,
-		"turn.ended": current}
+		"turn.ended": current, "turn.started": current}
 }
 
 func (openCodeInstaller) ManualStep() string {

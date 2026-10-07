@@ -1,0 +1,2 @@
+error-contains: required
+A tombstone must commit to the content it deletes (prior_content_hash), so a receiver can tell which revision a deletion answered.

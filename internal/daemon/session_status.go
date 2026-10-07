@@ -58,6 +58,9 @@ type sessionStatusFrame struct {
 	// progress, turn_progress.go). The rail never carries it.
 	Progress     string
 	ProgressTool string
+	// Owner is the helper-line attention carried beside the ladder (escalation-
+	// delivery plan §6.2); the ladder above never reads it.
+	Owner ownerAttention
 }
 
 // Equal instants resolve by this precedence: a recorded end outranks a

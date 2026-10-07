@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "id": "tmb_01J8ZQ4M7T2V9K3NXW5R6YHBCJ",
+  "record_id": "ses_01J8ZQ4M7T2V9K3NXW5R6YHBCK",
+  "record_type": "session_content",
+  "deleted_at": "2026-10-02T15:00:00Z",
+  "deleted_by": {
+    "type": "user",
+    "id": "member"
+  },
+  "reason_class": "user-request",
+  "prior_content_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "required_projection_cleanup": []
+}

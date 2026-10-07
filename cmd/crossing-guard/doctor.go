@@ -18,6 +18,7 @@ package main
 import (
 	"crossing-guard/harvest"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,23 +29,53 @@ import (
 	"crossing-guard/internal/daemon"
 	"crossing-guard/internal/guardcli"
 	"crossing-guard/internal/memcli"
+	"crossing-guard/internal/platform"
 	"crossing-guard/store"
 )
 
 type doctorReport struct {
-	Service     serviceHealth          `json:"service"`
-	Capture     captureHealth          `json:"capture"`
-	Enforcement enforcementHealth      `json:"enforcement"`
-	Runtimes    []runtimeHealth        `json:"runtimes"`
-	Config      []configFile           `json:"config"`
-	Platform    daemon.PlatformSupport `json:"platform"`
-	Memory      memcli.DoctorReport    `json:"memory"`
+	Service     serviceHealth       `json:"service"`
+	Capture     captureHealth       `json:"capture"`
+	Enforcement enforcementHealth   `json:"enforcement"`
+	Runtimes    []runtimeHealth     `json:"runtimes"`
+	Config      []configFile        `json:"config"`
+	Platform    platform.Support    `json:"platform"`
+	Memory      memcli.DoctorReport `json:"memory"`
+	// SessionMessage is the agent-initiated send ledger's report-only probe
+	// (session-message-cross-vendor-plan §7): table presence and stuck-record
+	// count. Nil when the daemon is not answering or predates the ledger.
+	SessionMessage *daemon.SessionMessageHealth `json:"session_message,omitempty"`
 	// MemoryImport is the daemon's last import of vendor auto-memory into the
 	// store (daemon-memory-import plan D6); nil until the daemon has run one.
 	MemoryImport *daemon.MemoryImportState `json:"memory_import,omitempty"`
+	// MemorySynthesis is the session-synthesis step's counters for the UTC day
+	// (synthesis v1 plan): attempted, written, skipped-no-trigger, errors —
+	// from memory-synthesis-state.json beside the store; nil when the step
+	// has never run.
+	MemorySynthesis *daemon.SynthesisState `json:"memory_synthesis,omitempty"`
+	// TeamMemory is the linked device's shared-memory state (team item 5): counts of
+	// shared, received, shadowed, aliased, conflict copies, discarded edits and
+	// not_shareable rows. Nil when unlinked or the daemon is not answering.
+	TeamMemory *teamMemoryHealth `json:"team_memory,omitempty"`
+	// HandoffLeftovers names the checkouts that still hold a handoff file or marker
+	// block an earlier version wrote; `handoff clean <dir>` removes them.
+	HandoffLeftovers *handoffLeftoverHealth `json:"handoff_leftovers,omitempty"`
 	// ViewProfiles are the console's transcript view modules in use, each with
 	// its origin, and the module files that failed (transcript-view-profiles plan).
 	ViewProfiles viewProfilesHealth `json:"view_profiles"`
+	// Flows is the owner's flows.json as the daemon reads it (orchestration-
+	// flows pilot): each flow's id and name, and every rejected entry with
+	// its reason — a hand-authored file must never fail silently.
+	Flows flowsHealth `json:"flows"`
+	// Appearance lists the console's theme and appearance modules
+	// (session-view-and-console-preferences plan §C).
+	Appearance daemon.AppearanceHealth `json:"appearance"`
+	// Recall is each runtime's recall-tools registration and its consent
+	// (recall-mcp-v1-plan §3.7).
+	Recall []recallHealth `json:"recall"`
+	// ConsoleConfig is daemon.json as the running daemon holds it: its origin
+	// ("last-good" when a hand edit broke the file) and every problem.
+	ConsoleConfig consoleConfigHealth `json:"console_config"`
 	// Capabilities is the per-runtime capability parity matrix (agents redesign
 	// §4): which optional harvest capabilities each registered runtime actually
 	// implements, plus the interface_revision naming the provider CLI each
@@ -54,9 +85,23 @@ type doctorReport struct {
 	Capabilities map[string]harvest.CLICapability `json:"capabilities"`
 }
 
+type consoleConfigHealth struct {
+	Origin   string   `json:"origin"`
+	Problems []string `json:"problems"`
+	Note     string   `json:"note,omitempty"`
+}
+
 type viewProfilesHealth struct {
 	Profiles []daemon.ResolvedViewProfile  `json:"profiles"`
 	Rejected []daemon.ViewProfileRejection `json:"rejected"`
+}
+
+// flowsHealth is doctor's view of flows.json. Rejections carry the owner's
+// words; an absent file is an empty list, not a problem.
+type flowsHealth struct {
+	Origin   string                      `json:"origin"`
+	Flows    []daemon.SavedFlow          `json:"flows"`
+	Rejected []daemon.SavedFlowRejection `json:"rejected"`
 }
 
 type serviceHealth struct {
@@ -116,16 +161,28 @@ func doctorCmd(args []string) {
 	rep := doctorReport{
 		Enforcement:  enforcementSection(),
 		Config:       configSection(),
-		Platform:     daemon.CurrentPlatformSupport(),
+		Platform:     platform.Current(),
 		Memory:       memcli.MemoryDoctor(*recent),
 		Capabilities: harvest.CapabilityMatrix(),
+	}
+	if state, found, err := daemon.ReadSynthesisState(dataDir()); err == nil && found {
+		rep.MemorySynthesis = &state
 	}
 	if state, found, err := daemon.ReadMemoryImportState(dataDir()); err == nil && found {
 		rep.MemoryImport = &state
 	}
 	rep.ViewProfiles.Profiles, rep.ViewProfiles.Rejected = daemon.LoadViewProfiles(dataDir())
+	rep.Flows.Origin, rep.Flows.Flows, rep.Flows.Rejected = daemon.LoadFlowsHealth(dataDir())
+	rep.Appearance = daemon.LoadAppearanceHealth(dataDir())
+	rep.ConsoleConfig = readConsoleConfigHealth()
+	rep.Recall = recallSection()
 	var unattributed string
 	rep.Service, rep.Capture, rep.Runtimes, unattributed = liveSections()
+	if rep.Service.Running {
+		rep.SessionMessage = sessionMessageProbe()
+		rep.TeamMemory = teamMemoryProbe()
+		rep.HandoffLeftovers = handoffLeftoverProbe()
+	}
 
 	if *asJSON {
 		out, err := json.MarshalIndent(rep, "", "  ")
@@ -178,6 +235,21 @@ func configSection() []configFile {
 // whose evidence query failed then asserted "0 events on record" and "no event
 // has EVER arrived": confident facts fabricated from an error, in the one tool
 // whose job is refusing to do exactly that.
+// sessionMessageProbe reads the send ledger's report-only health: presence and stuck
+// count, never a write (session-message-cross-vendor-plan §7, RT-12). Nil when the
+// daemon cannot be reached or does not have the route.
+func sessionMessageProbe() *daemon.SessionMessageHealth {
+	loc, err := daemon.LocateConsole()
+	if err != nil {
+		return nil
+	}
+	var health daemon.SessionMessageHealth
+	if err := loc.GetJSON("/api/session-message/health", &health); err != nil {
+		return nil
+	}
+	return &health
+}
+
 func liveSections() (serviceHealth, captureHealth, []runtimeHealth, string) {
 	svc := serviceHealth{}
 	loc, err := daemon.LocateConsole()
@@ -195,14 +267,24 @@ func liveSections() (serviceHealth, captureHealth, []runtimeHealth, string) {
 
 	capture := captureHealth{}
 	var health struct {
-		Configured      bool  `json:"configured"`
-		LastEventTS     int64 `json:"last_event_ts"`
-		TotalEvents     int64 `json:"total_events"`
-		ObserveFailures int64 `json:"observe_failures"`
+		Configured      bool   `json:"configured"`
+		Problem         string `json:"problem"`
+		LastEventTS     int64  `json:"last_event_ts"`
+		TotalEvents     int64  `json:"total_events"`
+		ObserveFailures int64  `json:"observe_failures"`
 	}
-	if err := loc.GetJSON("/api/govern/health", &health); err != nil {
+	switch err := loc.GetJSON("/api/govern/health", &health); {
+	case err != nil:
 		capture.Note = "could not read capture health (" + err.Error() + ") — no verdict"
-	} else {
+	case !health.Configured:
+		// A degraded daemon: running, but its governor never opened. Nothing it holds
+		// is evidence about firing, so the ladder says "cannot verify", not "never".
+		capture.Note = "capture is off: the governor did not start"
+		if health.Problem != "" {
+			capture.Note = "capture is off: " + health.Problem
+		}
+		return svc, capture, runtimesFromConfig(nil), ""
+	default:
 		capture.Configured, capture.TotalEvents = health.Configured, health.TotalEvents
 		capture.ObserveFailures = health.ObserveFailures
 		if health.LastEventTS > 0 {
@@ -271,7 +353,7 @@ func runtimesFromConfig(evidence func(string) (int, int64)) []runtimeHealth {
 			h.Status = "BROKEN — its hook invokes " + r.HookBinary +
 				", which no longer exists. This runtime is NOT guarded. Repair: crossing-guard init"
 		case evidence == nil:
-			h.Status = "attached; cannot verify firing without the daemon"
+			h.Status = "attached; cannot verify firing without capture evidence from the daemon"
 		default:
 			h.Events, h.LastFired = evidence(r.Name)
 			switch {
@@ -315,6 +397,19 @@ func printDoctor(rep doctorReport, unattributed string) {
 	if rep.Capture.ObserveFailures > 0 {
 		fmt.Printf("  WARNING: %d action(s) were accepted and could NOT be persisted — capture is losing data\n",
 			rep.Capture.ObserveFailures)
+	}
+
+	fmt.Println("\nSESSION MESSAGE SENDS   (agent-initiated cross-vendor ledger; report only)")
+	if rep.SessionMessage == nil {
+		fmt.Println("  probe unavailable — the daemon is not answering or predates the send ledger")
+	} else {
+		fmt.Printf("  ledger     %s: %d invocation(s) on record\n", rep.SessionMessage.Table, rep.SessionMessage.Invocations)
+		if rep.SessionMessage.StuckRecords > 0 {
+			fmt.Printf("  WARNING: %d record(s) stuck without a terminal outcome; the sweeper settles them unknown\n",
+				rep.SessionMessage.StuckRecords)
+		} else {
+			fmt.Println("  no records stuck without a terminal outcome")
+		}
 	}
 
 	fmt.Println("\nENFORCEMENT")
@@ -387,6 +482,37 @@ func printDoctor(rep doctorReport, unattributed string) {
 		fmt.Printf("  skipped %s: %s\n", rejection.Path, rejection.Error)
 	}
 
+	fmt.Println("\nFLOWS   (flows.json — orchestration flows)")
+	fmt.Printf("  origin         %s\n", rep.Flows.Origin)
+	for _, flow := range rep.Flows.Flows {
+		fmt.Printf("  flow %-14s %s\n", flow.ID, flow.Name)
+	}
+	for _, rejection := range rep.Flows.Rejected {
+		fmt.Printf("  rejected [%d] %s: %s\n", rejection.Index, rejection.Name, rejection.Problem)
+	}
+
+	fmt.Println("\nAPPEARANCE   (console themes and appearance modules)")
+	for _, theme := range rep.Appearance.Themes {
+		fmt.Printf("  theme      %s\n", theme)
+	}
+	for _, module := range rep.Appearance.Appearances {
+		fmt.Printf("  appearance %s\n", module)
+	}
+	for _, rejection := range rep.Appearance.Rejected {
+		fmt.Printf("  skipped %s: %s\n", rejection.Path, rejection.Error)
+	}
+
+	fmt.Println("\nCONSOLE CONFIG   (daemon.json as the daemon holds it)")
+	if rep.ConsoleConfig.Note != "" {
+		fmt.Printf("  %s\n", rep.ConsoleConfig.Note)
+	} else {
+		fmt.Printf("  origin=%s\n", rep.ConsoleConfig.Origin)
+	}
+	for _, problem := range rep.ConsoleConfig.Problems {
+		fmt.Printf("  problem: %s\n", problem)
+	}
+
+	printRecall(rep.Recall)
 	fmt.Println("\nMEMORY   (injection is a SEPARATE attachment from the guard hook)")
 	fmt.Printf("  store: %s (%d records, %d pending)\n",
 		rep.Memory.Store, rep.Memory.Records, rep.Memory.Pending)
@@ -396,6 +522,16 @@ func printDoctor(rep doctorReport, unattributed string) {
 			rep.MemoryImport.Indexed, rep.MemoryImport.Errors, doctorErrorSuffix(rep.MemoryImport.Error))
 	} else {
 		fmt.Println("  daemon import: none recorded yet (runs on session end and the lifecycle sweep)")
+	}
+	if rep.TeamMemory != nil {
+		for _, line := range teamMemoryLines(rep.TeamMemory) {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+	if rep.HandoffLeftovers != nil {
+		for _, line := range rep.HandoffLeftovers.lines() {
+			fmt.Println("  " + line)
+		}
 	}
 	for _, v := range rep.Memory.Vendors {
 		// A count of verified injections is meaningless where nothing injects, and
@@ -422,4 +558,29 @@ func humanAge(sec int64) string {
 		return fmt.Sprintf("%dh", sec/3600)
 	}
 	return fmt.Sprintf("%dd", sec/86400)
+}
+
+// readConsoleConfigHealth asks the daemon, because only the running daemon
+// knows whether it is holding a last good value after a broken hand edit.
+func readConsoleConfigHealth() consoleConfigHealth {
+	var body struct {
+		Origin   string   `json:"origin"`
+		Problems []string `json:"problems"`
+	}
+	loc, err := daemon.LocateConsole()
+	if err == nil {
+		if problem := daemon.ProbeConsole(loc); problem != "" {
+			err = errors.New(problem)
+		}
+	}
+	if err == nil {
+		err = loc.GetJSON("/api/console/config", &body)
+	}
+	if err != nil {
+		return consoleConfigHealth{Problems: []string{}, Note: "could not read the console configuration from the daemon (" + err.Error() + ")"}
+	}
+	if body.Problems == nil {
+		body.Problems = []string{}
+	}
+	return consoleConfigHealth{Origin: body.Origin, Problems: body.Problems}
 }

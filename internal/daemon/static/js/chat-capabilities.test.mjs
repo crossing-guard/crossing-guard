@@ -35,3 +35,28 @@ assert.equal(runtimeChatDefaults(legacy, 'second').auth_token, undefined);
 assert.equal(runtimeChatDefaults(legacy, 'second').cwd, '/repo');
 
 console.log('chat-capabilities tests passed');
+
+// Runtime-reported model lists (runtime-model-catalog-and-usage design §10):
+// ids are opaque, unknown enum values degrade to unavailable, and the merged
+// picker keeps declared entries around the runtime's list.
+{
+  const { normalizeChatModels, modelPairs, isCustomModelOption, findDiscoveredModel } = await import('./chat-capabilities.js');
+  const alien = normalizeChatModels({ runtime: 'fakealpha', state: 'mystery', models: [
+    { id: 'a|b::c', label: 'Pipe', group: 'g1', group_label: '<b>G</b>', limits: { context_tokens: 8000 },
+      inputs: ['text', 'image'], price: { unit: 'credits', per_tokens: 1000, rates: [{ class: 'input', amount: 2 }] } },
+    { id: 'odd ?#&"<>/ ü', label: 'Odd' }, { id: '', label: 'dropped: no id' }, { label: 'dropped: no id either' },
+  ] }, 'fakealpha');
+  assert.equal(alien.state, 'unavailable', 'an unknown state never reads as fresh');
+  assert.deepEqual(alien.models.map(model => model.id), ['a|b::c', 'odd ?#&"<>/ ü']);
+  assert.equal(findDiscoveredModel(alien, 'odd ?#&"<>/ ü').label, 'Odd', 'ids round-trip byte for byte');
+  assert.equal(findDiscoveredModel(alien, 'a|b::c').contextTokens, 8000);
+
+  const capability = { models: [{ id: '', label: 'Default' }, { id: 'custom', label: 'Exact…', custom: true }] };
+  const pairs = modelPairs(capability, alien, ['odd ?#&"<>/ ü']);
+  assert.deepEqual(pairs.map(pair => pair[0]), ['', 'odd ?#&"<>/ ü', 'a|b::c', 'custom'],
+    'declared default, then pinned, then the rest, custom last');
+  assert.ok(pairs[1][1].startsWith('★ '), 'a pinned model is marked');
+  assert.ok(isCustomModelOption(capability, 'custom') && !isCustomModelOption(capability, 'a|b::c'),
+    'custom comes from the declared flag, never a sentinel id');
+  assert.deepEqual(modelPairs(capability).map(pair => pair[0]), ['', 'custom'], 'no list: declared entries only');
+}

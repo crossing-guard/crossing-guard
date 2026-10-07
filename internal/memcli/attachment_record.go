@@ -16,6 +16,16 @@ type attachmentRecord struct {
 	Version    int    `json:"version"`
 	Vendor     string `json:"vendor"`
 	ConfigPath string `json:"config_path"`
+	// AddedByAction is true only when an attach WROTE the entry: one found
+	// already present — added by hand, or by something else — is not this
+	// record's to remove (team rest-of-release plan §17.1 F-2). Binary is the
+	// executable that entry's command names, which is how a detach finds it.
+	AddedByAction bool   `json:"added_by_action,omitempty"`
+	Binary        string `json:"binary,omitempty"`
+	// CreatedFile is true when the attach that wrote the entry also created the
+	// settings file: there was none before. A detach that leaves such a file empty
+	// removes it, so the home is as it was before the attach.
+	CreatedFile bool `json:"created_file,omitempty"`
 }
 
 func attachmentRecordPath(vendor string) string {
@@ -40,12 +50,22 @@ func readAttachmentRecord(vendor string) (attachmentRecord, bool, error) {
 	return rec, true, nil
 }
 
-func recordAttachment(vendor, configPath string) error {
+// recordAttachment writes the evidence of one attach. wrote says the attach wrote
+// the entry for binary; when it did not, an earlier record of the same entry
+// keeps what it said, and anything else is recorded as not this action's. createdFile
+// says the attach created the settings file itself; it counts only with wrote.
+func recordAttachment(vendor, configPath, binary string, wrote, createdFile bool) error {
 	path := attachmentRecordPath(vendor)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	rec := attachmentRecord{Version: attachmentRecordVersion, Vendor: vendor, ConfigPath: configPath}
+	if wrote {
+		rec.AddedByAction, rec.Binary, rec.CreatedFile = true, binary, createdFile
+	} else if prior, found, err := readAttachmentRecord(vendor); err == nil && found &&
+		prior.ConfigPath == configPath && prior.Binary == binary {
+		rec.AddedByAction, rec.Binary, rec.CreatedFile = prior.AddedByAction, prior.Binary, prior.CreatedFile
+	}
 	raw, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
@@ -67,4 +87,12 @@ func recordAttachment(vendor, configPath string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// forgetAttachment removes the evidence of an attachment that was detached.
+func forgetAttachment(vendor string) error {
+	if err := os.Remove(attachmentRecordPath(vendor)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

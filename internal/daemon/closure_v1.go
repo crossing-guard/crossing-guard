@@ -84,6 +84,10 @@ func ingestClosureV1(g *Governor, e observation.ClosureEnvelope) (observation.Cl
 	// settled: the daemon imports it (daemon-memory-import plan D1b), off
 	// this path, throttled by memory.json.
 	requestMemoryImport("session-end")
+	// The same lifecycle moment, an independent step with no data dependency
+	// on the import (synthesis v1 plan §2 / DS-RT2): if the owner enabled it,
+	// draft at most one pending lesson candidate from this session's events.
+	requestMemorySynthesis(e.Runtime, e.SessionID)
 	if checkpoint.Status != "complete" {
 		go func(c store.SessionCheckpoint) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -109,7 +113,7 @@ func ingestClosureV1(g *Governor, e observation.ClosureEnvelope) (observation.Cl
 
 func handleGovernClosureV1(w http.ResponseWriter, r *http.Request) {
 	if governor == nil {
-		http.Error(w, "governor not configured", http.StatusServiceUnavailable)
+		http.Error(w, governorNotConfigured, http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, observation.MaxEnvelopeBytes)

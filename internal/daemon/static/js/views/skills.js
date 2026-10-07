@@ -7,8 +7,10 @@ import { hidePaneHost, showPaneHost } from "../pane-host.js";
 let skillsRepo = localStorage.getItem('cp_skills_repo') || '';
 let lastReport = null; // full /api/skills payload (probes live here, shared by overview + detail)
 
-const RUNTIMES = ['claude', 'codex', 'opencode'];
-const RT_CHIP = { claude: 'claude', codex: 'codex', opencode: 'cl-observed' };
+function runtimeNames() {
+  if (Array.isArray(lastReport?.providers)) return lastReport.providers.map(p => p.runtime);
+  return [...new Set((lastReport?.skills || []).flatMap(sk => Object.keys(sk.coverage || {})))].sort();
+}
 const CELL_CHIP = {
   'visible': 'st-verified', 'not-synced': 'st-draft', 'disabled': 'st-stale',
   'would-reject': 'st-stale', 'hidden-by-deny': 'st-stale',
@@ -22,10 +24,10 @@ provider({
   match: ctx => ctx.surface === 'skills' && !!ctx.selection,
   render: (ctx, box) => {
     const sk = ctx.selection;
-    for (const rt of RUNTIMES) {
+    for (const rt of runtimeNames()) {
       const c = sk.coverage[rt] || { state: 'unknown', grade: 'fs' };
       const row = el('div', 'row'); row.style.marginBottom = '6px';
-      row.append(el('span', 'chip ' + (RT_CHIP[rt] || 'st-draft'), rt),
+      row.append(el('span', 'chip cl-observed', rt),
         el('span', 'chip ' + (CELL_CHIP[c.state] || 'st-draft'), c.state),
         el('span', 'chip st-draft', c.grade));
       box.appendChild(row);
@@ -55,7 +57,7 @@ async function renderSkills() {
   // --- rail: repo-scope / rescan pin ---
   const rescanPin = el('div', 'railpin');
   rescanPin.innerHTML = '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5V5H11"/></svg><span>Rescan…</span>';
-  rescanPin.title = 'Set an optional repo dir to add .agents/.claude/.opencode repo scopes';
+  rescanPin.title = 'Set an optional repository directory to scan workspace skills';
   rescanPin.onclick = () => showRescan();
   side.appendChild(rescanPin);
 
@@ -73,7 +75,7 @@ async function renderSkills() {
       const row = el('div', 'sess'); row.dataset.skill = sk.name;
       row.appendChild(el('div', 't', sk.name));
       const meta = el('div', 'm');
-      for (const rt of RUNTIMES) {
+      for (const rt of runtimeNames()) {
         const c = sk.coverage[rt] || { state: 'unknown' };
         meta.appendChild(el('span', 'chip ' + (CELL_CHIP[c.state] || 'st-draft'), rt[0])).title = rt + ': ' + c.state;
       }
@@ -89,7 +91,7 @@ async function renderSkills() {
     listBox.querySelectorAll('.sess').forEach(x => x.classList.remove('sel'));
     center.innerHTML = '';
     center.appendChild(el('h3', '', 'Repo scope'));
-    center.appendChild(el('div', 'sub', 'Optional. Adds repo-local .agents / .claude / .opencode skill scopes on top of the home-dir scan.'));
+    center.appendChild(el('div', 'sub', 'Optional. Adds workspace skill directories read by registered runtimes to the home directory scan.'));
     const repoIn = el('input'); repoIn.placeholder = 'repo dir (optional)'; repoIn.style.cssText = 'width:100%;max-width:520px;margin:8px 0'; repoIn.value = skillsRepo;
     const rescan = el('button', 'btn primary', 'Rescan');
     rescan.onclick = async () => {
@@ -106,7 +108,7 @@ async function renderSkills() {
     center.innerHTML = '';
     const r = lastReport || {};
     if (!r.skills || !r.skills.length) {
-      center.appendChild(el('div', 'empty', 'No skills found in ~/.agents/skills, ~/.claude/skills, ~/.config/opencode/skills, or ~/.codex/skills' + (r.repo_dir ? ' (or repo scopes under ' + r.repo_dir + ')' : '') + '.'));
+      center.appendChild(el('div', 'empty', 'No skills found in registered runtime directories' + (r.repo_dir ? ' or workspace scopes under ' + r.repo_dir : '') + '.'));
       return;
     }
     center.appendChild(el('div', 'banner',
@@ -115,11 +117,11 @@ async function renderSkills() {
     const table = el('table', 'grid');
     const head = el('tr');
     head.appendChild(el('th', '', 'skill ↓ / runtime →'));
-    for (const rt of RUNTIMES) {
+    for (const rt of runtimeNames()) {
       const th = el('th'); th.append(rt + ' ');
-      if (rt !== 'claude') {
-        const pb = el('button', 'btn', 'probe'); pb.style.cssText = 'font-size:10px;padding:2px 8px;';
-        pb.title = rt === 'codex' ? 'Spawns codex app-server → skills/list (seconds)' : 'Runs opencode debug skill';
+      if ((r.providers || []).find(p => p.runtime === rt)?.can_probe) {
+        const pb = el('button', 'btn', 'probe'); pb.style.cssText = 'font-size:var(--fs-4);padding:2px 8px;';
+        pb.title = 'Enumerate skills from this runtime; may take several seconds';
         pb.onclick = async () => {
           pb.disabled = true; pb.textContent = 'probing…';
           try { lastReport = await api('/api/skills/probe', { method: 'POST', body: JSON.stringify({ runtime: rt, repo: skillsRepo }) });
@@ -127,7 +129,7 @@ async function renderSkills() {
           } catch (err) { pb.textContent = 'probe'; pb.disabled = false; alert('Probe failed: ' + (err.message || err)); }
         };
         th.appendChild(pb);
-      } else th.appendChild(el('span', 'chip st-draft', 'fs only'));
+      } else th.appendChild(el('span', 'chip st-draft', 'no live probe'));
       const pi = (r.probes || {})[rt];
       if (pi) th.appendChild(el('div', 'sub', pi.ok ? '[probed] ' + fmtTime(pi.at) : '✖ ' + (pi.err || '').slice(0, 60)));
       head.appendChild(th);
@@ -139,7 +141,7 @@ async function renderSkills() {
       th.onclick = () => { const row = listBox.querySelector('[data-skill="' + CSS.escape(sk.name) + '"]'); showSkill(sk, row); };
       if (sk.drift) th.appendChild(el('span', 'chip st-disputed', 'drift'));
       tr.appendChild(th);
-      for (const rt of RUNTIMES) {
+      for (const rt of runtimeNames()) {
         const c = sk.coverage[rt] || { state: 'unknown', grade: 'fs' };
         const td = el('td');
         const chip = el('span', 'chip ' + (CELL_CHIP[c.state] || 'st-draft'), c.state); chip.title = c.why || '';
@@ -161,15 +163,15 @@ async function renderSkills() {
     center.appendChild(h);
     if (sk.description) {
       center.appendChild(el('div', 'sub', sk.description));
-      center.appendChild(el('div', 'sub', 'description: ' + sk.description.length + ' / 1536 chars' + (sk.description.length > 1536 ? ' — TRUNCATED in Claude listings' : '')));
+      center.appendChild(el('div', 'sub', 'description: ' + sk.description.length + ' characters'));
     }
 
     // coverage detail (per runtime, with why/fix)
     center.appendChild(el('h2', '', 'Coverage'));
-    for (const rt of RUNTIMES) {
+    for (const rt of runtimeNames()) {
       const c = sk.coverage[rt] || { state: 'unknown', grade: 'fs' };
       const row = el('div', 'row'); row.style.marginBottom = '4px';
-      row.append(el('span', 'chip ' + (RT_CHIP[rt] || 'st-draft'), rt),
+      row.append(el('span', 'chip cl-observed', rt),
         el('span', 'chip ' + (CELL_CHIP[c.state] || 'st-draft'), c.state),
         el('span', 'chip st-draft', c.grade));
       center.appendChild(row);
@@ -181,7 +183,7 @@ async function renderSkills() {
     center.appendChild(el('h2', '', 'Locations'));
     for (const e of sk.entries) {
       const line = el('div', 'sub');
-      line.append(el('span', 'chip ' + (e.dir_class === 'claude' ? 'claude' : e.dir_class === 'codex' ? 'codex' : 'cl-observed'), e.dir_class + '/' + e.scope), ' ');
+      line.append(el('span', 'chip cl-observed', e.dir_class + '/' + e.scope), ' ');
       line.append((e.symlink ? '⇢ ' : '') + e.path.replace(/^\/Users\/[^/]+/, '~') + (e.symlink && e.target ? ' → ' + e.target.replace(/^\/Users\/[^/]+/, '~') : ''));
       line.append(' · #' + e.hash + ' · ' + e.files + ' files');
       if (e.vendor_managed) line.appendChild(el('span', 'chip cl-observed', 'vendor-managed'));

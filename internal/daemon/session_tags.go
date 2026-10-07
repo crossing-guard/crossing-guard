@@ -43,7 +43,7 @@ type sessionTag struct {
 	At int64 `json:"at,omitempty"`
 }
 
-const provenanceModelClaimed = "model-claimed"
+const provenanceModelClaimed = store.OrchestrationTagProvenance
 
 // railSession is a rail row with what the owner and his agents have said about
 // it. SessionSummary is embedded so the JSON stays flat, and every added field
@@ -57,6 +57,15 @@ type railSession struct {
 	Note  string       `json:"note,omitempty"`
 	// InViewSince is when the row came to satisfy the active query.
 	InViewSince int64 `json:"in_view_since,omitempty"`
+	// PlacedBy, InColumnSince and ObservedGroup are set only on a row a board
+	// read returns (board-observed-columns plan §2.2). PlacedBy says what put
+	// the row in the group it is listed under: the owner's tag, or one of the
+	// board's placement rules. InColumnSince is when: the tag's applied time,
+	// or when the row came to satisfy the rule. ObservedGroup is on a row the
+	// owner placed whose rules name another column: that column.
+	PlacedBy      string `json:"placed_by,omitempty"`
+	InColumnSince int64  `json:"in_column_since,omitempty"`
+	ObservedGroup string `json:"observed_group,omitempty"`
 	// TranscriptMissing marks a row the session scan did not return, served
 	// from what the owner's tag remembered. It says what was observed — no
 	// transcript was found — not why: the file may have been deleted, or its
@@ -206,8 +215,7 @@ func (s sessionTagSnapshot) decorate(row SessionSummary) railSession {
 	for _, id := range candidateIDs(row) {
 		for _, tag := range s.owner[id] {
 			if belongsTo(row, tag.Runtime, tag.SessionID) {
-				out.Tags = append(out.Tags, sessionTag{Key: tag.Key, Value: tag.Value,
-					Provenance: string(engine.UserAsserted), At: tag.AppliedAt})
+				out.Tags = append(out.Tags, ownerSessionTag(tag))
 			}
 		}
 		for _, tag := range s.agent[id] {
@@ -218,13 +226,11 @@ func (s sessionTagSnapshot) decorate(row SessionSummary) railSession {
 				continue
 			}
 			seenAgent[mark] = true
-			out.Tags = append(out.Tags, sessionTag{Value: tag.Tag, Provenance: provenanceModelClaimed,
-				By: tag.AgentKey, At: tag.AppliedAt})
+			out.Tags = append(out.Tags, agentSessionTag(tag))
 		}
 		for _, facet := range s.facets[id] {
 			if facet.Value != "" && belongsTo(row, "", facet.SessionID) {
-				out.Facts = append(out.Facts, sessionTag{Key: facet.Key, Value: facet.Value,
-					Provenance: facet.Provenance, At: facet.FirstSeen})
+				out.Facts = append(out.Facts, facetSessionTag(facet))
 			}
 		}
 		for _, note := range s.notes[id] {
@@ -235,6 +241,20 @@ func (s sessionTagSnapshot) decorate(row SessionSummary) railSession {
 	}
 	out.Tags, out.Facts = dedupeSessionTags(out.Tags), dedupeSessionTags(out.Facts)
 	return out
+}
+
+// ownerSessionTag, agentSessionTag and facetSessionTag are the one conversion
+// of each stored source into a rail tag, for decorate and snapshotVocabulary.
+func ownerSessionTag(tag store.SessionOwnerTag) sessionTag {
+	return sessionTag{Key: tag.Key, Value: tag.Value, Provenance: string(engine.UserAsserted), At: tag.AppliedAt}
+}
+
+func agentSessionTag(tag store.OrchestrationTag) sessionTag {
+	return sessionTag{Value: tag.Tag, Provenance: provenanceModelClaimed, By: tag.AgentKey, At: tag.AppliedAt}
+}
+
+func facetSessionTag(facet store.SessionStateFacet) sessionTag {
+	return sessionTag{Key: facet.Key, Value: facet.Value, Provenance: facet.Provenance, At: facet.FirstSeen}
 }
 
 // dedupeSessionTags drops repeats found under more than one candidate id and

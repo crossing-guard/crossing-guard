@@ -14,13 +14,13 @@ func TestOrchestrationProfileFrontendIsInertExplicitAndSafe(t *testing.T) {
 		}
 		return body
 	}
-	agentsPage := read("js/orchestration/settings-agents.js")
+	agentsPage := read("js/orchestration/agents/agent-dialog.js")
 	client := read("js/orchestration/profile-api.js")
 	view := read("js/orchestration/settings-profiles.js")
-	// Profile import lives on the Agents page (plan §9a, G-4): the importer
-	// composes standalone — importing creates the agent's card; there is no
-	// separate profile list surface.
-	for _, required := range []string{"settings-profiles.js", "renderProfileImporter(main"} {
+	// Profile import lives in the Agents pages' Import dialog
+	// (agents-settings-redesign plan §3.2): one importer, no separate
+	// profile list surface.
+	for _, required := range []string{"settings-profiles.js", "renderProfileImporter("} {
 		if !bytes.Contains(agentsPage, []byte(required)) {
 			t.Errorf("Agents page lost orchestration profile composition %q", required)
 		}
@@ -31,11 +31,11 @@ func TestOrchestrationProfileFrontendIsInertExplicitAndSafe(t *testing.T) {
 			t.Errorf("profile client lost exact selection contract %q", required)
 		}
 	}
-	for _, required := range []string{"Reusable profiles", "Selecting one does not run it",
-		"agent binding below", "file.arrayBuffer()", "Synthetic preview · no profile ran",
-		"Select exact revision", "Preview current bytes again", "Selected · inert", "textContent",
-		"Exact PROFILE.md source", "Normalized typed value", "Local profile storage", "await onSelected()",
-		"response.preview, onImported)"} {
+	// The importer's narration strings are gone (owner rule 2026-08-31: no
+	// system self-narration); the exact-bytes flow they described stays pinned.
+	for _, required := range []string{"file.arrayBuffer()", "selectProfile(sourceName, bytes, preview)",
+		"Preview current bytes again", "textContent", "source_digest", "bundle_digest",
+		"Normalized typed value", "await onSelected(result)", "response.preview, onImported)"} {
 		if !bytes.Contains(view, []byte(required)) {
 			t.Errorf("profile Settings flow lost %q", required)
 		}

@@ -1,0 +1,409 @@
+opencode/big-pickle
+{
+  "id": "big-pickle",
+  "providerID": "opencode",
+  "name": "Big Pickle",
+  "family": "big-pickle",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "input": 160000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2025-10-17",
+  "variants": {}
+}
+opencode/mimo-v2.6-flash-free
+{
+  "id": "mimo-v2.6-flash-free",
+  "providerID": "opencode",
+  "name": "MiMo-V2.6-Flash Free",
+  "family": "mimo",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": true,
+      "image": true,
+      "video": true,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2026-09-22",
+  "variants": {}
+}
+ollama/qwen2.5-coder:7b
+{
+  "id": "qwen2.5-coder:7b",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "name": "Qwen2.5 Coder 7B (local)",
+  "providerID": "ollama",
+  "capabilities": {
+    "temperature": false,
+    "reasoning": false,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "limit": {
+    "context": 0,
+    "output": 0
+  },
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "family": "",
+  "release_date": "",
+  "variants": {}
+}
+ollama-cloud/deepseek-v4-flash
+{
+  "id": "deepseek-v4-flash",
+  "providerID": "ollama-cloud",
+  "name": "deepseek-v4-flash",
+  "family": "deepseek-flash",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0.22,
+    "output": 0.66,
+    "cache": {
+      "read": 0.007,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 1048576,
+    "output": 1048576
+  },
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2026-04-24",
+  "variants": {
+    "high": {
+      "reasoningEffort": "high"
+    },
+    "max": {
+      "reasoningEffort": "max"
+    }
+  }
+}
+ollama-cloud/deepseek-v4.1-flash
+{
+  "id": "deepseek-v4.1-flash",
+  "providerID": "ollama-cloud",
+  "name": "DeepSeek V4.1 Flash",
+  "family": "deepseek-flash",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0.15,
+    "output": 0.6,
+    "cache": {
+      "read": 0.003,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 1048576,
+    "output": 384000
+  },
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2026-09-10",
+  "variants": {
+    "low": {
+      "reasoningEffort": "low"
+    },
+    "high": {
+      "reasoningEffort": "high"
+    },
+    "max": {
+      "reasoningEffort": "max"
+    }
+  }
+}
+ollama-cloud/kimi-k2.5
+{
+  "id": "kimi-k2.5",
+  "providerID": "ollama-cloud",
+  "name": "kimi-k2.5",
+  "family": "kimi-k2",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 262144,
+    "output": 262144
+  },
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2026-01-27",
+  "variants": {}
+}
+ollama-cloud/minimax-m2.5
+{
+  "id": "minimax-m2.5",
+  "providerID": "ollama-cloud",
+  "name": "minimax-m2.5",
+  "family": "minimax",
+  "api": {
+    "id": "SENTINEL-API-ID",
+    "url": "https://sentinel.invalid/SENTINEL-API-URL",
+    "npm": "SENTINEL-NPM"
+  },
+  "status": "active",
+  "headers": {
+    "Authorization": "SENTINEL-HEADER-SECRET"
+  },
+  "options": {
+    "apiKey": "SENTINEL-OPTIONS-APIKEY",
+    "baseURL": "https://sentinel.invalid/SENTINEL-BASEURL"
+  },
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 204800,
+    "output": 131072
+  },
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2026-02-12",
+  "variants": {}
+}

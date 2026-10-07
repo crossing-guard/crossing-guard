@@ -43,7 +43,7 @@ func bindSessionKindsFollower(t *testing.T, fixture agentHostFixture, bindingID 
 	binding, err := fixture.host.putBinding(managedBindingCommand{BindingID: bindingID,
 		ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest,
 		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", GrantedAuthority: []string{}, WatchNatural: watch,
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{}, WatchNatural: watch,
 		ExpectedStateToken: store.ManagedBindingAbsentToken(bindingID)})
 	if err != nil {
 		t.Fatal(err)
@@ -206,8 +206,13 @@ func TestNaturalSettleWindowHoldsFreshRows(t *testing.T) {
 // On the managed path a wildcard profile fires once per fact: the session
 // kind, never the superseded task kind alongside it (red-team H3).
 func TestManagedTaskFiresSessionKindOnceUnderWildcard(t *testing.T) {
-	driver := managedDynamicFixtureDriver{commandFor: func(ChatRequest) string {
-		return jsonTextCommand(`{"action":"no_action","message":"Noted.","citations":[]}`)
+	driver := managedDynamicFixtureDriver{commandFor: func(request ChatRequest) string {
+		claim := jsonTextCommand(`{"action":"no_action","message":"Noted.","citations":[]}`)
+		if strings.Contains(request.Prompt, "Crossing Guard") {
+			return claim
+		}
+		// The source reports its session, as every shipped runtime does.
+		return `printf '%s\n' '{"session_id":"ses-wild"}'; ` + claim
 	}}
 	fixture := newAgentHostFixture(t, driver)
 	source := strings.Replace(string(naturalFollowerProfileSource()), `stages:
@@ -218,7 +223,7 @@ func TestManagedTaskFiresSessionKindOnceUnderWildcard(t *testing.T) {
 	preview := selectManagedProfile(t, fixture.owner, []byte(source))
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-wild", ProfileID: preview.ProfileID,
 		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", GrantedAuthority: []string{}, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-wild")}); err != nil {
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{}, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-wild")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := fixture.tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "source", Cwd: fixture.root}, "wild-source"); err != nil {
@@ -265,7 +270,7 @@ func TestBoundaryCarrierEnqueuesClaimsAndSettles(t *testing.T) {
 	chatDrivers["claude"] = driver
 	authored := strings.ReplaceAll(string(courseCorrectorProfileSource()), "request-interrupt", "send-message")
 	profile := selectManagedProfile(t, fixture.owner, []byte(authored))
-	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-carrier", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: fixture.root, Runtime: "managed-fixture", GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-carrier")}); err != nil {
+	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-carrier", ProfileID: profile.ProfileID, ProfileSourceDigest: profile.SourceDigest, ProfileBundleDigest: profile.BundleDigest, ProjectRoot: fixture.root, RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{"send-message"}, AutoAction: true, ExpectedStateToken: store.ManagedBindingAbsentToken("agent-carrier")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := fixture.tasks.Create(ChatRequest{Runtime: "claude", Prompt: "Source", SessionID: "ses-carrier", Cwd: fixture.root}, "carrier-source"); err != nil {
@@ -346,7 +351,7 @@ func TestBoundaryCarrierEnqueuesClaimsAndSettles(t *testing.T) {
 	if capped.State != "unavailable" || !strings.Contains(capped.Detail, "pending_cap") {
 		t.Fatalf("cap outcome: %+v", capped)
 	}
-	fixture.host.expireSessionDeliveriesOnce()
+	fixture.host.expireDeliveriesOnce()
 	for _, id := range []string{"1", "2", "3"} {
 		record, found, err := fixture.host.ix.SessionDeliveryForRun("orun_cap" + id)
 		if err != nil || !found || record.State != "expired" {
@@ -457,25 +462,36 @@ func TestReplyOffNaturalSessionIsAnAttendedSessionOutcome(t *testing.T) {
 	// A profile meant for every session reads session-scoped context; the
 	// task-only final response would be honestly unavailable off a hook row.
 	source = strings.Replace(source, "  - kind: task.final-response\n    required: true", "  - kind: session.tags", 1)
+	// The natural source is a Codex session: an auto-reply resumes it with the
+	// binding's model, so the helper route is a hosted one the profile allows
+	// (a model the fixture runs locally would be refused at save for exactly
+	// that cross-runtime resume).
+	source = strings.Replace(source, "    - managed-turn\n", "    - managed-turn\n  destination:\n    locality: explicit-local-or-remote\n", 1)
 	preview := selectManagedProfile(t, fixture.owner, []byte(source))
 	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-reply-natural", ProfileID: preview.ProfileID,
 		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", GrantedAuthority: []string{"reply"}, AutoAction: true, WatchNatural: true,
+		RouteID: testRouteID(fixture.host, "managed-fixture", fixtureNonLocalModel, nil), GrantedAuthority: []string{"reply"}, AutoAction: true, WatchNatural: true,
 		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-reply-natural")}); err != nil {
 		t.Fatal(err)
 	}
 	appendNaturalTurn(t, fixture, "turn.ended", time.Now().Add(-10*time.Second).UnixMilli())
 	fixture.host.emitNaturalSignalsOnce()
-	runs := waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+	// Settled means the receipt left pending: the claim is stored before the
+	// delivery decision, so "completed" alone races the outcome write
+	// (escalation-delivery plan §4, RT-1e).
+	waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
 		for _, r := range runs {
-			// Completion precedes the capability-outcome merge; await both
-			// writes, then assert the exact suppression reason below.
-			if r.BindingID == "agent-reply-natural" && r.State == "completed" && r.Detail["auto_reply_suppressed"] != nil {
+			receipt, _ := r.Detail["delivery"].(map[string]any)
+			if r.BindingID == "agent-reply-natural" && r.State == "completed" && receipt != nil && receipt["state"] != "pending" {
 				return true
 			}
 		}
 		return false
 	})
+	// The capability outcome is merged after the run reads completed.
+	runs := runsFor(t, fixture, "agent-reply-natural")
+	waitForTerminalsHandled(t, fixture, runs)
+	runs = runsFor(t, fixture, "agent-reply-natural")
 	for _, run := range runs {
 		if run.BindingID != "agent-reply-natural" {
 			continue
@@ -674,5 +690,13 @@ func TestObserveBoundaryCarriesOnlyWhenTheToolRuns(t *testing.T) {
 	}
 	if observeBoundaryCarries(observation.Envelope{Carrier: false, Decision: "allow"}) {
 		t.Fatal("a hook that cannot print context never carries")
+	}
+	// With enforcement off the tool runs and the hook prints the reply's
+	// context, so a would-block allow carries like any other allow
+	// (enforcement-off-carrier-delivery plan D2).
+	wouldBlock := observation.Envelope{Carrier: true, Decision: "allow", Rule: "deny-alpha",
+		Reason: "WOULD BLOCK (Blocked by rule deny-alpha) — enforcement off: maintenance window"}
+	if !observeBoundaryCarries(wouldBlock) {
+		t.Fatal("a would-block allow is a boundary where the tool runs and must carry")
 	}
 }

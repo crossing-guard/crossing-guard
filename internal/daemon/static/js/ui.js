@@ -1,11 +1,12 @@
 // Shared UI components (loaders, chips-of-state, pill, help overlay, theme).
 import { $, el } from "./core.js";
 
-// --- theme: auto (OS) / dark / light, persisted ---
+// --- theme: live preview only. The scheme (auto / dark / light) is part of the
+// saved appearance the daemon renders as /appearance.css (appearance-api.js);
+// this only previews a scheme on this page, inline, and saves nothing.
 function applyTheme(mode) {
-  if (mode === 'dark' || mode === 'light') document.documentElement.dataset.theme = mode;
-  else delete document.documentElement.dataset.theme;
-  localStorage.setItem('cp_theme', mode || 'auto');
+  if (mode === 'dark' || mode === 'light') document.documentElement.style.setProperty('color-scheme', mode);
+  else document.documentElement.style.removeProperty('color-scheme');
 }
 
 // The checkpoint mark (our own; never the asterisk glyph which is vendor IP).
@@ -137,6 +138,50 @@ function attachBottomPill(scroller, id) {
   update();
   return update; // callers may nudge after appending content
 }
+
+const END_FOLLOW_THRESHOLD = 60;
+
+function atScrollEnd(scroller, threshold = END_FOLLOW_THRESHOLD) {
+  if (!scroller) return true;
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= threshold;
+}
+
+// Capture before background transcript work and restore after it. A stable row
+// keeps the same text under the reader even when reconciliation inserts rows
+// above it; following readers stay attached to the newest output.
+function captureTranscriptPosition(scroller, log, threshold = END_FOLLOW_THRESHOLD) {
+  if (!scroller) return { following: true, scrollTop: 0, key: '', predecessors: [], offset: 0 };
+  const following = atScrollEnd(scroller, threshold);
+  const captured = { following, scrollTop: scroller.scrollTop, key: '', predecessors: [], offset: 0 };
+  if (following || !log) return captured;
+  const viewportTop = scroller.getBoundingClientRect?.().top || 0;
+  const rows = Array.from(log.children || []).filter(row => row?.dataset?.transcriptKey);
+  const index = rows.findIndex(row => (row.getBoundingClientRect?.().bottom ?? viewportTop) > viewportTop);
+  if (index < 0) return captured;
+  const row = rows[index];
+  captured.key = row.dataset.transcriptKey;
+  captured.offset = (row.getBoundingClientRect?.().top ?? viewportTop) - viewportTop;
+  captured.predecessors = rows.slice(0, index).reverse().map(item => item.dataset.transcriptKey);
+  return captured;
+}
+
+function restoreTranscriptPosition(scroller, log, captured) {
+  if (!scroller || !captured) return;
+  if (captured.following) {
+    scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
+  const keys = [captured.key, ...(captured.predecessors || [])].filter(Boolean);
+  const rows = Array.from(log?.children || []);
+  const row = keys.map(key => rows.find(item => item?.dataset?.transcriptKey === key)).find(Boolean);
+  if (!row) {
+    scroller.scrollTop = captured.scrollTop;
+    return;
+  }
+  const viewportTop = scroller.getBoundingClientRect?.().top || 0;
+  const desiredOffset = row.dataset.transcriptKey === captured.key ? captured.offset : 0;
+  scroller.scrollTop += (row.getBoundingClientRect?.().top ?? viewportTop) - viewportTop - desiredOffset;
+}
 /* ? — shortcut help overlay (item 7) */
 function toggleHelp() {
   const existing = $('#helpcard');
@@ -154,4 +199,5 @@ function toggleHelp() {
   document.body.appendChild(card);
 }
 
-export { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp, authRecovery };
+export { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp, authRecovery,
+  END_FOLLOW_THRESHOLD, atScrollEnd, captureTranscriptPosition, restoreTranscriptPosition };

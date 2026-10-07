@@ -1,15 +1,22 @@
-import { $, el, cpHeaders, api, fmtTime, normMemId, mdToHtml, debounce, fillSelect, mkSelectKV, fmtTok, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults } from "../core.js";
-import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp } from "../ui.js";
+import { $, el, cpHeaders, api, fmtTime, normMemId, mdToHtml, debounce, fillSelect, mkSelectKV, fmtTok, fmtCost, fmtCostBasis, fmtLimit, fmtPrice, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults } from "../core.js";
+import { takeOpenComposer } from "../handoff/handoff-composer.js";
+import { countLiveTurn, clearLiveTurns } from "../handoff/live-turns.js";
+import { applyTheme, mkMark, mkLoader, mkSkeletons, withState, attachBottomPill, toggleHelp, atScrollEnd } from "../ui.js";
 import { S } from "../state.js";
 import { renderTranscript } from "./sessions.js";
 import { taskProjectionStore } from "../task/task-projection-store.js";
-import { createRuntimeTask, interruptRuntimeTask } from "../task/task-api.js";
-import { progressWords } from "../task/session-status.js";
+import { createRuntimeTask, interruptRuntimeTask, sessionEffort, previewEffort } from "../task/task-api.js";
+import { createActivityLine } from "../session/activity-line.js";
+import { sessionActivityStore } from "../session/session-activity-store.js";
 import { createComposer } from "../task/composer.js";
 import { createAttachments } from "../task/attachments.js";
 import { createDictation } from "../task/dictation.js";
 import { hasRenderableText, isVendorTurnEvidence } from "../task/task-event-semantics.js";
-import { loadChatCapabilities, findChatCapability, chooseChatCapability, capabilityPairs, modePairs, modelPairs, runtimeChatDefaults } from "../chat-capabilities.js";
+import { loadChatCapabilities, findChatCapability, chooseChatCapability, capabilityPairs, modePairs, modelPairs, runtimeChatDefaults, loadChatModels, findDiscoveredModel, isCustomModelOption, modelHint } from "../chat-capabilities.js";
+
+import { effortCaption, effortDetail } from "../task/thinking-effort-history.js";
+import { createEffortState } from "../task/thinking-effort-state.js";
+import { createEffortPicker } from "../task/thinking-effort.js";
 
 /* ---------- chat ----------
    Keep-alive is now the router's job (app.js: chat is a 'pin' view). renderChat
@@ -27,7 +34,7 @@ import { loadChatCapabilities, findChatCapability, chooseChatCapability, capabil
    (`existingLog`) instead of building a second #chatlog — rendering the events
    twice, and nesting a viewport-height scroller inside the pane's, was the
    Track 2.6 mount bug. New turns append to the transcript the user is reading. */
-async function renderChat(container, inline, existingLog) {
+async function renderChat(container, inline, existingLog, sessionActivity = null) {
   const main = container || $('#main');
   if (!inline) main.innerHTML = '';
   // Consume preload before the first await. The app-owned synchronous mount event
@@ -55,13 +62,16 @@ async function renderChat(container, inline, existingLog) {
   const chatState = { sessionId: null, runtime: '', origin: null, liveTurns: 0 };
   const wrap = el('div'); wrap.id = 'chatwrap';
   const defs = getDefaults();
+  // A new chat opened for a handoff carries it with its first prompt (team
+  // rest-of-release plan §6.3): the runtime and the folder are the Open's.
+  const handoffOpen = inline ? null : takeOpenComposer();
   const scopedCwd = !inline && typeof S.chatCwd === 'string' ? S.chatCwd : '';
-  chatState.runtime = chooseChatCapability(capabilities, preload?.runtime || defs.runtime).runtime;
+  chatState.runtime = chooseChatCapability(capabilities, handoffOpen?.runtime || preload?.runtime || defs.runtime).runtime;
   // inline = the live mode of a session: the session's own header already names
   // it, so a second "Fallback chat" heading would rename the user's session.
   if (!inline) {
-    wrap.appendChild(el('h2', '', 'Fallback chat'));
-    wrap.appendChild(el('div', 'sub', 'Drives a registered, already-installed coding harness. Crossing Guard does not host its model or take custody of its provider credentials.'));
+    wrap.appendChild(el('h2', 'chat-heading', handoffOpen ? 'New session' : 'Fallback chat'));
+    wrap.appendChild(el('div', 'sub chat-heading-sub', 'Drives a registered, already-installed coding harness. Crossing Guard does not host its model or take custody of its provider credentials.'));
     if (scopedCwd) {
       const scope = el('div', 'chat-scope');
       scope.append(el('span', 'chat-scope-label', 'New chat in'), el('code', '', scopedCwd));
@@ -101,16 +111,16 @@ async function renderChat(container, inline, existingLog) {
     sendIntent: () => { void doSend(); },
     loadFiles: async query => api('/api/files?q=' + encodeURIComponent(query) + '&cwd=' + encodeURIComponent(cwd.value || '')),
   });
-  const { root: composer, controls: below } = composerController;
+  const { root: composer, box: composerBox, sendRow, controls: below } = composerController;
   // The mode warning lives OUTSIDE the composer's border. Inside it, it read as
   // text someone had typed into the prompt.
 
   const currentCapability = () => findChatCapability(capabilities, chatState.runtime);
   const attachmentController = createAttachments({
-    root: composer, controls: below, capability: currentCapability(),
+    root: composerBox, controls: below, anchor: sendRow, capability: currentCapability(),
     storageKey: 'cg_task_inputs:' + (preload?.harvestId || preload?.sessionId || (inline ? 'inline' : 'new')),
   });
-  const dictationController = createDictation({ root: composer, controls: below, composer: composerController,
+  const dictationController = createDictation({ root: composerBox, controls: below, anchor: sendRow, composer: composerController,
     cwd: () => cwd.value });
   // Auto-send never doubles as Stop: while a turn runs the dictated text stays
   // in the draft for the user to send afterwards.
@@ -121,8 +131,73 @@ async function renderChat(container, inline, existingLog) {
   selMode.className = 'ctl'; selMode.title = 'Mode — what the process may do';
   const selModel = mkSelectKV(modelPairs(currentCapability()), '');
   selModel.className = 'ctl'; selModel.title = 'Model';
-  const customModel = el('input', 'ctl hidden'); customModel.placeholder = currentCapability().modelHint;
-  selModel.onchange = () => customModel.classList.toggle('hidden', selModel.value !== 'custom');
+  const customModel = el('input', 'ctl hidden'); customModel.placeholder = modelHint(currentCapability());
+  // The runtime's own model list (design §5.1): a compact state label when it
+  // is not fresh, the selected model's stated facts, and a pin toggle. Reasons
+  // live in Settings, never in the composer.
+  const modelLists = {};
+  const modelRequests = {};
+  let effortState = null, effortPicker = null, legacySettings = null, legacyKey = '', legacyPromise = null, legacyProblem = '';
+  const modelState = el('span', 'model-state hidden');
+  const modelFacts = el('span', 'model-facts');
+  const pinBtn = el('button', 'iconbtn hidden', '☆');
+  // Pins live under their own key: never inside a runtime's account fields,
+  // which Settings replaces on save and legacy defaults spread into.
+  const pins = runtime => {
+    const stored = getDefaults().pinned_models?.[runtime];
+    return Array.isArray(stored) ? stored : [];
+  };
+  const isCustom = () => isCustomModelOption(currentCapability(), selModel.value);
+  function syncModelFacts() {
+    syncEffort();
+    customModel.classList.toggle('hidden', !isCustom());
+    const model = findDiscoveredModel(modelLists[chatState.runtime], selModel.value);
+    pinBtn.classList.toggle('hidden', !model);
+    if (!model) { modelFacts.textContent = ''; modelFacts.title = ''; return; }
+    const pinned = pins(chatState.runtime).includes(model.id);
+    pinBtn.textContent = pinned ? '★' : '☆';
+    pinBtn.title = pinned ? 'Unpin this model' : 'Pin this model to the top of the list';
+    modelFacts.textContent = [model.contextTokens ? fmtLimit(model.contextTokens) : '',
+      model.inputs.includes('image') ? 'image' : ''].filter(Boolean).join(' · ');
+    modelFacts.title = [fmtLimit(model.contextTokens), model.price ? fmtPrice(model.price) + ' (runtime-stated)' : 'price unknown',
+      model.description].filter(Boolean).join('\n');
+  }
+  function fillModels(runtime, value) {
+    const list = modelLists[runtime];
+    fillSelect(selModel, modelPairs(currentCapability(), list, pins(runtime)), '');
+    if (value && ![...selModel.options].some(option => option.value === value)) {
+      const option = document.createElement('option'); option.value = value; option.textContent = value + ' (unavailable)'; selModel.appendChild(option);
+    }
+    selModel.value = value;
+    const state = list?.state || '';
+    // A list being refreshed in the background is normal; only a failed read
+    // is worth a label (the reason is in Settings).
+    const failed = state === 'unavailable' || (state === 'stale' && list?.reasonCode);
+    modelState.textContent = failed ? 'models: ' + (state === 'stale' ? 'out of date' : 'unavailable') : '';
+    modelState.classList.toggle('hidden', !modelState.textContent);
+    modelState.title = modelState.textContent ? 'Refresh models in this picker; details in Settings → Models' : '';
+    syncModelFacts();
+  }
+  function loadModels(runtime, refresh = false) {
+    const generation = (modelRequests[runtime] || 0) + 1;
+    modelRequests[runtime] = generation;
+    return loadChatModels(runtime, { refresh }).then(list => {
+      if (modelRequests[runtime] !== generation) return;
+      modelLists[runtime] = list;
+      if (wrap.isConnected && chatState.runtime === runtime) fillModels(runtime, selModel.value);
+    });
+  }
+  selModel.onchange = syncModelFacts;
+  customModel.addEventListener('input', syncModelFacts);
+  pinBtn.onclick = () => {
+    const runtime = chatState.runtime, id = selModel.value;
+    const defaults = getDefaults();
+    const current = pins(runtime);
+    defaults.pinned_models = { ...(defaults.pinned_models || {}),
+      [runtime]: current.includes(id) ? current.filter(item => item !== id) : [...current, id] };
+    setDefaults(defaults);
+    fillModels(runtime, id);
+  };
 
   // Switching runtime refills mode/model, but a round trip (claude → codex →
   // claude) must not silently discard what the user had picked, so each
@@ -135,12 +210,13 @@ async function renderChat(container, inline, existingLog) {
     chatState.runtime = target; curRuntime = target;
     const capability = currentCapability();
     fillSelect(selMode, modePairs(capability), '');
-    fillSelect(selModel, modelPairs(capability), '');
-    customModel.placeholder = capability.modelHint;
+    fillModels(target, '');
+    loadModels(target);
+    customModel.placeholder = modelHint(capability);
     syncModeNote(); // the mode list just changed; the warning must follow it
     const remembered = selMemory[target];
     if (remembered) { selMode.value = remembered.mode || ''; selModel.value = remembered.model || ''; }
-    customModel.classList.toggle('hidden', selModel.value !== 'custom');
+    syncModelFacts();
     attachmentController.setCapability(capability);
   }
 
@@ -170,16 +246,67 @@ async function renderChat(container, inline, existingLog) {
   selMode.addEventListener('change', syncModeNote);
 
   const gearBtn = el('button', 'iconbtn', '⚙');
-  gearBtn.title = 'Settings — endpoint, token, binary';
-  gearBtn.onclick = () => document.dispatchEvent(new CustomEvent('cg:nav', { detail: 'settings' }));
-  const newBtn = el('button', 'iconbtn', '＋'); newBtn.title = 'New session';
+  gearBtn.title = 'Settings → Runtimes: endpoint, token, binary';
+  gearBtn.onclick = () => {
+    document.dispatchEvent(new CustomEvent('cg:settings-subpage', { detail: 'runtimes' }));
+    document.dispatchEvent(new CustomEvent('cg:nav', { detail: 'settings' }));
+  };
+  const newBtn = el('button', 'iconbtn', '✎'); newBtn.title = 'New session';
 
   const status = el('div', 'status');
   const sessBadge = el('span', '', 'new session');
   const costBadge = el('span', '', '');
   status.append(sessBadge, costBadge);
+  let turnUsage = null, turnSeconds = '';
 
-  below.prepend(selRuntime, selMode, selModel, customModel, cwd, gearBtn, newBtn, status);
+  effortPicker = createEffortPicker({ modelControls: [selModel, pinBtn, modelState, modelFacts, customModel],
+    onChange: value => { void effortState.choose(value).then(syncEffort); }, onReload: () => { void effortState.reload(); }, onRetry: () => { void effortState.retry(); }, onRefresh: force => loadModels(chatState.runtime, force) });
+  effortState = createEffortState({ active: () => wrap.isConnected, transport: sessionEffort, changed: paintEffort });
+  below.prepend(selRuntime, selMode, effortPicker.node, cwd, gearBtn, newBtn, status);
+  function paintEffort() {
+    if (!effortState || !effortPicker) return;
+    const state = effortState.snapshot();
+    const list = modelLists[chatState.runtime];
+    const model = findDiscoveredModel(list, modelFields().model);
+    const overrides = acct().binary || acct().base_url || acct().auth_token || acct().oss || acct().local_provider;
+    const wrongScope = model?.effort && (state.context.session_id ? !model.effort.can_resume : !model.effort.can_start);
+    effortPicker.update({ ...state, error: state.error || legacyProblem, model: selModel.selectedOptions[0]?.textContent || 'Session / configured default',
+      modelId: modelFields().model, capability: model?.effort, legacy: !state.selection && legacySettings?.thinking_effort_label ? legacySettings.thinking_effort_label + ' · Settings' : '',
+      unavailable: wrongScope ? 'This model does not support effort for this turn.' : overrides ? 'Effort options are unavailable for overridden runtime settings.' : list?.state !== 'fresh' ? 'Model options are not verified. Refresh models to try again.' : '' });
+  }
+  function syncEffort() {
+    if (!effortState) return;
+    const origin = chatState.origin;
+    effortState.setContext({ runtime: chatState.runtime, model: modelFields().model,
+      session_id: origin && origin.runtime === chatState.runtime ? origin.harvestId || origin.resumeId : '' });
+    paintEffort();
+    void refreshLegacyEffort().catch(() => {});
+  }
+  async function refreshLegacyEffort() {
+    if (!effortState) return null;
+    const request = { runtime: chatState.runtime, model: modelFields().model, extra_args: acct().extra_args || '',
+      thinking_effort: effortState.snapshot().selection || undefined };
+    const key = JSON.stringify(request);
+    if (key === legacyKey) return legacyPromise;
+    legacyKey = key;
+    legacyPromise = (async () => {
+      try {
+        const result = request.extra_args ? await previewEffort(request) : null;
+        if (key === legacyKey) { legacySettings = result; legacyProblem = ''; paintEffort(); }
+        return result;
+      } catch (error) {
+        if (key === legacyKey) { legacySettings = null; legacyProblem = error.detail || error.message; paintEffort(); }
+        throw error;
+      }
+    })();
+    return legacyPromise;
+  }
+  effortPicker.node.addEventListener('click', () => { void refreshLegacyEffort().catch(() => {}); });
+  // Toolbar order, as in the Claude and Codex apps: what adds to the message
+  // (attach, dictate) first, the session's status last.
+  below.prepend(...below.querySelectorAll('.attachment-add, .dictation-mic'));
+  below.appendChild(status);
+  loadModels(chatState.runtime);
   syncModeNote();
   // The gate lives in the COMPOSER block, never in the scroll pane — inserting it
   // above the transcript would move the reader's scroll anchor.
@@ -192,6 +319,29 @@ async function renderChat(container, inline, existingLog) {
   const shareWarn = el('div', 'share-warn hidden');
   shareWarn.setAttribute('role', 'alert');
   composer.prepend(gate, authGate, shareWarn);
+  if (handoffOpen) {
+    // The handoff shows above the reply box. Its runtime and folder were chosen
+    // in the Open sheet, so neither is a control here until the session exists.
+    composer.prepend(handoffOpen.strip());
+    selRuntime.disabled = true;
+    cwd.classList.add('hidden');
+    // "Open again…" in the same runtime starts from what the last Open was sent with.
+    const kept = handoffOpen.choice();
+    if (kept) {
+      if ([...selMode.options].some(option => option.value === kept.mode)) selMode.value = kept.mode;
+      fillModels(chatState.runtime, kept.model);
+    }
+  }
+  // handoffSent runs once the Open's first prompt was accepted: the session exists
+  // now, so the chat is named for what it continues and the runtime is a control again.
+  function handoffSent() {
+    handoffOpen.sent({ mode: selMode.value, model: selModel.value });
+    selRuntime.disabled = false;
+    const named = handoffOpen.heading();
+    const heading = wrap.querySelector('.chat-heading'), under = wrap.querySelector('.chat-heading-sub');
+    if (heading) heading.textContent = named.title;
+    if (under) under.textContent = named.continues;
+  }
   let allowSharedSession = false;
   function clearShareWarn() { shareWarn.classList.add('hidden'); shareWarn.innerHTML = ''; }
   function showShareWarn(message) {
@@ -206,6 +356,23 @@ async function renderChat(container, inline, existingLog) {
     cancel.onclick = clearShareWarn;
     shareWarn.append(again, cancel);
   }
+  // The activity line sits directly above the composer. Inline, the session
+  // view already owns it (with the rail and live inputs); standalone Chat has
+  // only this composer's own turns to report.
+  const lane = sessionActivity || createActivityLine();
+  if (!sessionActivity) wrap.appendChild(lane.root);
+  // Standalone Chat has no session view feeding the rail item, so once the
+  // vendor names its session the line follows that session's rail item too:
+  // an approval raised mid-turn then wins over the composer's own words.
+  let stopRail = null;
+  const followRail = sessionId => {
+    if (sessionActivity || !sessionId) return;
+    if (stopRail) stopRail();
+    stopRail = sessionActivityStore.subscribe(() => {
+      if (!wrap.isConnected) { if (stopRail) stopRail(); return; }
+      lane.setRail(sessionActivityStore.activity(chatState.runtime, sessionId));
+    });
+  };
   wrap.appendChild(composer);
   wrap.appendChild(modeNote);
   main.appendChild(wrap);
@@ -260,9 +427,9 @@ async function renderChat(container, inline, existingLog) {
     gate.innerHTML = '';
     gate.classList.remove('hidden');
     gate.appendChild(el('div', 'gate-h', `⚠ ${capitalize(target)} can't resume this ${capitalize(live.runtime)} session.`));
-    gate.appendChild(el('div', 'sub', 'Continuing generates a handoff extract you review before it is written.'));
+    gate.appendChild(el('div', 'sub', 'Continuing hands this session off on this device. You review what the new session is given; nothing leaves this device.'));
     const row = el('div', 'row');
-    const review = el('button', 'btn primary', 'Review handoff →');
+    const review = el('button', 'btn primary', `Continue in ${capitalize(target)}…`);
     review.onclick = () => openHandoff();
     const fresh = el('button', 'btn', `Start a fresh ${capitalize(target)} session`);
     fresh.onclick = () => { clearGate(); chatState.origin = null; newSession(); };
@@ -270,7 +437,7 @@ async function renderChat(container, inline, existingLog) {
     gate.appendChild(row);
     // Enter changes meaning while the gate is up; say so rather than silently
     // reassigning it.
-    gate.appendChild(el('div', 'sub', 'Enter → review handoff · "fresh session" does not carry the transcript above'));
+    gate.appendChild(el('div', 'sub', 'Enter → continue · "fresh session" does not carry the transcript above'));
   }
 
   /* Routed over the document bus rather than importing sessions.js here:
@@ -282,6 +449,7 @@ async function renderChat(container, inline, existingLog) {
     document.dispatchEvent(new CustomEvent('cg:handoff', { detail: {
       runtime: live.runtime, id: live.harvestId, liveTurns: chatState.liveTurns,
       target: chatState.runtime, // where the user is continuing TO
+      cwd: live.cwd || '',       // the folder the session being continued runs in
     } }));
   }
 
@@ -297,7 +465,7 @@ async function renderChat(container, inline, existingLog) {
   // resolve the compact selectors into request fields
   function modelFields() {
     const v = selModel.value;
-    if (v === 'custom') return { model: customModel.value.trim() };
+    if (isCustom()) return { model: customModel.value.trim() };
     return { model: v };
   }
 
@@ -318,13 +486,14 @@ async function renderChat(container, inline, existingLog) {
     clearShareWarn();
     if (inline) { document.dispatchEvent(new CustomEvent('cg:continue', { detail: { fresh: true } })); return; }
     chatState.sessionId = null;
+    if (chatState.origin) clearLiveTurns({ runtime: chatState.origin.runtime, id: chatState.origin.harvestId });
     chatState.origin = null; chatState.liveTurns = 0; // a new session is bound to nothing
-    sessBadge.textContent = 'new session'; costBadge.textContent = '';
+    sessBadge.textContent = 'new session'; costBadge.textContent = ''; turnUsage = null; turnSeconds = '';
     log.innerHTML = '';
+    syncEffort();
   }
   newBtn.onclick = newSession;
 
-  const scrolled = () => scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 60;
   const pillUpdate = inline ? () => {} : attachBottomPill(log, 'pill-chat');
   const stick = wasAtBottom => { if (wasAtBottom) scroller.scrollTop = scroller.scrollHeight; else pillUpdate(); };
 
@@ -366,7 +535,7 @@ async function renderChat(container, inline, existingLog) {
     return det;
   }
 
-  let running = false, activeTaskID = null;
+  let running = false, preparing = false, activeTaskID = null;
   async function interruptActive() {
     if (!running || !activeTaskID) return false;
     await interruptRuntimeTask(activeTaskID);
@@ -383,11 +552,35 @@ async function renderChat(container, inline, existingLog) {
   wrap.addEventListener('pointerdown', announceActive);
   announceActive();
 
+  // One badge per turn: the daemon's running total, the context bar's figure,
+  // and elapsed time. Absent figures are left out; the title says what is unknown.
+  function renderTurnBadge() {
+    const total = turnUsage?.turn_total || {};
+    const context = turnUsage?.context || {};
+    const tokens = [total.input, total.cache_read, total.cache_write, total.output].filter(v => v != null);
+    const used = context.used, windowSize = context.window;
+    costBadge.textContent = [
+      turnUsage ? (total.cost?.length ? fmtCost(total.cost) : 'cost unknown') : '',
+      tokens.length ? fmtTok(tokens.reduce((a, b) => a + b, 0)) + ' tok' : '',
+      used != null && windowSize ? Math.min(100, Math.round(used / windowSize * 100)) + '% ctx' : '',
+      turnSeconds,
+    ].filter(Boolean).join(' · ');
+    costBadge.title = turnUsage ? [
+      'input ' + (total.input ?? 'unknown') + ' · cache read ' + (total.cache_read ?? 'unknown') +
+        ' · cache write ' + (total.cache_write ?? 'unknown') + ' · output ' + (total.output ?? 'unknown') +
+        (total.reasoning != null ? ' (reasoning ' + total.reasoning + ')' : ''),
+      ...(total.other || []).map(item => item.label + ' ' + item.count),
+      total.cost?.length ? fmtCost(total.cost) + ' — ' + fmtCostBasis(total.cost) : 'cost not stated by the runtime',
+      used != null ? 'context ' + fmtTok(used) + (windowSize ? ' of ' + fmtTok(windowSize) : ' (window unknown)') : '',
+    ].filter(Boolean).join('\n') : '';
+  }
+
   async function doSend() {
     if (running) {
       interruptActive().catch(error => log.appendChild(el('div', 'sysline err', '✖ ' + String(error))));
       return;
     } // Send button doubles as explicit task Stop
+    if (preparing) return;
     // The ownership override is consumed here, once, on every exit path: it
     // applies to this send attempt and to nothing after it, by construction.
     const allowShared = allowSharedSession;
@@ -406,7 +599,12 @@ async function renderChat(container, inline, existingLog) {
     }
     const prompt = composerController.draft();
     if (!prompt) return;
-    const fields = modelFields();
+    const destination = () => JSON.stringify([chatState.runtime, chatState.sessionId, modelFields(), selMode.value, cwd.value, acct(), effortState.snapshot().selection]);
+    const beforeDestination = destination(), beforeDraft = composerController.revision();
+    preparing = true;
+    let effortFields, fields;
+    try {
+    fields = modelFields();
     if (needsVendorAuth()) {
       try {
         if (!await refreshVendorAuth()) return; // prompt remains in the composer
@@ -416,36 +614,67 @@ async function renderChat(container, inline, existingLog) {
         log.appendChild(el('div', 'sysline', 'Auth preflight unavailable — attempting the turn.'));
       }
     }
+    syncEffort();
+      if (effortState.snapshot().pendingIdentity) await effortState.reload();
+      const legacy = await refreshLegacyEffort();
+      effortFields = effortState.request({ legacy: legacy?.source === 'legacy' });
+      fields = modelFields();
+      const selected = effortFields.thinking_effort;
+      const evidence = findDiscoveredModel(modelLists[chatState.runtime], fields.model)?.effort;
+      if (selected?.kind === 'level' && !evidence?.choices?.some(choice => choice.id === selected.value)) throw new Error('Choose an available effort or use runtime setting.');
+    } catch (error) {
+      log.appendChild(el('div', 'sysline err', '✖ ' + (error.detail || error.message)));
+      effortPicker.open(); return;
+    } finally { preparing = false; }
+    if (destination() !== beforeDestination || composerController.revision() !== beforeDraft) {
+      log.appendChild(el('div', 'sysline', 'The draft or settings changed while preparing. Review and send again.')); return;
+    }
+    if (attachmentController.hasPending() || dictationController.isLive()) {
+      log.appendChild(el('div', 'sysline err', 'Finish dictation and wait for attachments before sending.')); return;
+    }
     const attached = attachmentController.snapshot();
     const inputReferences = attachmentController.references();
+    const effortGeneration = effortState.snapshot().generation;
+    const idempotencyKey = globalThis.crypto?.randomUUID?.()
+      || ('send-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    // Establish the tail boundary before the explicit prompt is painted.
+    const ownedTurn = inline ? idempotencyKey : '';
+    const ownedTurnState = state => document.dispatchEvent(new CustomEvent('cg:owned-turn', { detail: { id: ownedTurn, state } }));
+    if (ownedTurn) ownedTurnState('start');
     composerController.clear();
+    const clearedRevision = composerController.revision();
+    const restoreSubmitted = () => {
+      if (composerController.revision() === clearedRevision) composerController.restore(prompt);
+      else log.appendChild(el('div', 'sysline', 'Unsent message: ' + prompt));
+    };
     const userMessage = addUser(prompt, attached);
+    if (ownedTurn) userMessage.dataset.transcriptKey = 'live:' + ownedTurn + ':user';
     let turnCounted = false; // counted on the first event the vendor actually returns
     running = true; composerController.setRunning(true);
+    turnUsage = null; turnSeconds = '';
     let cur = null;          // current streaming agent bubble
     let settledRaw = '';     // the last completed text block, to recognise a late echo
     let echo = '';           // streamed text seen after that completion
     // The transcript file will carry this same turn seconds from now. Tell the
     // session pane what was already drawn, by the vendor's own record
     // identity, so the harvested copy is not drawn twice.
-    const drawnLive = detail => document.dispatchEvent(new CustomEvent('cg:drawn-live', { detail }));
-    drawnLive({ prompt });
+    // A composer whose view was closed keeps streaming into its detached log;
+    // it must not mark rows for whatever view is open now.
+    const drawnLive = detail => {
+      if (log.isConnected) document.dispatchEvent(new CustomEvent('cg:drawn-live', { detail }));
+    };
+    drawnLive({ prompt, row: { kind: 'user', text: prompt } });
     let curThink = null;     // current streaming thinking chip
     let lastTool = null;     // last tool chip (to attach its result)
     const finishCur = () => { if (cur) { cur.m.classList.remove('streaming'); cur = null; } };
 
-    // working indicator (contract §3.4: no dead air) — pinned to the bottom of
-    // the turn, shows current activity + elapsed time. Codex emits only
-    // completed items, so without this the gaps between items look dead.
-    const workRow = el('div', 'loader');
-    const wlabel = el('span', '', 'working');
-    workRow.append(mkMark(true), wlabel);
-    const t0 = Date.now();
-    let act = 'working';
-    const tick = () => { wlabel.textContent = act + ' · ' + Math.round((Date.now() - t0) / 1000) + 's'; };
-    const setAct = a => { act = a; tick(); };
-    const wtimer = setInterval(tick, 1000);
-    log.appendChild(workRow); scroller.scrollTop = scroller.scrollHeight;
+    // No dead air (contract §3.4): the activity line above the composer says
+    // what the turn is doing and for how long. Codex emits only completed
+    // items, so without it the gaps between items look dead. It is the lane
+    // input of the ONE activity line (session-view plan §A2), never a row in
+    // the transcript.
+    const setAct = (progress, tool) => lane.setLane(progress === 'starting' ? 'starting' : { progress, tool });
+    setAct('starting');
     const applyEvent = ev => {
           /* Count the turn only once the vendor has actually answered. Counting
              at send time inflated the handoff's "N turn(s) not yet harvested"
@@ -454,24 +683,27 @@ async function renderChat(container, inline, existingLog) {
              error. */
           if (!turnCounted && isVendorTurnEvidence(ev)) {
             turnCounted = true; chatState.liveTurns++;
+            // The session's own menu reads the same count (handoff/live-turns.js).
+            if (chatState.origin) countLiveTurn({ runtime: chatState.origin.runtime, id: chatState.origin.harvestId });
           }
-          const atBottom = scrolled();
+          const atBottom = atScrollEnd(scroller);
           // activity label per event; streaming bubbles carry their own pulse
           switch (ev.type) {
-            case 'spawn': setAct('starting…'); break;
-            case 'delta': workRow.classList.add('hidden'); break;
+            case 'spawn': setAct('starting'); break;
+            case 'delta': setAct('writing'); break;
             // Same rule as the pane (turn_progress.go rule 5): a COMPLETED
             // thinking block means the reply is being written; a delta means
             // the thought is still in flight.
-            case 'thinking_delta': setAct(progressWords('thinking')); break;
-            case 'thinking': setAct(progressWords('writing')); break;
-            case 'tool': setAct(progressWords('tool', ev.name)); workRow.classList.remove('hidden'); break;
-            case 'tool_result': setAct(progressWords('thinking')); workRow.classList.remove('hidden'); break;
-            case 'text': setAct(progressWords('writing')); workRow.classList.remove('hidden'); break;
+            case 'thinking_delta': setAct('thinking'); break;
+            case 'thinking': setAct('writing'); break;
+            case 'tool': setAct('tool', ev.name); break;
+            case 'tool_result': setAct('thinking'); break;
+            case 'text': setAct('writing'); break;
           }
           switch (ev.type) {
             case 'session':
               chatState.sessionId = ev.id;
+              followRail(ev.id);
               // An ad-hoc chat becomes a real session here. It needs the same
               // gate as one opened from the rail, so bind origin now rather than
               // only on preload — otherwise switching runtime after the first
@@ -481,6 +713,7 @@ async function renderChat(container, inline, existingLog) {
               if (!chatState.origin && ev.id) {
                 chatState.origin = { runtime: chatState.runtime, resumeId: ev.id, harvestId: '', cwd: cwd.value || '' };
               }
+              syncEffort();
               sessBadge.textContent = '⌁ ' + (ev.id || '').slice(0, 8) + (ev.model ? ' · ' + ev.model : '');
               break;
             case 'delta':
@@ -503,8 +736,9 @@ async function renderChat(container, inline, existingLog) {
               cur.raw = ev.text;
               cur.md.innerHTML = mdToHtml(cur.raw);
               settledRaw = ev.text; echo = '';
+              if (ev.anchor) cur.m.dataset.transcriptKey = 'anchor:' + ev.anchor;
               finishCur();
-              if (ev.anchor) drawnLive({ anchor: ev.anchor });
+              drawnLive({ anchor: ev.anchor, row: { kind: 'assistant', text: ev.text, turn_anchor: ev.anchor || '' } });
               break;
             case 'thinking_delta':
               if (hasRenderableText(ev.text)) {
@@ -513,19 +747,27 @@ async function renderChat(container, inline, existingLog) {
               }
               break;
             case 'thinking':
-              if (ev.anchor) drawnLive({ anchor: ev.anchor });
               if (curThink) {
                 if (hasRenderableText(ev.text)) curThink.querySelector('.tbody').textContent = ev.text;
+                if (ev.anchor) curThink.dataset.transcriptKey = 'anchor:' + ev.anchor;
                 curThink = null;
-              } else if (hasRenderableText(ev.text)) addChip('thinkchip', 'thinking', ev.text);
+              } else if (hasRenderableText(ev.text)) {
+                const thought = addChip('thinkchip', 'thinking', ev.text);
+                if (ev.anchor) thought.dataset.transcriptKey = 'anchor:' + ev.anchor;
+              }
+              if (hasRenderableText(ev.text)) drawnLive({ anchor: ev.anchor,
+                row: { kind: 'thinking', text: ev.text, turn_anchor: ev.anchor || '' } });
               break;
             case 'tool':
               finishCur();
               lastTool = addChip('toolchip', ev.name, ev.text);
-              if (ev.anchor) drawnLive({ anchor: ev.anchor });
+              if (ev.anchor) lastTool.dataset.transcriptKey = 'anchor:' + ev.anchor;
+              drawnLive({ anchor: ev.anchor,
+                row: { kind: 'tool_call', name: ev.name, text: ev.text, turn_anchor: ev.anchor || '' } });
               break;
             case 'tool_result':
-              if (ev.anchor) drawnLive({ anchor: ev.anchor });
+              drawnLive({ anchor: ev.anchor,
+                row: { kind: 'tool_result', text: ev.text, is_error: ev.is_error, turn_anchor: ev.anchor || '' } });
               if (lastTool) {
                 lastTool.querySelector('.tbody').textContent += '\n── result ──\n' + ev.text;
                 if (ev.is_error) lastTool.classList.add('toolchip-error');
@@ -548,7 +790,7 @@ async function renderChat(container, inline, existingLog) {
               break;
             case 'input_error':
               userMessage.remove(); // the runtime never received it; keep it only in the composer
-              composerController.restore(prompt);
+              restoreSubmitted();
               if (ev.field === 'cwd') { cwd.focus(); cwd.setSelectionRange?.(0, cwd.value.length); }
               log.appendChild(el('div', 'sysline err', '✖ ' + ev.text));
               break;
@@ -562,34 +804,40 @@ async function renderChat(container, inline, existingLog) {
               finishCur();
               log.appendChild(el('div', 'sysline err', '✖ ' + ev.text));
               break;
+            case 'usage':
+              // The daemon sums the turn (design §5.2); this only renders it.
+              turnUsage = ev;
+              renderTurnBadge();
+              break;
             case 'result':
               finishCur();
-              costBadge.textContent = [
-                ev.cost != null ? '$' + Number(ev.cost).toFixed(4) : '',
-                ev.ms ? (ev.ms / 1000).toFixed(1) + 's' : '',
-              ].filter(Boolean).join(' · ');
+              turnSeconds = ev.ms ? (ev.ms / 1000).toFixed(1) + 's' : turnSeconds;
+              renderTurnBadge();
               break;
           }
-          if (workRow.isConnected) log.appendChild(workRow); // keep pinned last
           stick(atBottom);
     };
     try {
-      const idempotencyKey = globalThis.crypto?.randomUUID?.()
-        || ('send-' + Date.now() + '-' + Math.random().toString(36).slice(2));
       let task;
       try {
         task = await createRuntimeTask({
           runtime: chatState.runtime, prompt, session_id: chatState.sessionId || '',
           catalog_session_id: chatState.origin?.harvestId || '',
-          ...fields, mode: selMode.value,
+          ...fields, ...effortFields, mode: selMode.value,
           base_url: currentCapability().supportsBaseURL ? (acct().base_url || '') : '',
           auth_token: currentCapability().supportsAuthToken ? (acct().auth_token || '') : '',
           binary: acct().binary || '', extra_args: acct().extra_args || '', cwd: cwd.value,
           allow_shared_session: allowShared,
+          ...(handoffOpen?.ticket() ? { handoff_ticket: handoffOpen.ticket() } : {}),
           ...inputReferences,
         }, idempotencyKey);
+        if (handoffOpen) handoffSent();
       } catch (error) {
-        userMessage.remove(); composerController.restore(prompt);
+        userMessage.remove();
+        restoreSubmitted();
+        if (error?.field === 'thinking_effort' && effortState.refuse(error, effortGeneration)) effortPicker.open();
+        const withheld = handoffOpen?.refusedWords(error);
+        if (withheld) { log.appendChild(el('div', 'sysline err', '✖ ' + withheld)); return; }
         if (error?.code === 'session_in_use') {
           // The daemon refused because another process is using the session.
           // Show its sentence inline with the one-click override; the turn
@@ -599,8 +847,15 @@ async function renderChat(container, inline, existingLog) {
         }
         throw error;
       }
+      if (task.requested_settings) {
+        const caption = effortCaption(task.requested_settings);
+        const settings = el('details', 'turn-effort');
+        settings.appendChild(el('summary', '', 'Requested effort: ' + caption));
+        settings.appendChild(el('span', 'sub', effortDetail(task.requested_settings)));
+        userMessage.appendChild(settings);
+      }
       activeTaskID = task.id;
-      attachmentController.claimed();
+      attachmentController.claimed(inputReferences);
       wrap.dataset.renderedTaskId = task.id;
       announceActive();
       await new Promise((resolve, reject) => {
@@ -632,12 +887,14 @@ async function renderChat(container, inline, existingLog) {
       log.appendChild(el('div', 'sysline err', '✖ ' + String(err)));
     } finally {
       // Every exit — completed, failed, refused — puts the composer back.
-      clearInterval(wtimer); workRow.remove();
+      if (ownedTurn) ownedTurnState('end');
+      lane.setLane(null);
       finishCur();
       running = false;
       activeTaskID = null;
       composerController.setRunning(false);
-      composerController.focus();
+      if (inline) composerController.textarea.focus({ preventScroll: true });
+      else composerController.focus();
     }
   }
   // --- composer menus: '/' command palette + '@' file mentions (items 4+5) ---
@@ -662,7 +919,8 @@ async function renderChat(container, inline, existingLog) {
         if (!a) return log.appendChild(el('div', 'sysline', 'usage: /memory <claim>'));
         await api('/api/memory', { method: 'POST', body: JSON.stringify({ claim: a, classification: 'user-asserted', scope: 'chat', sources: ['chat ' + sessionRef()] }) });
         log.appendChild(el('div', 'sysline', '☰ memory saved (draft)')); } },
-    { cmd: '/model', hint: 'focus the model selector', run: () => selModel.focus() },
+    { cmd: '/model', hint: 'choose model and effort', run: () => effortPicker.open() },
+    { cmd: '/effort', hint: 'choose thinking effort', run: () => effortPicker.open() },
     { cmd: '/mode', hint: 'focus the mode selector', run: () => selMode.focus() },
   ];
   composerController.setCommands(PALETTE);
@@ -680,7 +938,9 @@ async function renderChat(container, inline, existingLog) {
     };
     selRuntime.value = p.runtime;
     fillSelect(selMode, modePairs(currentCapability()), '');
-    fillSelect(selModel, modelPairs(currentCapability()), '');
+    fillModels(p.runtime, '');
+    loadModels(p.runtime);
+    syncEffort();
     syncModeNote();
     // Reflect the session you are continuing (§11). Its real model was shown only
     // in a badge, so the selector said "Default" while the session ran opus — two

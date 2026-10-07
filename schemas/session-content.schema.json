@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crossing-guard:schema:session-content:1.0",
+  "title": "One opted-in content chunk of a session (D-12): redacted text addressed by its hash, capped per chunk",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "device_id",
+    "session_id",
+    "event_id",
+    "part",
+    "consent",
+    "body",
+    "body_hash",
+    "redactions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "event_id": {
+      "$ref": "common.schema.json#/$defs/typedId"
+    },
+    "part": {
+      "type": "string",
+      "enum": [
+        "event_input"
+      ]
+    },
+    "consent": {
+      "type": "string",
+      "enum": [
+        "consent",
+        "mandated-by-bundle"
+      ]
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 262144
+    },
+    "body_hash": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    },
+    "redactions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      }
+    }
+  }
+}

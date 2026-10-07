@@ -5,6 +5,8 @@ package daemon
 import (
 	"crossing-guard/store"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -54,7 +56,7 @@ func TestTaskProviderFallbackThroughHTTP(t *testing.T) {
 	f := newAgentHostFixture(t, driver)
 	chatDrivers["fallback-fixture"] = fallbackFixtureDriver{managedDynamicFixtureDriver{commandFor: func(ChatRequest) string { return jsonTextCommand(helperClaimV2) }}}
 	preview := selectManagedProfile(t, f.owner, helperAgentProfileSource())
-	_, err := f.host.putBinding(managedBindingCommand{BindingID: "http-chain", ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: f.root, Runtime: "managed-fixture", Priority: 10, Routes: []store.ManagedRoute{{Runtime: "fallback-fixture"}}, ExpectedStateToken: store.ManagedBindingAbsentToken("http-chain")})
+	_, err := f.host.putBinding(managedBindingCommand{BindingID: "http-chain", ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: f.root, RouteID: testRouteID(f.host, "managed-fixture", "", nil), Priority: 10, Routes: testChain(f.host, store.ManagedRoute{Runtime: "fallback-fixture"}), ExpectedStateToken: store.ManagedBindingAbsentToken("http-chain")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,4 +133,39 @@ func TestTaskProviderFallbackThroughHTTP(t *testing.T) {
 		t.Fatalf("list status=%d tasks=%d decode=%v", response.StatusCode, len(listing.Tasks), err)
 	}
 	t.Log("HTTP auth denial, task creation, quota classification, attributed fallback, and task listing passed")
+}
+
+type oneShotProtocolFixture struct{}
+
+func (oneShotProtocolFixture) WaitForNaturalExit() bool { return true }
+func (oneShotProtocolFixture) Run(stdout io.ReadCloser, emit func(ChatEvent)) error {
+	text, err := io.ReadAll(stdout)
+	if err != nil {
+		return err
+	}
+	emit(ChatEvent{"type": "text", "text": string(text)})
+	return nil
+}
+
+func TestTaskProcessIndependentOneShotLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		exit         int
+	}{
+		{"success", "printf finished", 0},
+		{"failed after output", "printf finished; exit 7", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", tc.script)
+			var events []ChatEvent
+			result := runTaskProcess(taskExecutionLaunch{cmd: cmd, protocol: oneShotProtocolFixture{}, started: func() {}, event: func(event ChatEvent) { events = append(events, event) }}, func() bool { return false })
+			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != tc.exit || len(events) != 1 || events[0]["text"] != "finished" {
+				t.Fatalf("state=%v result=%+v events=%+v", cmd.ProcessState, result, events)
+			}
+			var exitErr *exec.ExitError
+			if tc.exit == 0 && result.Err != nil || tc.exit != 0 && !errors.As(result.Err, &exitErr) {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+		})
+	}
 }

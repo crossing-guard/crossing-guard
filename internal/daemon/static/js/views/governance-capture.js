@@ -76,15 +76,17 @@ document.addEventListener('cg:refresh-liveness', refreshLiveness);
 function renderLiveness(box, h) {
   box.replaceChildren();
   const strip = el('div'); strip.style.cssText =
-    'border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;border:1px solid var(--border)';
+    'border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:var(--fs-8);border:1px solid var(--border)';
   const now = Math.floor(Date.now() / 1000);
   const stale = h.last_event_ts && (now - h.last_event_ts) > STALE_SECONDS;
 
   let tone, msg;
   if (!h.configured) {
     tone = 'st-disputed';
-    msg = '⚠ The governor is not configured — nothing is being captured. Every tool '
-      + 'call is running ungoverned; the console below shows only what was captured before.';
+    msg = h.problem
+      ? '⚠ Capture is off — the governor did not start: ' + h.problem
+      : '⚠ The governor is not configured — nothing is being captured. Every tool '
+        + 'call is running ungoverned; the console below shows only what was captured before.';
   } else if (h.observe_failures > 0) {
     tone = 'st-disputed';
     msg = '⚠ ' + h.observe_failures + ' observation' + (h.observe_failures === 1 ? '' : 's')
@@ -193,7 +195,7 @@ function renderReport(center, r) {
   const head = headRow();
   if (r.runtime) head.appendChild(el('span', 'chip ' + r.runtime, r.runtime));
   const t = el('span', '', r.title || r.id);
-  t.style.cssText = 'font-weight:600;font-size:14px';
+  t.style.cssText = 'font-weight:600;font-size:var(--fs-11)';
   if (r.title_source === 'prompt') { // INV-22, same label as the session list
     t.style.fontStyle = 'italic'; t.style.opacity = '.72';
     t.title = 'No title authored by the runtime — showing the first prompt, truncated.';
@@ -237,7 +239,7 @@ function renderReport(center, r) {
   tbl.appendChild(el('div', 'sub', 'Events, in the order they were observed:'));
   for (const e of r.events) {
     const row = el('div'); row.style.cssText =
-      'display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--border);font-size:12px';
+      'display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--border);font-size:var(--fs-8)';
     const when = el('span', '', shortWhen(new Date(e.ts * 1000).toISOString()));
     when.style.cssText = 'color:var(--dim);flex:0 0 84px';
     row.append(when, decisionChip(e.decision));

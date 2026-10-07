@@ -21,7 +21,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "sessions", "memory", "attach", "import", "sync", "migrate", "harvest":
-		memcli.Main(os.Args[1:])
+		memcli.Main(os.Args[1:], locateMemoryDaemon)
 	case "doctor":
 		doctorCmd(os.Args[2:])
 	case "rules":
@@ -34,6 +34,8 @@ func main() {
 		export(os.Args[2:])
 	case "prune":
 		prune(os.Args[2:])
+	case "compact":
+		compact(os.Args[2:])
 	case "import-sessions":
 		importSessions(os.Args[2:])
 	case "index-memory":
@@ -44,6 +46,22 @@ func main() {
 		initCmd(os.Args[2:])
 	case "console":
 		console(os.Args[2:])
+	case "link":
+		linkCmd(os.Args[2:])
+	case "unlink":
+		unlinkCmd(os.Args[2:])
+	case "layers":
+		layersCmd(os.Args[2:])
+	case "routes":
+		routesCmd(os.Args[2:])
+	case "agents":
+		agentsCmd(os.Args[2:])
+	case "org-key":
+		orgKeyCmd(os.Args[2:])
+	case "bundle":
+		bundleCmd(os.Args[2:])
+	case "handoff":
+		os.Exit(handoffCmd(os.Args[2:]))
 	case "verify":
 		verify(os.Args[2:])
 	case "demo":
@@ -54,6 +72,8 @@ func main() {
 		os.Exit(runUnderstand(os.Args[2:]))
 	case "analyzers":
 		os.Exit(runAnalyzers(os.Args[2:]))
+	case "mcp":
+		os.Exit(mcpCmd(os.Args[2:]))
 	case approvalbridge.Command:
 		os.Exit(approvalbridge.Main(os.Args[2:]))
 	default:
@@ -130,8 +150,13 @@ Use doctor and verify for this machine's exact evidence.
   export [PATH]
       write a consistent store snapshot for backup/current-product use.
 
-  prune (--keep-days N | --before YYYY-MM-DD) [--yes]
+  prune (--keep-days N | --before YYYY-MM-DD) [--usage] [--yes]
       preview retention changes; --yes commits them. Export first.
+      --usage trims recorded usage calls instead of events.
+
+  compact [--data DIR]
+      rewrite the store file without its free pages. Stop the daemon first;
+      refuses while one may be using the store.
 
 EXPERIMENTAL SOURCE-VISIBLE TOOLS
 These commands work where documented, but output and compatibility may change.
@@ -148,6 +173,30 @@ These commands work where documented, but output and compatibility may change.
       record and inspect declarations, snapshots, claims, and verification witnesses.
   understand
       build or inspect immutable source/analyzer/configuration-bound facts.
+  link <server-url> [--name <device name>]
+      enroll this device with a team server: prints a code you approve in the
+      browser, then the daemon sends a device report on its cadence.
+  unlink
+      revoke this device's key on the team server and forget the link.
+  routes list | show <id|name> | create --name <name> --family <family> … | rename <id|name> <name> | delete <id|name>
+      named model routes: where a place sends its model calls. A place names a
+      route; nothing else names a runtime, a model or an endpoint.
+  agents place --profile <agent id> --route <route name|id> [--root <repository>] [--mode <mode>]
+      turn an agent on for a repository on a model route.
+  layers [--adopt <scope>] [--unadopt <scope>] [--repin <fingerprint>]
+      list the team bundles this device verified and adopted; --adopt and
+      --unadopt are the explicit local actions after the shown diff; --repin
+      trusts a new organization key by the fingerprint the server presents.
+  org-key init --out <path> | show --key <path>
+      make the organization's signing key as a file you keep (no daemon holds
+      it), or print its public half for the team console's Register key form.
+  bundle build --scope organization|repository [--agent <id>]... | sign --key <path> <file>
+      build the next revision of a shared bundle, unsigned, on a linked device;
+      sign it with the organization key, ready to upload in the team console.
+  handoff send|list|show|decline|withdraw|close|clean
+      hand a session to a teammate and manage what was sent and received; clean
+      removes handoff files earlier versions wrote into a checkout. Opening a
+      handoff is done in the console.
   analyzers
       inspect and explicitly select exact content-addressed native analyzer modules.
   entities
@@ -186,6 +235,9 @@ Visible for troubleshooting and integration ownership; not alpha compatibility p
       installed lifecycle memory/index synchronization.
   migrate
       internal storage migration entrypoint.
+  mcp --runtime <runtime>
+      the recall tools agent sessions call (stdio MCP server); init --recall
+      registers it with each runtime.
 ` + approvalbridge.Usage
 
 func usage() {

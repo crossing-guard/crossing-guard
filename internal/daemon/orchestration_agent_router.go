@@ -9,6 +9,7 @@ package daemon
 import (
 	"errors"
 	"sort"
+	"unicode/utf8"
 
 	"crossing-guard/internal/orchestration"
 	"crossing-guard/internal/orchestration/profilefs"
@@ -34,6 +35,19 @@ var shippedAgentDefaults = store.ManagedLimits{
 	LoopBudget:     5,
 	MaxGroupTokens: 0,
 	MaxAgentTokens: 0,
+}
+
+// enforcedAgentLimits names the binding budgets admission enforces today:
+// max_total per (binding, source session) in agentGroupBudget, loop_budget in
+// the reply loop. The other stored budgets are validated and kept but not
+// checked, so the Agents page offers only these (plan D-9, RT-18).
+func enforcedAgentLimits() []string { return []string{"max_total", "loop_budget"} }
+
+// unenforcedProfileLimits names the profile fields the managed path does not
+// apply to helpers and followers (only the review path reads them); the page
+// states it beside each ceiling instead of presenting it as a limit.
+func unenforcedProfileLimits() []string {
+	return []string{"timeout", "max_tokens", "failure", "locality"}
 }
 
 // resolveAgentLimits resolves one binding's effective budgets: each explicit
@@ -124,7 +138,110 @@ func validateManagedProfile(profile profilefs.CompiledProfile) error {
 			return errors.New("profile selector " + selector + " is not a published signal")
 		}
 	}
+	return validateManagedHostSupport(profile)
+}
+
+// validateManagedHostSupport refuses compiled values this host does not
+// implement for managed turns (managed-turn-profile-limits plan §3): a field
+// the profile relies on is enforced or refused here, never silently ignored.
+// The refusal is the profile's "cannot be enabled here" reason; the portable
+// file stays valid for a host that does support the value.
+func validateManagedHostSupport(profile profilefs.CompiledProfile) error {
+	if profile.Requirements.Destination.Locality == "no-network-destination" {
+		return errors.New("requirements.destination.locality no-network-destination cannot be met by a managed turn: a runtime harness cannot be shown to make no network calls; use local-only with a local route")
+	}
+	if len(profile.Trigger.States) != 0 {
+		return errors.New("managed turns do not filter by task state; remove trigger.states")
+	}
+	if profile.Trigger.IgnoreOrigin != "self" {
+		return errors.New("managed turns never hear their own turns; trigger.ignore-origin must be self")
+	}
+	if debounce, err := profilefs.Duration(profile.Trigger.Debounce); err != nil || debounce != 0 {
+		return errors.New("managed turns coalesce signals while the helper session is busy; a debounce window is not supported, use 0s")
+	}
+	for _, behavior := range []string{profile.Failure.MissingRequiredContext, profile.Failure.UnavailableCapability,
+		profile.Failure.Timeout, profile.Failure.MalformedOutput} {
+		if behavior != "record-unavailable" {
+			return errors.New("managed turns support failure behavior record-unavailable only")
+		}
+	}
+	if _, err := profilefs.Duration(profile.Limits.Timeout); err != nil {
+		return errors.New("limits.timeout is unreadable")
+	}
 	return nil
+}
+
+// managedRouteDestinationProblem judges one route against the pinned profile's
+// destination requirement (plan §4.1); "" means the route may run the profile.
+// Local is the adapter's claim about the route's endpoint class — never an
+// egress proof — and a runtime that makes no claim is not local.
+func managedRouteDestinationProblem(profile profilefs.CompiledProfile, route store.ManagedRoute) string {
+	locality := profile.Requirements.Destination.Locality
+	if locality == "explicit-local-or-remote" {
+		return ""
+	}
+	if locality != "local-only" {
+		return boundedRecovery("Profile " + profile.ID + " requires destination " + locality + ", which no managed route can meet.")
+	}
+	if local, _ := chatRouteIsLocal(ChatRequest{Runtime: route.Runtime, Model: route.Model, Mode: route.Mode}); local {
+		return ""
+	}
+	// The sentence is shown on agent surfaces, so it names no runtime and no model
+	// (plan §5.5, §14 Q8): the person picks another route by name in Settings → Models.
+	text := "Profile " + profile.ID + " requires a local-only destination, and the chosen model route leaves this machine. " +
+		"Choose a model route that stays on this machine, or deploy a profile revision whose requirements.destination.locality is explicit-local-or-remote"
+	if chatRuntimeOffersLocalModel(route.Runtime) && profile.AgentType() == "helper" {
+		text += " (a helper's reply or correction resumes the source session with the route's model, so a local route works only on sources of the same runtime)"
+	}
+	return boundedRecovery(text + ".")
+}
+
+// bindingDestinationProblem is the first destination problem across a
+// binding's routes (primary, then fallbacks) and its allowlisted child
+// profiles judged on the primary route; "" when every one may run.
+func bindingDestinationProblem(profile profilefs.CompiledProfile, routes []store.ManagedRoute, children []profilefs.CompiledProfile) string {
+	for _, route := range routes {
+		if problem := managedRouteDestinationProblem(profile, route); problem != "" {
+			return problem
+		}
+	}
+	if len(routes) == 0 {
+		return ""
+	}
+	for _, child := range children {
+		if problem := managedRouteDestinationProblem(child, routes[0]); problem != "" {
+			return problem
+		}
+	}
+	return ""
+}
+
+// crossRuntimeResumeText explains why a reply or correction may not resume a
+// session on another runtime with a model the binding's adapter runs locally
+// (plan §4.1, D-5). sourceRuntime "" means "any other runtime".
+func crossRuntimeResumeText(route store.ManagedRoute, sourceRuntime string) string {
+	source := "another runtime's session"
+	if sourceRuntime != "" {
+		source = "the " + chatRuntimeLabel(sourceRuntime) + " session"
+	}
+	return "This deployment's model (" + chatModelLabel(route.Runtime, route.Model) + ") runs only on " +
+		chatRuntimeLabel(route.Runtime) + ", and a reply or correction resumes " + source + " with it."
+}
+
+// managedRecoveryLimit is the store's recovery column bound (CHECK
+// length(recovery)<=2000); a longer text would fail the insert.
+const managedRecoveryLimit = 2000
+
+// boundedRecovery fits recovery text to the column, cutting on a rune boundary.
+func boundedRecovery(text string) string {
+	if len(text) <= managedRecoveryLimit {
+		return text
+	}
+	cut := managedRecoveryLimit - len("…")
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…"
 }
 
 // matchedAgent is one enabled binding whose scope and selector map matched a

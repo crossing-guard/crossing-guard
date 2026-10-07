@@ -47,6 +47,7 @@ export function problemState(problem) {
     'git-timeout': { title: 'git timed out', detail: message || 'git did not answer within the configured time.', disablesGit: false },
     'base-ref-missing': { title: 'Base ref not found', detail: message || 'The base ref does not exist in this repository.', disablesGit: false },
     'route-missing': { title: 'Git scopes are not served', detail: message || 'This daemon build does not serve git scopes.', disablesGit: true },
+    'review-unavailable': { title: 'Git scopes unavailable', detail: message || 'Recorded session folders cannot be read right now.', disablesGit: true },
     'unreachable': { title: 'Daemon unreachable', detail: message || 'The last render is kept; Refresh retries.', disablesGit: false },
     'invalid-path': { title: 'Not a repository path', detail: message, disablesGit: false },
     'file-not-in-scope': { title: 'Not changed in this scope', detail: message, disablesGit: false },

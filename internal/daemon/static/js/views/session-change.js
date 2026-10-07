@@ -99,7 +99,7 @@ function appendSessionOverview(box, selection) {
     row.append(el('span', 'sub', label), exact);
     rows.appendChild(row);
   };
-  addRow('working directory', selection.cwd || selection.project);
+  addRow('working directory', selection.cwd);
   addRow('branch', facts.branch || selection.branch);
   section.appendChild(rows);
 
@@ -118,21 +118,6 @@ function appendSessionOverview(box, selection) {
   addCount('PR references', (facts.prs || []).length, (facts.prs || []).join(' · '));
   addCount('created path mentions', (facts.files_created || []).length);
   addCount('recorded file paths', (facts.files || []).length);
-  const readIDs = facts.mem_read_ids || [];
-  const writeIDs = facts.mem_write_ids || [];
-  const reads = readIDs.length;
-  const writes = writeIDs.length || selection.mem_writes;
-  if (reads || writes) {
-    const fact = el('div', 'evidence-population');
-    const memoryDetail = [
-      readIDs.length ? `reads: ${readIDs.join(', ')}` : '',
-      writeIDs.length ? `writes: ${writeIDs.join(', ')}` : '',
-    ].filter(Boolean).join(' · ');
-    if (memoryDetail) fact.title = memoryDetail;
-    fact.setAttribute('aria-label', `memory reads: ${reads}; writes: ${writes || 0}${memoryDetail ? `. ${memoryDetail}` : ''}`);
-    fact.append(el('b', '', `${reads} / ${writes || 0}`), el('small', '', 'memory reads / writes'));
-    counts.appendChild(fact);
-  }
   addCount('tool calls', facts.tool_calls);
   if (counts.childNodes.length) section.appendChild(counts);
   box.appendChild(section);

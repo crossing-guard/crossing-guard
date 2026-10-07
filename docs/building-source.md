@@ -3,7 +3,7 @@
 This is an experimental source snapshot. The code is available, but installation,
 provider integration and release support are not verified for this candidate.
 
-Use Go 1.26 or later, Node.js, Bash, ripgrep, Perl, Git and a C compiler. The Go module
+Use Go 1.26 or later, Node.js, Python 3, Bash, ripgrep, Perl, Git and a C compiler. The Go module
 files pin the development analyzers. From the source root:
 
 ```sh
@@ -51,3 +51,8 @@ analyzers. A fresh, isolated local daemon passed compiled doctor/init-dry-run ch
 authenticated HTTP, browser navigation, invalid-token refusal and browser recovery.
 The console contained no sessions and no provider credentials or hooks were attached.
 This is local source inspection evidence; the installed-client release gates remain open.
+
+October 5 refresh: the tree is now a direct export of upstream `5607e508`. The complete
+local gate passes on it, and the gate allows each test binary 31 minutes because the
+daemon race suite alone runs for several minutes. See [the refresh status](refresh-status.md)
+for the upgrade trial and the isolated daemon and browser checks.

@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "id": "cnt_33333333333333333333333333",
+  "device_id": "dev_11111111111111111111111111",
+  "session_id": "ses_00000000000000000000000000",
+  "event_id": "evt_44444444444444444444444444",
+  "part": "event_input",
+  "consent": "consent",
+  "body": "{\"command\":\"go test ./...\"}",
+  "body_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "redactions": []
+}

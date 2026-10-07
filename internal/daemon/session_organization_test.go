@@ -135,10 +135,10 @@ func organizationRows() []SessionSummary {
 		return s
 	}
 	return []SessionSummary{
-		row("/work/oms", "claude", "walmart", "Walmart plan", 2),
-		row("/work/oms", "claude", "routing", "Routing plan", 9),
-		row("/work/oms", "claude", "shipped", "Shipped plan", 4),
-		row("/work/pool", "claude", "diligence", "Due diligence", 7),
+		row("/work/app", "claude", "checkout", "Checkout plan", 2),
+		row("/work/app", "claude", "routing", "Routing plan", 9),
+		row("/work/app", "claude", "shipped", "Shipped plan", 4),
+		row("/work/site", "claude", "retro", "Sprint retro", 7),
 		row("/work/cart", "claude", "untouched", "Never touched", 1),
 	}
 }
@@ -168,7 +168,7 @@ func TestFreshInstallShipsNoViewsNoTagsNoSuggestions(t *testing.T) {
 // repository, with no act by the owner; his tag is how one leaves.
 func TestViewAdmitsByObservedFactsAcrossRepositoriesAndOwnerTagDismisses(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
-	for _, id := range []string{"walmart", "routing", "shipped", "diligence"} {
+	for _, id := range []string{"checkout", "routing", "shipped", "retro"} {
 		f.facet(id, "phase", "plan", 1000)
 	}
 	f.facet("shipped", "vcs", "commit", 2000)
@@ -197,8 +197,8 @@ func TestViewAdmitsByObservedFactsAcrossRepositoriesAndOwnerTagDismisses(t *test
 	if len(rail.Repositories) != 2 || total != 3 {
 		t.Fatalf("groups = %+v", rail.Repositories)
 	}
-	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/oms&query="+query, nil))
-	if page.Total != 2 || titles(page.Sessions) != "Walmart plan,Routing plan" {
+	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/app&query="+query, nil))
+	if page.Total != 2 || titles(page.Sessions) != "Checkout plan,Routing plan" {
 		t.Fatalf("page = %d %q", page.Total, titles(page.Sessions))
 	}
 
@@ -206,7 +206,7 @@ func TestViewAdmitsByObservedFactsAcrossRepositoriesAndOwnerTagDismisses(t *test
 	if got := count(); got != 2 {
 		t.Fatalf("after the owner's tag the count is %d, want 2", got)
 	}
-	page = decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/oms&query="+query, nil))
+	page = decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/app&query="+query, nil))
 	if titles(page.Sessions) != "Routing plan" {
 		t.Fatalf("tagged session still in the view: %q", titles(page.Sessions))
 	}
@@ -214,22 +214,22 @@ func TestViewAdmitsByObservedFactsAcrossRepositoriesAndOwnerTagDismisses(t *test
 
 func TestTagsShowOnRowsAndTagKeyGroupsAreSubRepositoryGroups(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
-	f.tag("Topic:Amazon-Routing", f.rows[1])
-	f.tag("topic:walmart", f.rows[0])
-	f.tag("topic:amazon-routing", f.rows[3]) // another repository, another spelling
-	f.facet("walmart", "phase", "plan", 50)
+	f.tag("Topic:Order-Routing", f.rows[1])
+	f.tag("topic:checkout", f.rows[0])
+	f.tag("topic:order-routing", f.rows[3]) // another repository, another spelling
+	f.facet("checkout", "phase", "plan", 50)
 
-	page := decodeBody[sessionPageResponse](t, f.do("GET", "/api/sessions?view=repository&repository=/work/oms&mode=all", nil))
-	var walmart railSession
+	page := decodeBody[sessionPageResponse](t, f.do("GET", "/api/sessions?view=repository&repository=/work/app&mode=all", nil))
+	var checkout railSession
 	for _, row := range page.Sessions {
-		if row.ID == "walmart" {
-			walmart = row
+		if row.ID == "checkout" {
+			checkout = row
 		}
 	}
-	if len(walmart.Tags) != 1 || walmart.Tags[0].Key != "topic" || walmart.Tags[0].Provenance != "user-asserted" || len(walmart.Facts) != 0 {
-		t.Fatalf("a plain repository row carries the owner's tags and never detector facts: %+v", walmart)
+	if len(checkout.Tags) != 1 || checkout.Tags[0].Key != "topic" || checkout.Tags[0].Provenance != "user-asserted" || len(checkout.Facts) != 0 {
+		t.Fatalf("a plain repository row carries the owner's tags and never detector facts: %+v", checkout)
 	}
-	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=walmart", nil))
+	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=checkout", nil))
 	if len(header.Sessions[0].Facts) != 1 || header.Sessions[0].Facts[0].Provenance != "observed" {
 		t.Fatalf("facts are read in the header, kept apart from tags: %+v", header.Sessions[0])
 	}
@@ -239,7 +239,7 @@ func TestTagsShowOnRowsAndTagKeyGroupsAreSubRepositoryGroups(t *testing.T) {
 		t.Fatalf("rail = %+v", rail)
 	}
 	for _, group := range rail.Repositories {
-		if group.Key == "amazon-routing" && (group.Total != 2 || group.Label != "Amazon-Routing" || group.LaunchCwd != "") {
+		if group.Key == "order-routing" && (group.Total != 2 || group.Label != "Order-Routing" || group.LaunchCwd != "") {
 			t.Fatalf("one tag in two spellings and two repositories is one group, named as first written: %+v", group)
 		}
 	}
@@ -261,12 +261,17 @@ func TestMalformedQueryIsNamedAndEmptiedGroupIsAnEmptyPage(t *testing.T) {
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"bogus:"`) {
 		t.Fatalf("malformed query: %d %s", rec.Code, rec.Body.String())
 	}
-	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/oms&query="+url.QueryEscape("tag:nobody-has-this"), nil))
+	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/app&query="+url.QueryEscape("tag:nobody-has-this"), nil))
 	if page.Total != 0 || len(page.Sessions) != 0 {
 		t.Fatalf("an emptied group is an empty page: %+v", page)
 	}
-	if rec := f.do("GET", "/api/sessions?view=group&mode=sideways&group=x&group_by=none", nil); rec.Code != 400 {
-		t.Fatalf("bad mode accepted: %d", rec.Code)
+	// An empty or absent mode is refused, never defaulted: all and open differ in
+	// rows and cost, so the caller names one (board-column-mode-fix plan §2).
+	for _, mode := range []string{"&mode=sideways", "&mode=", ""} {
+		rec := f.do("GET", "/api/sessions?view=group&group=x&group_by=none"+mode, nil)
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "mode must be all or open") {
+			t.Fatalf("bad mode %q accepted: %d %s", mode, rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -278,13 +283,13 @@ func TestWordsSearchOnlyInsideTheFilter(t *testing.T) {
 	var asked []string
 	sessionTextSearch = func(words string, ids []string, limit int) ([]store.TranscriptProjectionKey, bool, error) {
 		asked = append([]string(nil), ids...)
-		return []store.TranscriptProjectionKey{{Runtime: "claude", SessionID: "diligence"}, {Runtime: "codex", SessionID: "walmart"}}, true, nil
+		return []store.TranscriptProjectionKey{{Runtime: "claude", SessionID: "retro"}, {Runtime: "codex", SessionID: "checkout"}}, true, nil
 	}
-	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=&group_by=none&query="+url.QueryEscape("mine:follow-up lawyer"), nil))
-	if strings.Join(asked, ",") != "walmart,diligence" {
+	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=&group_by=none&query="+url.QueryEscape("mine:follow-up designer"), nil))
+	if strings.Join(asked, ",") != "checkout,retro" {
 		t.Fatalf("the search was not confined to the filter's sessions: %v", asked)
 	}
-	if titles(page.Sessions) != "Due diligence" {
+	if titles(page.Sessions) != "Sprint retro" {
 		t.Fatalf("a hit under another runtime's id must not count: %q", titles(page.Sessions))
 	}
 	if !page.MoreTextMatches {
@@ -293,7 +298,7 @@ func TestWordsSearchOnlyInsideTheFilter(t *testing.T) {
 	sessionTextSearch = func(string, []string, int) ([]store.TranscriptProjectionKey, bool, error) {
 		return nil, false, fmt.Errorf("database is locked")
 	}
-	if rec := f.do("GET", "/api/sessions?view=rail&query="+url.QueryEscape("mine:follow-up lawyer"), nil); rec.Code != http.StatusServiceUnavailable {
+	if rec := f.do("GET", "/api/sessions?view=rail&query="+url.QueryEscape("mine:follow-up designer"), nil); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a failing text search is the daemon's problem, not a bad query: %d %s", rec.Code, rec.Body.String())
 	}
 }
@@ -305,9 +310,9 @@ func TestCodexTagFollowsTheThreadAndNeverItsChildren(t *testing.T) {
 	const thread = "019f3c1a-1111-7222-8333-444455556666"
 	const childMeta = "019f3c1a-aaaa-7bbb-8ccc-ddddeeeeffff"
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
-	parent := sessionFixture("/work/oms", "codex", "rollout-2026-09-10T12-00-00-"+thread, base)
+	parent := sessionFixture("/work/app", "codex", "rollout-2026-09-10T12-00-00-"+thread, base)
 	parent.ThreadID, parent.Title = thread, "Parent"
-	child := sessionFixture("/work/oms", "codex", "rollout-2026-09-10T12-05-00-"+childMeta, base.Add(-time.Minute))
+	child := sessionFixture("/work/app", "codex", "rollout-2026-09-10T12-05-00-"+childMeta, base.Add(-time.Minute))
 	child.ThreadID, child.MetaID, child.LineageKind, child.Title = thread, childMeta, "spawn", "Child"
 	if harvest.MatchID(child, thread) {
 		t.Fatal("the codex adapter matches a child rollout by its parent's thread id: every tag on a thread would now decorate its children")
@@ -323,7 +328,7 @@ func TestCodexTagFollowsTheThreadAndNeverItsChildren(t *testing.T) {
 		t.Fatalf("parent=%+v child=%+v", decorated[0].Tags, decorated[1].Tags)
 	}
 
-	resumed := sessionFixture("/work/oms", "codex", "rollout-2026-09-12T09-00-00-"+thread, base.Add(48*time.Hour))
+	resumed := sessionFixture("/work/app", "codex", "rollout-2026-09-12T09-00-00-"+thread, base.Add(48*time.Hour))
 	resumed.ThreadID, resumed.Title = thread, "Parent, resumed"
 	f.rows = []SessionSummary{resumed, child}
 	sessionTagSnapshots.drop()
@@ -344,29 +349,29 @@ func TestCodexTagFollowsTheThreadAndNeverItsChildren(t *testing.T) {
 func TestTaggedSessionOutlivesItsTranscript(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
 	f.tag("follow-up", f.rows[3])
-	if rec := f.do("PUT", "/api/session-notes", sessionNoteRequest{Session: sessionRef{Runtime: "claude", ID: "diligence"}, Text: "lawyer call Thursday"}); rec.Code != 200 {
+	if rec := f.do("PUT", "/api/session-notes", sessionNoteRequest{Session: sessionRef{Runtime: "claude", ID: "retro"}, Text: "designer call Thursday"}); rec.Code != 200 {
 		t.Fatalf("note: %d %s", rec.Code, rec.Body.String())
 	}
 	// What search kept of the conversation, as the indexer would have written it.
 	if _, err := f.ix.ReplaceTranscriptProjection(store.TranscriptProjection{
-		Session:    store.SessionRow{Vendor: "claude", ID: "diligence", Title: "Due diligence", CWD: "/work/pool"},
+		Session:    store.SessionRow{Vendor: "claude", ID: "retro", Title: "Sprint retro", CWD: "/work/site"},
 		Generation: "g1", IndexedAt: time.Unix(100, 0), SourceCount: 1,
 		Documents: []store.SearchDocument{
-			{Order: 0, Kind: "title", Text: "Due diligence", Lineage: "title"},
+			{Order: 0, Kind: "title", Text: "Sprint retro", Lineage: "title"},
 			{Order: 1, Kind: "user", Text: "Summarise the agreements", Lineage: "event:user"},
-			{Order: 2, Kind: "assistant", Text: "The lawyer question remains open.", Lineage: "event:assistant"}}}); err != nil {
+			{Order: 2, Kind: "assistant", Text: "The designer question remains open.", Lineage: "event:assistant"}}}); err != nil {
 		t.Fatal(err)
 	}
 	f.rows = append(f.rows[:3:3], f.rows[4:]...) // the scan no longer finds its transcript
 	sessionScanCoalescer = &scanCoalescer{result: f.rows, done: time.Now().Add(time.Hour)}
 	sessionTagSnapshots.drop()
 
-	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/pool&query="+url.QueryEscape("mine:follow-up note:lawyer"), nil))
-	if page.Total != 1 || !page.Sessions[0].TranscriptMissing || page.Sessions[0].Title != "Due diligence" || page.Sessions[0].Note != "lawyer call Thursday" {
+	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/site&query="+url.QueryEscape("mine:follow-up note:designer"), nil))
+	if page.Total != 1 || !page.Sessions[0].TranscriptMissing || page.Sessions[0].Title != "Sprint retro" || page.Sessions[0].Note != "designer call Thursday" {
 		t.Fatalf("page = %+v", page)
 	}
-	detail, err := LoadSession("claude", "diligence")
-	if err != nil || detail.Title != "Due diligence" {
+	detail, err := LoadSession("claude", "retro")
+	if err != nil || detail.Title != "Sprint retro" {
 		t.Fatalf("detail=%+v err=%v", detail, err)
 	}
 	// It says what was observed. "Deleted" would be a guess: an unreadable
@@ -374,17 +379,17 @@ func TestTaggedSessionOutlivesItsTranscript(t *testing.T) {
 	if detail.TranscriptNote != "No transcript file was found for this session. Showing the text that was kept." || strings.Contains(detail.TranscriptNote, "eleted") {
 		t.Fatalf("note = %q", detail.TranscriptNote)
 	}
-	if len(detail.Events) != 2 || detail.Events[0].Kind != "user" || detail.Events[1].Text != "The lawyer question remains open." {
+	if len(detail.Events) != 2 || detail.Events[0].Kind != "user" || detail.Events[1].Text != "The designer question remains open." {
 		t.Fatalf("the kept text opens as the conversation, without its title row: %+v", detail.Events)
 	}
 	if _, err := LoadSession("claude", "never-tagged-never-seen"); err == nil {
 		t.Fatal("an unknown session must still be not found")
 	}
-	if rec := f.do("POST", "/api/session-tags", sessionTagsRequest{Sessions: []sessionRef{{Runtime: "claude", ID: "diligence"}},
+	if rec := f.do("POST", "/api/session-tags", sessionTagsRequest{Sessions: []sessionRef{{Runtime: "claude", ID: "retro"}},
 		Retract: []store.SessionOwnerTagValue{{Value: "FOLLOW-UP"}}}); rec.Code != 200 {
 		t.Fatalf("a vanished session must be untaggable: %d %s", rec.Code, rec.Body.String())
 	}
-	page = decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/pool&group_by=repository", nil))
+	page = decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/site&group_by=repository", nil))
 	if page.Total != 0 {
 		t.Fatalf("with its last tag gone the session is no longer remembered: %+v", page)
 	}
@@ -392,7 +397,7 @@ func TestTaggedSessionOutlivesItsTranscript(t *testing.T) {
 
 func TestTagRequestsAreBoundedValidatedAndAllOrNothing(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
-	refs := []sessionRef{{Runtime: "claude", ID: "walmart"}, {Runtime: "claude", ID: "no-such-session"}}
+	refs := []sessionRef{{Runtime: "claude", ID: "checkout"}, {Runtime: "claude", ID: "no-such-session"}}
 	if rec := f.do("POST", "/api/session-tags", sessionTagsRequest{Sessions: refs, Apply: []store.SessionOwnerTagValue{{Value: "x"}}}); rec.Code != 404 {
 		t.Fatalf("unknown session: %d", rec.Code)
 	}
@@ -442,7 +447,7 @@ func TestViewCountsAreWithheldWhenTheyWouldLie(t *testing.T) {
 	for _, view := range []SavedSessionView{
 		{Name: "durable", Query: "mine:follow-up"},
 		{Name: "live", Query: "mine:follow-up status:running"},
-		{Name: "words", Query: "mine:follow-up lawyer"},
+		{Name: "words", Query: "mine:follow-up designer"},
 	} {
 		token = decodeBody[sessionViewsDocument](t, f.do("POST", "/api/session-views", sessionViewWriteRequest{StateToken: token, View: view})).StateToken
 	}
@@ -465,6 +470,48 @@ func TestViewCountsAreWithheldWhenTheyWouldLie(t *testing.T) {
 	}
 }
 
+// A filtered read says how many sessions the query matched, so a filter being
+// typed can be counted before it is saved; and says nothing where a saved
+// view's count would be withheld (session-views-rebuild plan §3.6).
+func TestViewDraftMatchTotalIsTheSavedViewsCountOrAbsent(t *testing.T) {
+	f := newOrganizationFixture(t, organizationRows()...)
+	f.tag("follow-up", f.rows[0])
+	token := decodeBody[sessionViewsDocument](t, f.do("GET", "/api/session-views", nil)).StateToken
+	saved := decodeBody[sessionViewsDocument](t, f.do("POST", "/api/session-views",
+		sessionViewWriteRequest{StateToken: token, View: SavedSessionView{Name: "durable", Query: "mine:follow-up"}})).Views[0]
+	counts := decodeBody[sessionRailResponse](t, f.do("GET", "/api/sessions?view=rail&counts=1", nil)).ViewCounts
+	read := func(query string) *int {
+		t.Helper()
+		return decodeBody[sessionRailResponse](t, f.do("GET", "/api/sessions?view=rail&query="+url.QueryEscape(query), nil)).MatchTotal
+	}
+	if total := read("mine:follow-up"); total == nil || *total != counts[saved.ID] || *total != 1 {
+		t.Fatalf("a durable filter is counted as its saved view is: %v against %+v", total, counts)
+	}
+	if total := read("mine:nobody-has-this"); total == nil || *total != 0 {
+		t.Fatalf("a filter that matches nothing answers 0, not silence: %v", total)
+	}
+	for _, query := range []string{"mine:follow-up status:running", "mine:follow-up open:yes", "mine:follow-up designer"} {
+		if total := read(query); total != nil {
+			t.Fatalf("%q cannot be counted truthfully, so it carries no number: %d", query, *total)
+		}
+	}
+	if rail := decodeBody[sessionRailResponse](t, f.do("GET", "/api/sessions?view=rail", nil)); rail.MatchTotal != nil {
+		t.Fatalf("the unfiltered rail is not a filter's answer: %d", *rail.MatchTotal)
+	}
+
+	restore := sessionTagsRead
+	t.Cleanup(func() { sessionTagsRead = restore; sessionTagSnapshots.drop() })
+	sessionTagsRead = func(now time.Time) sessionTagSnapshot {
+		snapshot := restore(now)
+		snapshot.truncated = true
+		return snapshot
+	}
+	sessionTagSnapshots.drop()
+	if total := read("mine:follow-up"); total != nil {
+		t.Fatalf("tags read in part must show no number, not a low one: %d", *total)
+	}
+}
+
 func TestStoreUnavailableLeavesTheRailStandingWithoutTags(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
 	f.tag("follow-up", f.rows[0])
@@ -472,7 +519,7 @@ func TestStoreUnavailableLeavesTheRailStandingWithoutTags(t *testing.T) {
 	t.Cleanup(func() { sessionTagsRead = restore; sessionTagSnapshots.drop() })
 	sessionTagsRead = func(time.Time) sessionTagSnapshot { return sessionTagSnapshot{} }
 	sessionTagSnapshots.drop()
-	page := decodeBody[sessionPageResponse](t, f.do("GET", "/api/sessions?view=repository&repository=/work/oms&mode=all", nil))
+	page := decodeBody[sessionPageResponse](t, f.do("GET", "/api/sessions?view=repository&repository=/work/app&mode=all", nil))
 	if page.Total != 3 || len(page.Sessions[0].Tags) != 0 {
 		t.Fatalf("an unreadable tag store must not take the rail down: %+v", page)
 	}
@@ -557,15 +604,15 @@ func TestTheRowCapNeverHidesATagFromAViewOrTheHeader(t *testing.T) {
 		f.tag(fmt.Sprintf("tag-%02d", i), f.rows[0])
 	}
 	oldest := url.QueryEscape("mine:tag-00")
-	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/oms&query="+oldest, nil))
+	page := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/app&query="+oldest, nil))
 	if page.Total != 1 || len(page.Sessions[0].Tags) != limit {
 		t.Fatalf("the tag beyond the row cap must still match, and the row still shows only %d: total=%d tags=%d", limit, page.Total, len(page.Sessions[0].Tags))
 	}
-	excluded := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/oms&query="+url.QueryEscape("-mine:tag-00"), nil))
-	if strings.Contains(titles(excluded.Sessions), "Walmart plan") {
+	excluded := decodeBody[sessionGroupPageResponse](t, f.do("GET", "/api/sessions?view=group&mode=all&group=/work/app&query="+url.QueryEscape("-mine:tag-00"), nil))
+	if strings.Contains(titles(excluded.Sessions), "Checkout plan") {
 		t.Fatal("an exclusion admitted a session because its tag was cut off before matching")
 	}
-	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=walmart", nil))
+	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=checkout", nil))
 	if len(header.Sessions[0].Tags) != limit+1 {
 		t.Fatalf("the header must show, and let the owner remove, every tag: %d", len(header.Sessions[0].Tags))
 	}
@@ -585,7 +632,7 @@ func TestUnreadableTagsAreNeverServedAsNoTags(t *testing.T) {
 	sessionTagSnapshots.drop()
 	for _, target := range []string{
 		"/api/sessions?view=rail&query=" + url.QueryEscape("mine:follow-up"),
-		"/api/sessions?view=group&mode=all&group=/work/oms&query=" + url.QueryEscape("-mine:follow-up"),
+		"/api/sessions?view=group&mode=all&group=/work/app&query=" + url.QueryEscape("-mine:follow-up"),
 	} {
 		if rec := f.do("GET", target, nil); rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s answered %d from an unreadable tag store: %s", target, rec.Code, rec.Body.String())
@@ -603,13 +650,13 @@ func TestUnreadableTagsAreNeverServedAsNoTags(t *testing.T) {
 func TestAMixedTagChangeIsAllOrNothingAndBounded(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
 	f.tag("planning", f.rows[0])
-	ref := []sessionRef{{Runtime: "claude", ID: "walmart"}}
+	ref := []sessionRef{{Runtime: "claude", ID: "checkout"}}
 	rec := f.do("POST", "/api/session-tags", sessionTagsRequest{Sessions: ref,
 		Retract: []store.SessionOwnerTagValue{{Value: "planning"}}, Apply: []store.SessionOwnerTagValue{{Value: "bad*"}}})
 	if rec.Code != 400 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	after := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=walmart", nil))
+	after := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=checkout", nil))
 	if len(after.Sessions[0].Tags) != 1 || after.Sessions[0].Tags[0].Value != "planning" {
 		t.Fatalf("the retract half of a refused request was kept: %+v", after.Sessions[0].Tags)
 	}
@@ -631,16 +678,16 @@ func TestAMixedTagChangeIsAllOrNothingAndBounded(t *testing.T) {
 // rail without him having done anything.
 func TestDetectorFactsNeverChangeAPlainRepositoryPage(t *testing.T) {
 	f := newOrganizationFixture(t, organizationRows()...)
-	before := f.do("GET", "/api/sessions?view=repository&repository=/work/oms&mode=all", nil).Body.String()
+	before := f.do("GET", "/api/sessions?view=repository&repository=/work/app&mode=all", nil).Body.String()
 	for _, row := range f.rows {
 		f.facet(row.ID, "phase", "plan", 100)
 		f.facet(row.ID, "fs", "edit", 200)
 	}
-	after := f.do("GET", "/api/sessions?view=repository&repository=/work/oms&mode=all", nil).Body.String()
+	after := f.do("GET", "/api/sessions?view=repository&repository=/work/app&mode=all", nil).Body.String()
 	if before != after {
 		t.Fatalf("detector facts changed the bytes of a plain page:\nbefore: %s\n after: %s", before, after)
 	}
-	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=walmart", nil))
+	header := decodeBody[sessionTagsResponse](t, f.do("GET", "/api/session-tags?runtime=claude&id=checkout", nil))
 	if len(header.Sessions[0].Facts) != 2 {
 		t.Fatalf("the header is where facts are read: %+v", header.Sessions[0])
 	}

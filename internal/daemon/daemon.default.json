@@ -1,0 +1,11 @@
+{
+  "handoff": {
+    "inject_max_bytes": 4900,
+    "firing_window": "720h",
+    "brief_wait": "168h",
+    "conversation_turns": 20,
+    "conversation_max_bytes": 65536,
+    "recall_check_sessions": 5,
+    "follow_retry": "1s"
+  }
+}

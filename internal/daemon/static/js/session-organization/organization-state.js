@@ -8,6 +8,7 @@ export const organization = {
   views: [],        // saved views as the daemon returned them
   rejected: [],     // entries of the owner's file that could not be read
   stateToken: '',   // names the file bytes the views came from; every write presents it
+  origin: 'none',   // the daemon's path for session-views.json, or "none"
   viewID: '',       // selected view, '' for Repositories
   barQuery: '',     // a structured filter typed into the bar
   barGroupBy: '',   // grouping chosen for the bar's filter
@@ -58,5 +59,12 @@ export function adoptViews(document) {
   organization.views = Array.isArray(document?.views) ? document.views : [];
   organization.rejected = Array.isArray(document?.rejected) ? document.rejected : [];
   organization.stateToken = String(document?.state_token || '');
+  organization.origin = String(document?.origin || 'none');
   if (organization.viewID && !selectedView()) organization.viewID = '';
+  // Surfaces repaint from the adopted state. The guard is load-bearing: the
+  // node unit tests call adoptViews where `document` is undefined (the same
+  // pattern settings.js uses for its subpage event).
+  if (typeof globalThis.document !== 'undefined' && globalThis.document.dispatchEvent) {
+    globalThis.document.dispatchEvent(new CustomEvent('cg:views-changed'));
+  }
 }

@@ -21,7 +21,9 @@ type Runtime interface {
 	// Collect discovers this vendor's session files (no parsing).
 	Collect() []fileJob
 	// Summarize builds a full summary for one file; ok=false skips it (empty).
-	Summarize(j fileJob) (SessionSummary, *SessionUsage, map[string]*DayBucket, bool)
+	// Usage lives on the summary's rail fields (Model, Turns, Context); totals
+	// come from recorded calls (token-usage-analytics plan §3.4).
+	Summarize(j fileJob) (SessionSummary, bool)
 	// Normalize reads a session file into canonical events.
 	Normalize(path string) ([]CanonicalEvent, int, *SessionUsage, error)
 	// ThreadTitle returns a display-title override for a summary, or "" for
@@ -47,8 +49,6 @@ type SessionRef struct {
 type SessionRecord struct {
 	Ref     SessionRef
 	Summary SessionSummary
-	Usage   *SessionUsage
-	Days    map[string]*DayBucket
 }
 
 func sessionSource(runtime string) (SessionSource, bool) {
@@ -213,6 +213,23 @@ type ResumeHandle interface {
 	ResumeID(s SessionSummary) string
 }
 
+// NativeOpener is the optional desktop-open capability: a runtime whose vendor
+// ships a desktop app with a URL scheme reports the link that opens this
+// session there. ok=false means this session has none (a subagent would open
+// its parent; an id the app would refuse opens nothing). The adapter composes
+// the URL from a fixed template and an id it has shape-checked, so scheme and
+// path are never data (native-session-open-links plan §2.1).
+type NativeOpener interface {
+	NativeOpen(s SessionSummary) (NativeOpenLink, bool)
+}
+
+// NativeOpenLink is one session's desktop-app link. App is the desktop app's
+// own name, for the control's label.
+type NativeOpenLink struct {
+	URL string `json:"url"`
+	App string `json:"app"`
+}
+
 // ActivityEvidenceReporter is the optional session-activity evidence
 // capability (natural-session plan, red-team M9/B3): a runtime reports which
 // lifecycle signal kinds its natural sessions serve and through which
@@ -287,6 +304,7 @@ func CapabilityMatrix() map[string]CLICapability {
 				"edge_source":                      capImplemented[EdgeSource](rt),
 				"turn_anchorer":                    capImplemented[TurnAnchorer](rt),
 				"resume_handle":                    capImplemented[ResumeHandle](rt),
+				"native_open":                      capImplemented[NativeOpener](rt),
 				"activity_evidence":                capImplemented[ActivityEvidenceReporter](rt),
 				"lifecycle_normalizer":             capImplemented[LifecycleNormalizer](rt),
 				"incremental_lifecycle_normalizer": capImplemented[IncrementalLifecycleNormalizer](rt),

@@ -97,3 +97,19 @@ func TestFactFromTagAndResourceDetectors(t *testing.T) {
 		t.Fatalf("only resource-scoped detectors route onto entities: %v", res)
 	}
 }
+
+// FoldSignaturePin is the fold's behavior at this commit. The team server pins the same
+// constant (internal/records); changing it here is a repin event (item 4 decision 8).
+const FoldSignaturePin = "d42fbda7fe2cfa438467755503666957689baa33a10f401da676eeac9ebd2df5"
+
+func TestFoldSignatureIsPinned(t *testing.T) {
+	var facts []StateFact
+	for _, e := range FoldSignatureFixture {
+		for _, tag := range e.Tags {
+			facts = FoldFact(facts, FactFromTag(tag), e.TS)
+		}
+	}
+	if got := FoldSignature(facts); got != FoldSignaturePin {
+		t.Fatalf("the fold's behavior changed: signature %s, pinned %s — a fold change is a REPIN event for the team server (item 4 decision 8): update this pin AND the server's", got, FoldSignaturePin)
+	}
+}

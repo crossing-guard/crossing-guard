@@ -2,6 +2,7 @@ package guardcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,12 @@ type RuntimePresenceReporter interface {
 	RuntimePresent() bool
 }
 
+// RuntimeDisplayNamer names a runtime for people when nothing else does: no chat
+// capability and no connection descriptor carries its name.
+type RuntimeDisplayNamer interface {
+	DisplayName() string
+}
+
 // HookAskBudgetReporter carries a measured safe Crossing Guard wait budget for a
 // runtime. A non-positive value means ask/confirm is not verified and must fail closed
 // immediately. Every named enforcing runtime must declare this capability; only
@@ -74,11 +81,102 @@ type HookContextEncoder interface {
 	EncodeHookContext(rawEvent, context string) ([]byte, bool)
 }
 
+// HookSubagentReporter is the optional port through which a runtime says that
+// one hook invocation ran inside a sub-agent: a nested conversation whose hooks
+// name the parent session. Context printed there reaches only the sub-agent,
+// so such an invocation never carries helper messages addressed to the session
+// (subagent-carrier-boundary plan). The runtime receives the payload's
+// nested-agent id as sent; a runtime without the port is never treated as nested.
+type HookSubagentReporter interface {
+	HookRunsInSubagent(agentID string) bool
+}
+
+// HookNestedCallKinds is the optional port through which a runtime publishes
+// the observation kinds — the framework's vocabulary, never a vendor event
+// name — at which its hook can tell a nested call from the session's own. A
+// message that must never reach a child (a handoff's brief) is carried only at
+// those kinds; at any other kind the hook's "can carry" says nothing about
+// nesting. A runtime without the port publishes none.
+type HookNestedCallKinds interface {
+	NestedCallKinds() []string
+}
+
+// NestedCallKinds lists the kinds at which runtime's hook can tell a nested
+// call: empty for a runtime that reports no sub-agents.
+func NestedCallKinds(runtime string) []string {
+	installer := hookInstallers[runtime]
+	if _, reports := installer.(HookSubagentReporter); !reports {
+		return nil
+	}
+	if kinds, ok := installer.(HookNestedCallKinds); ok {
+		return append([]string(nil), kinds.NestedCallKinds()...)
+	}
+	return nil
+}
+
+// HookContextCaps is each runtime's byte cap on context injected at one hook
+// boundary: what its encoder cuts to. A value written to be whole at a boundary
+// must fit the smallest of these, so the owner of such a value reads them here
+// instead of copying a number.
+func HookContextCaps() map[string]int {
+	caps := map[string]int{}
+	for name, installer := range hookInstallers {
+		if capped, ok := installer.(hookContextCapReporter); ok {
+			caps[name] = capped.hookContextCap()
+		}
+	}
+	return caps
+}
+
+// hookContextCapReporter is implemented by an installer whose encoder has a
+// byte cap.
+type hookContextCapReporter interface {
+	hookContextCap() int
+}
+
+// HookContextJoin separates the messages one boundary carries.
+const HookContextJoin = "\n\n"
+
+// LifecycleHookOwner reports whose installation a runtime's lifecycle hook is
+// under this home: the binary its hook entry names and OwnershipOf's answer for
+// it against self ("self", "foreign", "dead", or "none" when no entry exists).
+// It is the rule by which a daemon may edit that runtime's settings for another
+// feature: only the installation whose hook the runtime already runs.
+func LifecycleHookOwner(runtime, self string) (ownership, binary string) {
+	installer, ok := hookInstallers[runtime]
+	if !ok {
+		return "none", ""
+	}
+	config := installer.ResolveConfig()
+	if config == "" {
+		return "none", ""
+	}
+	binary = installer.HookBinary(config)
+	return OwnershipOf(binary, self), binary
+}
+
+// LifecycleHookConfig is the settings location LifecycleHookOwner read for a runtime
+// under this home: a file, or for a runtime whose settings are a directory, that
+// directory. "" when the runtime is unknown or not present.
+func LifecycleHookConfig(runtime string) string {
+	installer, ok := hookInstallers[runtime]
+	if !ok {
+		return ""
+	}
+	return installer.ResolveConfig()
+}
+
 // HookDecisionEncoder is the optional port through which a runtime expresses a
 // blocked tool call. A runtime without one keeps the historical compatibility
 // envelope (see emitDeny).
 type HookDecisionEncoder interface {
 	EncodeHookDeny(rawEvent, reason string) []byte
+}
+
+// HookInputDecoder normalizes a runtime's native wire format at the vendor edge.
+// The event is supplied by the installed command, not inferred from JSON fields.
+type HookInputDecoder interface {
+	DecodeHookInput(input io.Reader, event string) (hookInput, error)
 }
 
 var hookInstallers = map[string]HookInstaller{}
@@ -88,6 +186,7 @@ const installUsage = `usage:
   crossing-guard install --codex-home PATH
   crossing-guard install --cursor-config PATH
   crossing-guard install --opencode-config PATH
+  crossing-guard install --antigravity-hooks PATH
 
 Installs or repairs one runtime's supported lifecycle hooks while preserving foreign
 configuration. OpenCode is collection-only; its PreToolUse callback never enters the

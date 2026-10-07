@@ -34,11 +34,26 @@ type understandingCoordinatorStats struct {
 	active      atomic.Int64
 	recovered   atomic.Int64
 	missingRoot atomic.Int64
+	// Retention: generations whose facts were pruned, prunes that lost the write
+	// lock and wait for the next pass, scans that re-measured a snapshot whose
+	// earlier generation was pruned, candidates left by the last pass, and when
+	// that pass started (unix seconds).
+	factsPruned       atomic.Int64
+	pruneSkippedBusy  atomic.Int64
+	remeasured        atomic.Int64
+	pruneCandidates   atomic.Int64
+	retentionLastPass atomic.Int64
+	// pruneUnfinished is how many pruned generations still hold rows awaiting
+	// delete, as of the running or last pass.
+	pruneUnfinished atomic.Int64
 }
 
 type understandingWork struct {
 	source store.UnderstandingCheckpoint
 	due    time.Time
+	// remeasure marks a source whose exact generation exists but had its facts
+	// pruned: the scan appends a new generation beside the pruned one.
+	remeasure bool
 }
 
 type understandingScanFunc func(context.Context, *store.Index, understanding.ScanInput) (understanding.ScanResult, error)
@@ -55,15 +70,17 @@ type understandingScanCoordinator struct {
 	stop   context.CancelFunc
 	now    func() time.Time
 	scan   understandingScanFunc
-	quiet  time.Duration
-	stats  understandingCoordinatorStats
-	closed bool
+	// retentionSettings reads the retention configuration in force; a test replaces it.
+	retentionSettings func() (understandingRetentionSettings, bool)
+	quiet             time.Duration
+	stats             understandingCoordinatorStats
+	closed            bool
 }
 
 func newUnderstandingScanCoordinator(g *Governor) *understandingScanCoordinator {
 	return &understandingScanCoordinator{g: g, items: map[string]understandingWork{},
 		wake: make(chan struct{}, 1), now: time.Now, scan: understanding.Scan,
-		quiet: understandingQuietWindow}
+		retentionSettings: understandingRetentionSettingsNow, quiet: understandingQuietWindow}
 }
 
 func (c *understandingScanCoordinator) offerCheckpoint(checkpointID int64) {
@@ -93,12 +110,24 @@ func (c *understandingScanCoordinator) offer(source store.UnderstandingCheckpoin
 		c.stats.failed.Add(1)
 		return
 	}
-	if found {
+	// A complete generation answers the offer only while it still holds its facts.
+	// A pruned one is history, and the scan appends a new generation beside it.
+	pruned := found && existing.Status == "complete" && existing.FactsState == store.UnderstandingFactsPruned
+	if found && !pruned {
 		if existing.Status == "complete" || (existing.Status == "failed" &&
 			existing.EndedAt > c.now().Add(-understandingFailureBackoff).UnixNano()) {
 			c.stats.coalesced.Add(1)
 			return
 		}
+	}
+	// The newest attempt may be a failed one that sits on top of a pruned generation,
+	// so the counter asks the store whether any pruned generation of this identity exists.
+	remeasure, err := c.g.ix.PrunedUnderstandingGenerationExists(change.RepositoryID,
+		change.CheckoutID, change.SnapshotDigest, codemap.StructuralSchema,
+		c.g.analyzerAssembly.Digest(), "none", "")
+	if err != nil {
+		c.stats.failed.Add(1)
+		return
 	}
 	due := c.now().Add(c.quiet)
 	if checkpoint.Kind == "attachment" || checkpoint.Kind == "pre-mutation" ||
@@ -113,7 +142,7 @@ func (c *understandingScanCoordinator) offer(source store.UnderstandingCheckpoin
 	}
 	if current, ok := c.items[key]; ok {
 		if newerUnderstandingSource(current.source.Checkpoint, checkpoint) {
-			c.items[key] = understandingWork{source: source, due: due}
+			c.items[key] = understandingWork{source: source, due: due, remeasure: remeasure}
 		}
 		c.stats.coalesced.Add(1)
 		c.mu.Unlock()
@@ -125,7 +154,7 @@ func (c *understandingScanCoordinator) offer(source store.UnderstandingCheckpoin
 		c.mu.Unlock()
 		return
 	}
-	c.items[key] = understandingWork{source: source, due: due}
+	c.items[key] = understandingWork{source: source, due: due, remeasure: remeasure}
 	c.stats.offered.Add(1)
 	c.mu.Unlock()
 	c.signal()
@@ -196,6 +225,9 @@ func (c *understandingScanCoordinator) runWork(parent context.Context, work unde
 		return
 	}
 	c.stats.completed.Add(1)
+	if work.remeasure {
+		c.stats.remeasured.Add(1)
+	}
 }
 
 // pending reports only an exact queued or active snapshot. It performs no admission
@@ -273,6 +305,7 @@ func startUnderstandingScheduling(g *Governor) {
 	coordinator.stop = cancel
 	g.understanding = coordinator
 	go coordinator.run(ctx)
+	go coordinator.runRetention(ctx)
 }
 
 func stopUnderstandingScheduling(g *Governor) {

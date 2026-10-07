@@ -87,8 +87,8 @@ export class EventStreamClient {
   }
 
   async connect(signal) {
-    if (this.taskStore.cursor() === 0) await this.resnapshot('tasks', signal);
-    await this.resnapshot('activity', signal);
+    if (this.taskStore.cursor() === 0) await this.openingSnapshot('tasks', signal);
+    await this.openingSnapshot('activity', signal);
     const response = await this.open({
       tasks: this.taskStore.cursor(), activity: this.activityStore.cursor(),
       runtime: this.subject.runtime, id: this.subject.id, clientID: this.clientID,
@@ -99,6 +99,20 @@ export class EventStreamClient {
       malformed => this.notify({ state: 'degraded', detail: 'Skipped a malformed event.', malformed }));
     for (const feed of resets) await this.resnapshot(feed, signal);
     return resets.size ? 'reset' : 'closed';
+  }
+
+  // openingSnapshot is the pre-open snapshot. A 503 there means the feed's
+  // service is absent for the life of the daemon (a degraded start), so the
+  // stream opens without it: approvals and the other feeds stay live, and the
+  // feed's own `unavailable` frame tells the pill why. Only this path skips —
+  // a 503 after a reset contradicts the reset and backs off like any failure
+  // (degraded-surfaces-state-the-reason plan §2.2).
+  async openingSnapshot(feed, signal) {
+    try {
+      await this.resnapshot(feed, signal);
+    } catch (error) {
+      if (error?.status !== 503) throw error;
+    }
   }
 
   async resnapshot(feed, signal) {

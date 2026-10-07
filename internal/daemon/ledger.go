@@ -12,15 +12,16 @@ package daemon
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"crossing-guard/engine"
 	"crossing-guard/internal/rulebook"
+	"crossing-guard/store"
 )
 
 var (
-	liveLedger      *engine.Ledger // nil until initLedger succeeds (config present)
-	engineDetectors []engine.Detector
-	enginePolicy    *engine.Policy
+	liveLedger   *engine.Ledger // nil until initLedger succeeds (config present)
+	enginePolicy *engine.Policy
 )
 
 // initLedger loads detectors + policy and opens the daemon-owned ledger. Non-fatal:
@@ -29,11 +30,10 @@ var (
 func initLedger(ledgerPath string, dets []engine.Detector, polPath string) error {
 	// ADR 0025's convergence, applied to the file layout rather than the format:
 	// policy-engine.json and policy/rules.json are the SAME format, so a separate
-	// engine-ledger policy is a second copy of the rules you enforce — free to drift,
-	// and it did (the compiled coverage report described a file the hook never read).
-	// Absent, we fall back to the ACTIVE enforcement rules, which is what the
-	// coverage report should have been describing all along: what you actually
-	// enforce. A present file still wins, so an existing deploy is unchanged.
+	// engine-ledger policy is a second copy of the rules you enforce — free to drift.
+	// Absent, the dev ledger decides over the ACTIVE enforcement rules; a present file
+	// still wins for the ledger. The coverage report no longer reads either: it labels
+	// the rulebook itself (handlePolicyCoverage).
 	supplement, err := rulebook.LoadInvocationPolicyPath(polPath, "daemon-invocation-or-compatibility")
 	if err != nil {
 		// errors.Is, NOT os.IsNotExist: the latter does not unwrap %w chains, so the
@@ -54,28 +54,77 @@ func initLedger(ledgerPath string, dets []engine.Detector, polPath string) error
 	if err != nil {
 		return err
 	}
-	liveLedger, engineDetectors, enginePolicy = l, dets, pol
+	liveLedger, enginePolicy = l, pol
 	return nil
 }
 
+// daemonPolicyPath is the daemon's own compatibility policy file (--policy, the
+// daemon's $CG_POLICY, <data>/policy-engine.json). Only the dev ledger reads it.
+var daemonPolicyPath string
+
 // GET /api/policy/coverage — the compiled honest label per rule
 // (P-COMPILE-2): boundary = detection-coverage ∧ enforcement-reach, computed
-// mechanically. The console renders FROM this — no shield where there's a
-// watch (gui-design §6).
+// mechanically. It labels the user rulebook as loaded now — the set the stateful tier
+// reloads on every decision and the hook's standalone tier loads — classified with the
+// governor's detectors, at the stateful tier's reach on this host (stateful-tier reach
+// plan D-5). Team layers are per checkout and the invocation file per hook
+// environment; neither is visible here, so the daemon's own compatibility file is
+// reported, never labeled.
 func handlePolicyCoverage(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
-		"legacy": map[string]any{
-			"rules": "rules.json guards",
-			"label": "best-effort [config] — regex guards on shell-command text; coverage not canary-probed; a hard guarantee needs a non-bypassable backstop",
-		},
+		"note": "the user rulebook only: team layers are per checkout — `crossing-guard coverage` in a checkout labels them. " +
+			"The hook's engine tier loads this rulebook only when a hook's own invocation file exists with no rules or is the rulebook itself; " +
+			"the daemon cannot see that file, so a rule only that tier could fire is UNVERIFIED here.",
 	}
-	if enginePolicy == nil {
-		out["engine"] = nil
-		out["note"] = "engine policy not configured — only the legacy regex layer is active"
+	if daemonPolicyPath != "" {
+		inv, err := rulebook.LoadInvocationPolicyPath(daemonPolicyPath, "daemon-invocation-or-compatibility")
+		if err != nil || inv.Available {
+			c := map[string]any{"path": daemonPolicyPath, "labeled": false,
+				"note": "read by the dev ledger only; a hook loads the invocation file its own environment resolves, which the daemon cannot see"}
+			if err != nil {
+				c["error"] = err.Error()
+			} else {
+				c["origin"] = inv.Origin
+			}
+			out["compatibility"] = c
+		}
+	}
+	doc, err := rulebook.LoadDocument()
+	if err != nil {
+		out["engine"], out["error"] = nil, "rulebook: "+err.Error()
 		writeJSON(w, out)
 		return
 	}
-	out["engine"] = engine.CompileBoundaries(enginePolicy, engineDetectors, engine.ReachStop)
+	out["rulebook"] = map[string]any{"path": doc.Path, "origin": doc.Origin, "digest": doc.Digest}
+	pol := doc.Policy
+	if pol == nil {
+		pol = &engine.Policy{}
+	}
+	// Model-claim producers come from this daemon's own store. Without a governor no
+	// stateful tier runs, so state terms are labeled at its "not running" reach.
+	// HookEngine stays EngineUnknown: whether a hook's engine tier loads this rulebook is
+	// decided by that hook's invocation file, which the daemon cannot see.
+	set := engine.LiveRuleSet{Kind: engine.SetUser, Tier: engine.StatefulDown}
+	var dets []engine.Detector
+	sp := store.StateProducersFor(nil, 0)
+	switch {
+	case governor != nil:
+		dets, sp = governor.dets, store.StateProducersFor(governor.ix, time.Now().Unix())
+		set.Tier = engine.StatefulUnarmed
+		if governor.platform.StatefulEnforcementReady() {
+			set.Tier = engine.StatefulArmed
+		}
+	case policyDetectorRuntime.governor != nil:
+		dets = policyDetectorRuntime.governor.Detectors
+		sp.AgentClaimsNote = "the daemon's governance store is not open"
+	default:
+		// Never label with an empty detector set: every detector-backed rule would read
+		// a false INERT.
+		out["engine"], out["error"] = nil, "no governor detector set resolved"
+		writeJSON(w, out)
+		return
+	}
+	out["engine"] = engine.CompileLiveBoundaries(pol, dets, sp, set)
 	writeJSON(w, out)
 }
 

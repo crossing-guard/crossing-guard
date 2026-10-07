@@ -34,7 +34,7 @@ func deadlineError() *LiveDiffError {
 // bodies, fixed cap) because the pane needs git's own words and a configured
 // cap; the plan's §13 records the choice.
 func runLiveGit(ctx context.Context, root string, limit int64, allowExit1 bool, args ...string) ([]byte, bool, error) {
-	argv := append([]string{"-C", root, "--no-optional-locks", "-c", "core.quotepath=false"}, args...)
+	argv := append(append([]string{"-C", root, "--no-optional-locks", "-c", "core.quotepath=false"}, gitReadGuard(ctx)...), args...)
 	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
 	out := &cappedOutput{max: int(limit)}

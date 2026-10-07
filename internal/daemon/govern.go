@@ -28,6 +28,7 @@ import (
 	"crossing-guard/internal/collectionconfig"
 	"crossing-guard/internal/detectorselection"
 	"crossing-guard/internal/observation"
+	"crossing-guard/internal/platform"
 	"crossing-guard/store"
 )
 
@@ -68,6 +69,14 @@ type Observation struct {
 	// caller reported no decision — recorded as such, never guessed at.
 	Decision string `json:"decision"` // allow | deny | ask
 	Reason   string `json:"reason"`
+	// Rule is the rule that produced or asked for Decision; empty is unknown, never guessed.
+	Rule string `json:"rule,omitempty"`
+	// Layer is the distribution tier that rule arrived by (schema 38): user |
+	// repository | organization; empty is unknown, never guessed.
+	Layer string `json:"layer,omitempty"`
+	// LayerReasons is the layered loader's notes for this action (why a team
+	// layer did or did not apply); empty is none. Same no-guessing rule.
+	LayerReasons string `json:"layer_reasons,omitempty"`
 	// Origin is data LINEAGE: "live" (the hook, as it happened), "transcript" (exact
 	// post-hoc vendor evidence), or "imported" (the legacy display-event backfill —
 	// lossy, timestamp-folded, never confused with live truth). Empty defaults to
@@ -81,10 +90,22 @@ type Observation struct {
 var ErrObservationCollision = errors.New("observation identity collision")
 
 type ObservationEvidence struct {
-	Delivery   store.EventDelivery
-	Input      store.EventInput
-	Attachment *store.SessionCheckpoint
-	Activity   *store.SessionActivityObservation
+	Delivery store.EventDelivery
+	// DigestWithoutRule is the envelope's digest as a daemon from before Envelope.Rule
+	// computed it. During an upgrade the new hook binary is in place before the daemon
+	// reloads; an observation that old daemon committed, whose acknowledgement was lost,
+	// replays here with a digest that differs ONLY by the rule. That is the same
+	// observation, so it is a duplicate — never a collision that quarantines the file.
+	DigestWithoutRule string
+	// DigestWithoutLayer is the same upgrade window one field later (schema 38): a
+	// daemon from 33–37 computed the digest WITH the rule but WITHOUT the layer, so a
+	// replay carrying a staged layer differs only by it. One window digest per added
+	// envelope field — the pattern is the point, and the next field extends it the
+	// same way.
+	DigestWithoutLayer string
+	Input              store.EventInput
+	Attachment         *store.SessionCheckpoint
+	Activity           *store.SessionActivityObservation
 }
 
 type ObserveResult struct {
@@ -116,7 +137,12 @@ type Governor struct {
 	// rather than a direct runtime.GOOS read so a test can pin it — otherwise the
 	// stateful-enforcement tests only pass on the demonstrated GOOS and go vacuously
 	// green everywhere else.
-	platform PlatformSupport
+	platform platform.Support
+	// layerStore is the directory whose adopted team-layer records (layers.json, the
+	// repository index, staged documents) the stateful tier reads — the one the team
+	// link writes. Empty for a governor initGovernor did not build (import, tests):
+	// the stateful tier then evaluates the user layer only.
+	layerStore string
 	// resultPayloadMode is loaded once from the typed local collection artifact and
 	// enforced again at the persistence boundary. Hooks are evidence producers, not
 	// trusted retention authorities.
@@ -133,6 +159,7 @@ type Governor struct {
 	understanding          *understandingScanCoordinator
 	analyzerAssembly       *codemap.AnalyzerAssembly
 	analyzerSelectionError string
+	foldRepairError        string // a failed start-up fold repair (repairLegacyDataClassFolds)
 }
 
 // openGovernedStore opens the store AND loads the layered detector library the same way
@@ -162,7 +189,7 @@ func NewGovernor(ix *store.Index, dets []engine.Detector) *Governor {
 	res := engine.ResourceDetectors(dets)
 	assembly, _ := analyzerhost.Compatibility()
 	return &Governor{ix: ix, dets: dets, resourceDets: res, chain: map[string]*engine.ChainAnchor{}, startedAt: time.Now().Unix(), analyzerAssembly: assembly,
-		platform: CurrentPlatformSupport(), resultPayloadMode: collectionconfig.CodeEffects,
+		platform: platform.Current(), resultPayloadMode: collectionconfig.CodeEffects,
 		collectionConfigOrigin: "builtin-default", settled: settledCheckpointCoordinator{items: map[string]*settledCheckpointState{}},
 		lifecycleSlot: make(chan struct{}, 1), checkpointSlot: make(chan struct{}, 1)}
 }
@@ -171,7 +198,8 @@ func NewGovernor(ix *store.Index, dets []engine.Detector) *Governor {
 // out loud, whether capture is actually happening — the failure D2 hid for four days
 // was silent precisely because no surface asked this question.
 type GovernorHealth struct {
-	Configured                         bool     `json:"configured"` // false only when the governor never opened; the handler reports that case itself
+	Configured                         bool     `json:"configured"`        // false only when the governor never opened; the handler reports that case itself
+	Problem                            string   `json:"problem,omitempty"` // why the governor never opened; set only when Configured is false
 	StartedAt                          int64    `json:"started_at"`
 	LastEventTS                        int64    `json:"last_event_ts"` // 0 = nothing ever captured
 	TotalEvents                        int64    `json:"total_events"`
@@ -181,6 +209,7 @@ type GovernorHealth struct {
 	AnalyzerBundleDigest               string   `json:"analyzer_bundle_digest,omitempty"`
 	AnalyzerLanguages                  []string `json:"analyzer_languages,omitempty"`
 	AnalyzerSelectionError             string   `json:"analyzer_selection_error,omitempty"`
+	FoldRepairError                    string   `json:"fold_repair_error,omitempty"`
 	LifecycleQueued                    int64    `json:"lifecycle_queued,omitempty"`
 	LifecycleCoalesced                 int64    `json:"lifecycle_coalesced,omitempty"`
 	LifecycleOverflow                  int64    `json:"lifecycle_overflow,omitempty"`
@@ -201,6 +230,16 @@ type GovernorHealth struct {
 	UnderstandingRecovered             int64    `json:"understanding_recovered"`
 	UnderstandingMissingRoot           int64    `json:"understanding_missing_root"`
 	UnderstandingQueueDepth            int      `json:"understanding_queue_depth"`
+	UnderstandingFactsPruned           int64    `json:"understanding_facts_pruned"`
+	UnderstandingPruneSkippedBusy      int64    `json:"understanding_prune_skipped_busy"`
+	UnderstandingRemeasured            int64    `json:"understanding_remeasured"`
+	UnderstandingPruneCandidates       int64    `json:"understanding_prune_candidates"`
+	UnderstandingPruneUnfinished       int64    `json:"understanding_prune_unfinished"`
+	UnderstandingRetentionLastPass     int64    `json:"understanding_retention_last_pass,omitempty"`
+	// UnderstandingRetentionEnabled is whether a pass would run now. The candidate
+	// count means "backlog" only when this is true and a last pass is recorded;
+	// before the first pass, or with retention off, it is 0 without having measured.
+	UnderstandingRetentionEnabled bool `json:"understanding_retention_enabled"`
 }
 
 // Health reports capture liveness. It reads the log's newest row (the detector for
@@ -209,7 +248,8 @@ type GovernorHealth struct {
 func (g *Governor) Health() (GovernorHealth, error) {
 	h := GovernorHealth{Configured: true, StartedAt: g.startedAt,
 		ObserveFailures: g.observeFailures.Load(), ResultPayloadMode: string(g.resultPayloadMode),
-		CollectionConfigOrigin: g.collectionConfigOrigin, AnalyzerSelectionError: g.analyzerSelectionError}
+		CollectionConfigOrigin: g.collectionConfigOrigin, AnalyzerSelectionError: g.analyzerSelectionError,
+		FoldRepairError: g.foldRepairError}
 	if g.analyzerAssembly != nil {
 		h.AnalyzerBundleDigest = g.analyzerAssembly.Digest()
 		h.AnalyzerLanguages = g.analyzerAssembly.Languages()
@@ -236,6 +276,13 @@ func (g *Governor) Health() (GovernorHealth, error) {
 		h.UnderstandingSuperseded = g.understanding.stats.superseded.Load()
 		h.UnderstandingRecovered = g.understanding.stats.recovered.Load()
 		h.UnderstandingMissingRoot = g.understanding.stats.missingRoot.Load()
+		h.UnderstandingFactsPruned = g.understanding.stats.factsPruned.Load()
+		h.UnderstandingPruneSkippedBusy = g.understanding.stats.pruneSkippedBusy.Load()
+		h.UnderstandingRemeasured = g.understanding.stats.remeasured.Load()
+		h.UnderstandingPruneCandidates = g.understanding.stats.pruneCandidates.Load()
+		h.UnderstandingPruneUnfinished = g.understanding.stats.pruneUnfinished.Load()
+		h.UnderstandingRetentionLastPass = g.understanding.stats.retentionLastPass.Load()
+		_, h.UnderstandingRetentionEnabled = g.understanding.retentionSettings()
 		g.understanding.mu.Lock()
 		h.UnderstandingQueueDepth = len(g.understanding.items)
 		g.understanding.mu.Unlock()
@@ -305,7 +352,9 @@ func (g *Governor) observe(o Observation, evidence *ObservationEvidence) (Observ
 			return ObserveResult{}, err
 		}
 		if found {
-			if digest != evidence.Delivery.EnvelopeDigest {
+			if digest != evidence.Delivery.EnvelopeDigest &&
+				(evidence.DigestWithoutRule == "" || digest != evidence.DigestWithoutRule) &&
+				(evidence.DigestWithoutLayer == "" || digest != evidence.DigestWithoutLayer) {
 				return ObserveResult{}, ErrObservationCollision
 			}
 			if err := tx.TouchEventDelivery(evidence.Delivery.ObservationID, evidence.Delivery.DeliveryAttempts); err != nil {
@@ -385,6 +434,12 @@ func (g *Governor) observe(o Observation, evidence *ObservationEvidence) (Observ
 	if len(resources) > 0 {
 		primaryTarget = resources[0].id
 	}
+	// The layered loader's notes ride the reason TEXT (schema 38 is frozen;
+	// the reasons are part of "why this decision" — the same honesty the
+	// reason field has always carried), deduplicated if already present.
+	if o.LayerReasons != "" && !strings.Contains(o.Reason, o.LayerReasons) {
+		o.Reason = strings.TrimSpace(o.Reason + "; " + o.LayerReasons)
+	}
 	anchor, err := g.chainAnchorLocked(o.SessionID)
 	if err != nil {
 		return ObserveResult{}, err
@@ -393,7 +448,7 @@ func (g *Governor) observe(o Observation, evidence *ObservationEvidence) (Observ
 	eventID, err := tx.AppendEvent(store.EventRecord{
 		TS: o.TS, SessionID: o.SessionID, Runtime: o.Runtime, Verb: n.Verb, Tool: o.Tool,
 		TargetEntityID: primaryTarget, Tags: string(tagsJSON), Origin: origin,
-		Decision: o.Decision, Reason: o.Reason,
+		Decision: o.Decision, Reason: o.Reason, RuleID: o.Rule, Layer: storableLayer(o.Layer),
 	}, &work)
 	if err != nil {
 		return ObserveResult{}, err
@@ -480,7 +535,28 @@ func (g *Governor) ChainVerify(sessionID string) (engine.ChainReport, error) {
 		held = &copy
 	}
 	g.writeMu.Unlock()
-	return g.ix.VerifyEventChain(sessionID, held)
+	rows, err := g.ix.EventChainRows(sessionID)
+	if err != nil {
+		return engine.ChainReport{}, err
+	}
+	if held != nil {
+		// Rows a concurrent Observe committed after the anchor was copied are beyond this
+		// verification's snapshot, not a fork: verify up to the held tail (postwork C4 —
+		// an active session otherwise reported "fork" to the team server).
+		rows = rowsThrough(rows, held.Seq)
+	}
+	return engine.VerifyEventChain(sessionID, rows, held), nil
+}
+
+// rowsThrough keeps the rows up to and including chain seq (legacy rows kept).
+func rowsThrough(rows []engine.ChainRow, seq int64) []engine.ChainRow {
+	out := rows[:0:0]
+	for _, r := range rows {
+		if r.Hash == "" || r.Body.Seq <= seq {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // SessionState returns the folded state for a session (console + verification).
@@ -591,13 +667,13 @@ func addOnce(xs []string, v string) []string {
 
 // sessionTitles maps a raw session id to its human title. Live governance rows carry
 // the runtime's bare session id, which is the harvest filename stem — so the two
-// sides join on it. Best-effort: an unknown id simply keeps its UUID.
+// sides join on it. Best-effort: an unknown id simply keeps its UUID. A thread id
+// joins only the sessions it names, never a subagent rollout carrying it.
 func sessionTitles() map[string]harvest.SessionSummary {
 	out := map[string]harvest.SessionSummary{}
 	for _, s := range ScanSessions() {
-		out[s.ID] = s
-		if s.ThreadID != "" {
-			out[s.ThreadID] = s
+		for _, id := range sessionIdentities(s) {
+			out[id] = s
 		}
 	}
 	return out

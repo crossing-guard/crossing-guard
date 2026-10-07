@@ -16,13 +16,21 @@ func TestConsoleAuthRecoveryContract(t *testing.T) {
 	}
 
 	app := read("js/app.js")
-	for _, required := range []string{"storeTokenFromHash", "hashchange", "localStorage.setItem('cg_token'", "location.reload()", "#tab=${g.tab}&session=${g.session}"} {
+	for _, required := range []string{"storeTokenFromHash", "hashchange", "location.reload()", "#tab=${g.tab}&session=${g.session}"} {
 		if !strings.Contains(app, required) {
 			t.Errorf("app.js does not pin same-tab token recovery behavior %q", required)
 		}
 	}
 
 	core := read("js/core.js")
+	// The token is stored by core.js as it is evaluated, before any module that
+	// imports it makes its first read: stored later (in app.js's body) a page opened
+	// from its token link sent its first reads with no token (rest-of-release R-1).
+	for _, required := range []string{"const storeTokenFromHash = hash =>", "storeTokenFromHash(location.hash)", "localStorage.setItem('cg_token'"} {
+		if !strings.Contains(core, required) {
+			t.Errorf("core.js does not store the token from the link before the first read: %q", required)
+		}
+	}
 	if !strings.Contains(core, "err.status = r.status") {
 		t.Error("core API errors do not preserve HTTP status")
 	}

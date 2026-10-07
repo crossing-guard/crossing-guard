@@ -2,6 +2,20 @@
 const $ = sel => document.querySelector(sel);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const cpHeaders = () => ({ 'X-CG-Token': localStorage.getItem('cg_token') || localStorage.getItem('cp_token') || '' });
+// The auth token arrives once, in the fragment of the printed link (#t=…), and is
+// kept in localStorage. It is taken HERE, while this module is evaluated, because
+// modules are evaluated dependencies-first: several read the API as they load
+// (the rail's settings, the keymap), every one of them imports this module, and
+// the entry module's own body runs only after all of them. Taking the token there
+// sent those first reads without it on a page opened from its link, and they were
+// refused.
+const storeTokenFromHash = hash => {
+  const found = String(hash || '').match(/[#&]t=([A-Za-z0-9_-]+)/);
+  if (!found) return false;
+  localStorage.setItem('cg_token', found[1]);
+  return true;
+};
+if (typeof location !== 'undefined' && typeof localStorage !== 'undefined') storeTokenFromHash(location.hash);
 // The console dogfoods the versioned contract (D16): a bare /api/… path is rewritten
 // to the canonical /api/v1/… so the reference client uses exactly what a BYO-GUI is
 // told to build against. The server still serves both, so this is transparent.
@@ -29,6 +43,36 @@ const formatBytes = value => {
   return bytes + ' B';
 };
 const fmtTok = n => n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+// Usage formatters (runtime-model-catalog-and-usage design §4): absent is
+// "unknown", never 0; a cost prints its own unit code, never an assumed
+// currency; a runtime-stated cost says so, because it is not a bill.
+const COST_BASIS_LABEL = { runtime: 'runtime-stated', estimated: 'estimated' };
+const fmtAmount = amount => {
+  const value = Number(amount) || 0;
+  return value !== 0 && Math.abs(value) < 0.01 ? value.toFixed(4) : value.toFixed(2);
+};
+// fmtCost takes one cost ({amount, unit, basis}) or a list of per-unit lines.
+const fmtCost = cost => {
+  const lines = Array.isArray(cost) ? cost : cost ? [cost] : [];
+  if (!lines.length) return 'cost unknown';
+  return lines.map(line => fmtAmount(line.amount) + ' ' + String(line.unit || '')).join(' + ');
+};
+const fmtCostBasis = cost => {
+  const lines = Array.isArray(cost) ? cost : cost ? [cost] : [];
+  const bases = [...new Set(lines.map(line => COST_BASIS_LABEL[line.basis] || String(line.basis || '')))];
+  return bases.join(', ');
+};
+const fmtLimit = tokens => (Number(tokens) > 0 ? fmtTok(Number(tokens)) + ' ctx' : 'ctx unknown');
+// fmtPrice summarises a stated price as "input/output per N"; the full rate
+// list belongs in a title or a table.
+const fmtPrice = price => {
+  if (!price || !Array.isArray(price.rates) || !price.rates.length) return 'price unknown';
+  const rate = cls => price.rates.find(item => item.class === cls && item.above_context_tokens == null);
+  const input = rate('input'), output = rate('output');
+  const per = Number(price.per_tokens) >= 1e6 ? fmtTok(Number(price.per_tokens)) : String(price.per_tokens);
+  const parts = [input, output].filter(Boolean).map(item => fmtAmount(item.amount));
+  return (parts.length ? parts.join('/') : fmtAmount(price.rates[0].amount)) + ' ' + price.unit + ' per ' + per;
+};
 
 /* ---------- markdown (tiny, safe: escapes first) ---------- */
 function escapeHtml(s) {
@@ -279,4 +323,4 @@ function lblWrap(label, input) {
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function shortWhen(ts) { return (ts || '').replace('T', ' ').slice(5, 16); }
 
-export { $, el, cpHeaders, api, apiPath, fmtTime, formatBytes, normMemId, escapeHtml, mdInline, mdToHtml, linkify, linkifyEscaped, refAnchor, headingSlug, debounce, fillSelect, mkSelectKV, mkSelect, lblWrap, fmtTok, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults };
+export { $, el, cpHeaders, storeTokenFromHash, api, apiPath, fmtTime, formatBytes, normMemId, escapeHtml, mdInline, mdToHtml, linkify, linkifyEscaped, refAnchor, headingSlug, debounce, fillSelect, mkSelectKV, mkSelect, lblWrap, fmtTok, fmtCost, fmtCostBasis, fmtLimit, fmtPrice, shortWhen, SEV_CHIP, WATER_ORDER, CLASS_CHIP, getDefaults, setDefaults };

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -34,15 +35,93 @@ type managedProfileOption struct {
 	Reason             string   `json:"reason,omitempty"`
 	RequestedAuthority []string `json:"requested_authority"`
 	AllowedProfiles    []string `json:"allowed_profiles"`
+	// NotApplied names compiled limits this host accepts but cannot apply to
+	// managed turns (managed-turn-profile-limits plan §4.7), so the card
+	// states them instead of implying enforcement.
+	NotApplied []managedNotApplied `json:"not_applied"`
 }
+
+// managedNotApplied is one compiled field the host does not apply, with the
+// host's own reason — the console renders it and never interprets the field.
+type managedNotApplied struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
+// managedTurnNotApplied lists the compiled limits a managed turn does not
+// apply on this host: the runtime harness makes its own model calls, so a
+// per-call token cap has no enforcement point (plan §4.7, D-3).
+var managedTurnNotApplied = []managedNotApplied{{Field: "limits.max-tokens",
+	Reason: "Managed turns are bounded in final claim size (max-output-bytes) and wall time (timeout), not in tokens: the runtime makes its own model calls."}}
 
 // agentProjection is one roster row on the agent-shaped surface: the binding
 // with its profile's display identity and a bounded prompt excerpt.
 type agentProjection struct {
 	store.ManagedBinding
+	// ProjectRootKey is the folder identity of project_root (projectRootKey),
+	// compared with a session's cwd_key; an opaque value, never a path.
+	ProjectRootKey     string `json:"project_root_key,omitempty"`
 	ProfileName        string `json:"profile_name"`
 	ProfileDescription string `json:"profile_description"`
 	PromptExcerpt      string `json:"prompt_excerpt"`
+	// ProfileProblem and DestinationProblem judge the binding's PINNED
+	// revision (managed-turn-profile-limits plan §4.1, RT-6): why this binding
+	// cannot run here, even when the profile's current revision could.
+	ProfileProblem     string            `json:"profile_problem,omitempty"`
+	DestinationProblem string            `json:"destination_problem,omitempty"`
+	Destination        *agentDestination `json:"destination,omitempty"`
+}
+
+// agentDestination states the pinned profile's destination requirement and
+// each route's locality as its runtime declares it — a route class, never an
+// egress proof (plan §4.1).
+type agentDestination struct {
+	Required string                  `json:"required"`
+	Routes   []agentRouteDestination `json:"routes"`
+}
+
+type agentRouteDestination struct {
+	Runtime string `json:"runtime"`
+	Model   string `json:"model"`
+	Label   string `json:"label"`
+	Local   bool   `json:"local"`
+	Basis   string `json:"basis,omitempty"`
+}
+
+// agentBindingJudgement fills the pinned-revision facts of one roster row.
+func agentBindingJudgement(row *agentProjection, compiled profilefs.CompiledProfile, profiles *profilefs.Owner) {
+	if err := validateManagedProfile(compiled); err != nil {
+		row.ProfileProblem = err.Error()
+	}
+	routes := bindingRoutes(row.ManagedBinding)
+	children := []profilefs.CompiledProfile{}
+	for _, ref := range row.AllowedProfiles {
+		if child, err := profiles.GetRevision(ref.ProfileID, ref.SourceDigest, ref.BundleDigest); err == nil && child.Normalized != nil {
+			children = append(children, *child.Normalized)
+		}
+	}
+	row.DestinationProblem = bindingDestinationProblem(compiled, routes, children)
+	destination := &agentDestination{Required: compiled.Requirements.Destination.Locality, Routes: []agentRouteDestination{}}
+	for _, route := range routes {
+		local, basis := chatRouteIsLocal(ChatRequest{Runtime: route.Runtime, Model: route.Model, Mode: route.Mode})
+		destination.Routes = append(destination.Routes, agentRouteDestination{Runtime: route.Runtime, Model: route.Model,
+			Label: chatRuntimeLabel(route.Runtime) + " · " + chatModelLabel(route.Runtime, route.Model), Local: local, Basis: basis})
+	}
+	row.Destination = destination
+}
+
+// managedBindingResponse is the answer to a binding write: the stored row.
+type managedBindingResponse struct {
+	Binding store.ManagedBinding `json:"binding"`
+}
+
+// bindingWriteStatus maps a binding write error onto its HTTP status: a stale
+// token is a conflict; everything else is a request the daemon refused.
+func bindingWriteStatus(err error) int {
+	if errors.Is(err, store.ErrManagedBindingConflict) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
 }
 
 // managedRunProjection carries the helper's project root beside each run so
@@ -50,6 +129,25 @@ type agentProjection struct {
 type managedRunProjection struct {
 	store.ManagedRun
 	ProjectRoot string `json:"project_root"`
+	// AttentionClass and AwaitsOperator are the claim contract's answer for a
+	// settled claim run (escalation-delivery plan §6.1): "ask", "draft" or
+	// "", and whether it waits on the operator's confirmation. Readers use
+	// these flags; none keeps its own list of actions (RT-11).
+	AttentionClass string `json:"attention_class,omitempty"`
+	AwaitsOperator bool   `json:"awaits_operator,omitempty"`
+}
+
+// runAttention classifies one run for the owner: only a completed claim run
+// (not a reply, correction or delegate child) carries a class.
+func runAttention(run store.ManagedRun) (string, bool) {
+	if run.State != "completed" || run.Kind != "" {
+		return "", false
+	}
+	state := ""
+	if receipt, ok := run.Detail["delivery"].(map[string]any); ok {
+		state, _ = receipt["state"].(string)
+	}
+	return orchestration.ClaimAttention(run.Action, state)
 }
 
 const agentPromptExcerptRunes = 280
@@ -146,26 +244,38 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			return
 		}
 		var request struct {
-			ProfileID           string               `json:"profile_id"`
-			ProfileSourceDigest string               `json:"profile_source_digest"`
-			ProfileBundleDigest string               `json:"profile_bundle_digest"`
-			ScopeRuntime        string               `json:"scope_runtime"`
-			ScopeSession        string               `json:"scope_session"`
-			ProjectRoot         string               `json:"project_root"`
-			Runtime             string               `json:"runtime"`
-			Model               string               `json:"model"`
-			Mode                string               `json:"mode"`
-			GrantedAuthority    []string             `json:"granted_authority"`
-			AutoAction          bool                 `json:"auto_action"`
-			WatchNatural        bool                 `json:"watch_natural"`
-			Routes              []store.ManagedRoute `json:"routes"`
-			Priority            int64                `json:"priority"`
-			DeclaredTags        []string             `json:"declared_tags"`
-			Limits              store.ManagedLimits  `json:"limits"`
-			ExpectedStateToken  string               `json:"expected_state_token"`
-			Confirmed           bool                 `json:"confirmed"`
+			ProfileID           string                `json:"profile_id"`
+			ProfileSourceDigest string                `json:"profile_source_digest"`
+			ProfileBundleDigest string                `json:"profile_bundle_digest"`
+			ScopeRuntime        string                `json:"scope_runtime"`
+			ScopeSession        string                `json:"scope_session"`
+			ProjectRoot         string                `json:"project_root"`
+			RouteID             string                `json:"route_id"`
+			Mode                string                `json:"mode"`
+			GrantedAuthority    []string              `json:"granted_authority"`
+			AutoAction          bool                  `json:"auto_action"`
+			WatchNatural        bool                  `json:"watch_natural"`
+			Routes              []bindingRouteRequest `json:"routes"`
+			Priority            int64                 `json:"priority"`
+			DeclaredTags        []string              `json:"declared_tags"`
+			Limits              store.ManagedLimits   `json:"limits"`
+			State               string                `json:"state"`
+			ExpectedStateToken  string                `json:"expected_state_token"`
+			Confirmed           bool                  `json:"confirmed"`
+			typedModelFields
 		}
 		if err := decodeManagedJSON(w, r, &request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// A write that still sends a runtime, model or endpoint is refused by name
+		// (plan §5.3, criterion 56): a place names a model route.
+		if err := request.refusal(""); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		chain, err := chainFromRequest("routes", request.Routes)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -173,16 +283,12 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			http.Error(w, "explicit binding confirmation is required", http.StatusUnprocessableEntity)
 			return
 		}
-		binding, err := host.putBinding(managedBindingCommand{BindingID: strings.TrimSpace(r.PathValue("binding")), ProfileID: request.ProfileID, ProfileSourceDigest: request.ProfileSourceDigest, ProfileBundleDigest: request.ProfileBundleDigest, ScopeRuntime: request.ScopeRuntime, ScopeSession: request.ScopeSession, ProjectRoot: request.ProjectRoot, Runtime: request.Runtime, Model: request.Model, Mode: request.Mode, GrantedAuthority: request.GrantedAuthority, AutoAction: request.AutoAction, WatchNatural: request.WatchNatural, Routes: request.Routes, Priority: request.Priority, DeclaredTags: request.DeclaredTags, Limits: request.Limits, ExpectedStateToken: request.ExpectedStateToken})
+		binding, err := host.putBinding(managedBindingCommand{BindingID: strings.TrimSpace(r.PathValue("binding")), ProfileID: request.ProfileID, ProfileSourceDigest: request.ProfileSourceDigest, ProfileBundleDigest: request.ProfileBundleDigest, ScopeRuntime: request.ScopeRuntime, ScopeSession: request.ScopeSession, ProjectRoot: request.ProjectRoot, RouteID: strings.TrimSpace(request.RouteID), Mode: request.Mode, GrantedAuthority: request.GrantedAuthority, AutoAction: request.AutoAction, WatchNatural: request.WatchNatural, Routes: chain, Priority: request.Priority, DeclaredTags: request.DeclaredTags, Limits: request.Limits, State: request.State, ExpectedStateToken: request.ExpectedStateToken})
 		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, store.ErrManagedBindingConflict) {
-				status = http.StatusConflict
-			}
-			http.Error(w, err.Error(), status)
+			http.Error(w, err.Error(), bindingWriteStatus(err))
 			return
 		}
-		writeJSON(w, map[string]any{"binding": binding, "note": "Enabled for new exact matching task events. Existing work remains separately visible."})
+		writeJSON(w, managedBindingResponse{Binding: binding})
 	}
 
 	disableBindingHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +312,7 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		writeJSON(w, map[string]any{"binding": binding, "note": "Disabled for new triggers; history was retained."})
+		writeJSON(w, managedBindingResponse{Binding: binding})
 	}
 
 	mux.HandleFunc("GET /api/orchestration/managed/settings", func(w http.ResponseWriter, _ *http.Request) {
@@ -341,11 +447,12 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 		}
 		agents := make([]agentProjection, 0, len(bindings))
 		for _, binding := range bindings {
-			row := agentProjection{ManagedBinding: binding}
+			row := agentProjection{ManagedBinding: binding, ProjectRootKey: projectRootKey(binding.ProjectRoot)}
 			if detail, detailErr := profiles.GetRevision(binding.ProfileID, binding.ProfileSourceDigest, binding.ProfileBundleDigest); detailErr == nil && detail.Normalized != nil {
 				row.ProfileName = detail.Normalized.Name
 				row.ProfileDescription = detail.Normalized.Description
 				row.PromptExcerpt = truncate(detail.Normalized.Instructions, agentPromptExcerptRunes)
+				agentBindingJudgement(&row, *detail.Normalized, profiles)
 			}
 			agents = append(agents, row)
 		}
@@ -356,6 +463,18 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 	})
 	mux.HandleFunc("PUT /api/orchestration/agents/{binding}", putBindingHandler)
 	mux.HandleFunc("POST /api/orchestration/agents/{binding}/disable", disableBindingHandler)
+	mux.HandleFunc("POST /api/orchestration/agents/batch", func(w http.ResponseWriter, r *http.Request) {
+		if !requireHost(w) {
+			return
+		}
+		handleBindingBatch(w, r, host)
+	})
+	mux.HandleFunc("POST /api/orchestration/agents/binding-id", func(w http.ResponseWriter, r *http.Request) {
+		if !requireHost(w) {
+			return
+		}
+		handleNewBindingID(w, r, host)
+	})
 
 	mux.HandleFunc("GET /api/orchestration/managed", func(w http.ResponseWriter, r *http.Request) {
 		if !requireHost(w) {
@@ -427,7 +546,9 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 		}
 		projectedRuns := make([]managedRunProjection, 0, len(runs))
 		for _, run := range runs {
-			projectedRuns = append(projectedRuns, managedRunProjection{ManagedRun: run, ProjectRoot: rootByGroup[run.GroupID]})
+			class, awaits := runAttention(run)
+			projectedRuns = append(projectedRuns, managedRunProjection{ManagedRun: run, ProjectRoot: rootByGroup[run.GroupID],
+				AttentionClass: class, AwaitsOperator: awaits})
 		}
 		relationships := []map[string]any{}
 		for _, group := range groups {
@@ -493,8 +614,37 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 		writeJSON(w, map[string]any{"result": "note retracted"})
 	})
 
+	mux.HandleFunc("GET /api/orchestration/tags/summary", func(w http.ResponseWriter, r *http.Request) {
+		if !requireHost(w) {
+			return
+		}
+		handleTagSummary(w, host.ix)
+	})
+
 	mux.HandleFunc("GET /api/orchestration/tags", func(w http.ResponseWriter, r *http.Request) {
 		if !requireHost(w) {
+			return
+		}
+		// Exactly one selector: session_id (that session's tags), tag or
+		// agent_key (the sessions carrying it, recall-mcp-v1-plan §3.4).
+		byTag := strings.TrimSpace(r.URL.Query().Get("tag"))
+		byAgent := strings.TrimSpace(r.URL.Query().Get("agent_key"))
+		selectors := 0
+		for _, set := range []bool{byTag != "", byAgent != "", r.URL.Query().Has("session_id")} {
+			if set {
+				selectors++
+			}
+		}
+		if selectors > 1 {
+			http.Error(w, "name exactly one of session_id, tag or agent_key", http.StatusBadRequest)
+			return
+		}
+		if byTag != "" {
+			handleTagLookup(w, host.ix, "tag", byTag)
+			return
+		}
+		if byAgent != "" {
+			handleTagLookup(w, host.ix, "agent_key", byAgent)
 			return
 		}
 		// Repeated session_id values are one session's exact identity
@@ -515,8 +665,11 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			return
 		}
 		now := timeNowUnix()
+		// One row per agent key across the alternates: writeClaimTags gives
+		// the catalog and native row of one claim different tag ids, so the
+		// key is (agent_key, tag), and the newest row of it wins.
 		merged := []store.OrchestrationTag{}
-		mergedSeen := map[string]bool{}
+		mergedIndex := map[string]int{}
 		for _, sessionID := range sessionIDs {
 			tags, err := host.ix.ActiveOrchestrationTags(sessionID, now)
 			if err != nil {
@@ -524,16 +677,18 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 				return
 			}
 			for _, tag := range tags {
-				key := tag.TagID
-				if key == "" {
-					key = tag.SessionID + "\x00" + tag.AgentKey + "\x00" + tag.Tag
-				}
-				if !mergedSeen[key] {
-					mergedSeen[key] = true
+				key := tag.AgentKey + "\x00" + tag.Tag
+				index, found := mergedIndex[key]
+				switch {
+				case !found:
+					mergedIndex[key] = len(merged)
 					merged = append(merged, tag)
+				case newerOrchestrationTag(tag, merged[index]):
+					merged[index] = tag
 				}
 			}
 		}
+		sort.SliceStable(merged, func(i, j int) bool { return newerOrchestrationTag(merged[i], merged[j]) })
 		writeJSON(w, map[string]any{"tags": merged})
 	})
 
@@ -564,9 +719,15 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			return
 		}
 		// Operator-edited sends are operator speech: no provenance marker (Q5).
-		if err := host.resumeParent(run, strings.TrimSpace(request.Message), "manual"); err != nil {
+		if err := host.resumeParent(run, strings.TrimSpace(request.Message), "manual"); err != nil && !actionStarted(err) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
+		}
+		// The draft was carried: it stops reading as a draft for the owner
+		// and as waiting on the operator (escalation-delivery plan §6.1).
+		if err := host.settleClaimDelivery(run.RunID, SessionMessageReceipt{State: deliveryStarted, Tier: "none",
+			Detail: "The operator sent an edited reply."}, nil); err != nil {
+			log.Printf("managed run %s was sent but its receipt could not be recorded: %v", run.RunID, err)
 		}
 		writeJSON(w, map[string]any{"result": "reply task admitted", "source_run_id": run.RunID})
 	})
@@ -603,9 +764,15 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			http.Error(w, "run has no pending action", http.StatusConflict)
 			return
 		}
-		if err != nil {
+		if err != nil && !actionStarted(err) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
+		}
+		// The operator's confirmation carried the proposal: its receipt
+		// leaves not_requested (escalation-delivery plan §4).
+		if err := host.settleClaimDelivery(run.RunID, SessionMessageReceipt{State: deliveryStarted, Tier: "none",
+			Detail: "The operator confirmed the action and it was admitted."}, nil); err != nil {
+			log.Printf("managed run %s acted but its receipt could not be recorded: %v", run.RunID, err)
 		}
 		writeJSON(w, map[string]any{"result": "action admitted through the existing owner"})
 	})
@@ -641,7 +808,7 @@ func registerOrchestrationManagedRoutes(mux *http.ServeMux, host *orchestrationM
 			http.Error(w, "interrupt or finish the source task before resuming it", http.StatusConflict)
 			return
 		}
-		if err := host.resumeParent(run, strings.TrimSpace(request.Message), "correction"); err != nil {
+		if err := host.resumeParent(run, strings.TrimSpace(request.Message), "correction"); err != nil && !actionStarted(err) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -657,8 +824,11 @@ func managedProfileOptions(owner *profilefs.Owner) ([]managedProfileOption, erro
 	out := []managedProfileOption{}
 	for _, summary := range listed.Profiles {
 		detail, detailErr := owner.GetRevision(summary.ProfileID, summary.SourceDigest, summary.BundleDigest)
-		option := managedProfileOption{ProfileID: summary.ProfileID, Name: summary.Name, Version: summary.Version, SourceDigest: summary.SourceDigest, BundleDigest: summary.BundleDigest, RequestedAuthority: []string{}, AllowedProfiles: []string{}}
+		option := managedProfileOption{ProfileID: summary.ProfileID, Name: summary.Name, Version: summary.Version, SourceDigest: summary.SourceDigest, BundleDigest: summary.BundleDigest, RequestedAuthority: []string{}, AllowedProfiles: []string{}, NotApplied: []managedNotApplied{}}
 		if detailErr == nil && detail.Normalized != nil {
+			if detail.Normalized.Execution == "managed-turn" {
+				option.NotApplied = append(option.NotApplied, managedTurnNotApplied...)
+			}
 			option.AgentType = detail.Normalized.AgentType()
 			option.RequestedAuthority = append([]string(nil), detail.Normalized.Authority...)
 			option.AllowedProfiles = append([]string(nil), detail.Normalized.AllowedProfiles...)
@@ -674,8 +844,14 @@ func managedProfileOptions(owner *profilefs.Owner) ([]managedProfileOption, erro
 	return out, nil
 }
 
-func decodeManagedJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+func decodeManagedJSON(w http.ResponseWriter, r *http.Request, target any, maxBytes ...int64) error {
+	limit := int64(64 << 10)
+	if len(maxBytes) > 0 {
+		limit = maxBytes[0]
+	}
+	if limit > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -687,3 +863,13 @@ func decodeManagedJSON(w http.ResponseWriter, r *http.Request, target any) error
 	return nil
 }
 func timeNowUnix() int64 { return time.Now().Unix() }
+
+// newerOrchestrationTag is the tag read's own order (applied_at DESC, tag_id
+// DESC — the ORDER BY of store.ActiveOrchestrationTags; keep the two in step),
+// for merging one session's identity alternates.
+func newerOrchestrationTag(a, b store.OrchestrationTag) bool {
+	if a.AppliedAt != b.AppliedAt {
+		return a.AppliedAt > b.AppliedAt
+	}
+	return a.TagID > b.TagID
+}

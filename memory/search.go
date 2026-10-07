@@ -20,6 +20,9 @@ type Hit struct {
 type SearchOpts struct {
 	Category   string
 	Repository string
+	// Tag keeps only records whose frontmatter tags include it, compared without
+	// case. With an empty query every such record is a hit, newest first.
+	Tag string
 }
 
 func Search(dir, query string, opts SearchOpts) []Hit {
@@ -30,6 +33,13 @@ func Search(dir, query string, opts SearchOpts) []Hit {
 			continue
 		}
 		if opts.Repository != "" && !SameRepositoryScope(r.Repository, opts.Repository) {
+			continue
+		}
+		if opts.Tag != "" && !hasTag(r.Tags, opts.Tag) {
+			continue
+		}
+		if len(terms) == 0 && opts.Tag != "" {
+			hits = append(hits, Hit{r, 0, []string{"tag:" + strings.ToLower(opts.Tag)}})
 			continue
 		}
 		score := 0
@@ -94,6 +104,15 @@ func Similar(dir string, cand Record) []Record {
 		}
 	}
 	return out
+}
+
+func hasTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(strings.TrimSpace(tag), strings.TrimSpace(want)) {
+			return true
+		}
+	}
+	return false
 }
 
 func tokenize(q string) []string {

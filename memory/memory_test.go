@@ -161,15 +161,15 @@ func writeScoped(t *testing.T, dir, id, repository, body string) {
 // directory's case; the index must still scope those records to their repository.
 func TestIndexMatchesRepositoryWithoutCase(t *testing.T) {
 	dir := t.TempDir()
-	writeScoped(t, dir, "psu-lead-times", "example-other-project", "supplier lead times")
-	writeScoped(t, dir, "oms-feed", "example-app", "supplier feed")
+	writeScoped(t, dir, "lead-times-note", "example-other-project", "supplier lead times")
+	writeScoped(t, dir, "feed-note", "example-app", "supplier feed")
 	writeScoped(t, dir, "global-note", "", "supplier naming")
 
 	idx := BuildIndex(dir, 4096, "Example-Other-Project")
-	if !strings.Contains(idx, "psu-lead-times") {
+	if !strings.Contains(idx, "lead-times-note") {
 		t.Fatal("record for the mixed-case repository missing from its index")
 	}
-	if strings.Contains(idx, "oms-feed") {
+	if strings.Contains(idx, "feed-note") {
 		t.Fatal("record for a different repository leaked into the index")
 	}
 	if !strings.Contains(idx, "global-note") {
@@ -187,8 +187,8 @@ func TestIndexMatchesRepositoryWithoutCase(t *testing.T) {
 
 func TestSearchRepositoryFacetMatchesWithoutCase(t *testing.T) {
 	dir := t.TempDir()
-	writeScoped(t, dir, "psu-lead-times", "example-other-project", "supplier lead times")
-	writeScoped(t, dir, "oms-feed", "example-app", "supplier feed")
+	writeScoped(t, dir, "lead-times-note", "example-other-project", "supplier lead times")
+	writeScoped(t, dir, "feed-note", "example-app", "supplier feed")
 	writeScoped(t, dir, "global-note", "", "supplier naming")
 
 	hits := Search(dir, "supplier", SearchOpts{Repository: "Example-Other-Project"})
@@ -196,7 +196,39 @@ func TestSearchRepositoryFacetMatchesWithoutCase(t *testing.T) {
 	for _, h := range hits {
 		ids = append(ids, h.ID)
 	}
-	if len(ids) != 1 || ids[0] != "psu-lead-times" {
-		t.Fatalf("facet Example-Other-Project returned %v, want only psu-lead-times", ids)
+	if len(ids) != 1 || ids[0] != "lead-times-note" {
+		t.Fatalf("facet Example-Other-Project returned %v, want only lead-times-note", ids)
+	}
+}
+
+// A tag-only search (no query terms) returns every record carrying the tag,
+// compared without case, newest first (recall-mcp-v1-plan F6).
+func TestSearchTagOnlyReturnsTaggedRecordsNewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	for _, r := range []Record{
+		{ID: "old-plan", Title: "old", Tags: []string{"Plan"}, Updated: "2026-09-01T00:00:00Z"},
+		{ID: "new-plan", Title: "new", Tags: []string{"plan", "x"}, Updated: "2026-09-20T00:00:00Z"},
+		{ID: "untagged", Title: "plan in title only", Updated: "2026-09-25T00:00:00Z"},
+	} {
+		r.Category, r.Source, r.Created, r.Body = "note", "human", r.Updated, "body"
+		if err := Write(dir, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits := Search(dir, "", SearchOpts{Tag: "PLAN"})
+	if len(hits) != 2 || hits[0].ID != "new-plan" || hits[1].ID != "old-plan" {
+		t.Fatalf("tag-only search returned %+v", hits)
+	}
+	if hits := Search(dir, "title", SearchOpts{Tag: "plan"}); len(hits) != 0 {
+		t.Fatalf("tag filter must also narrow a query: %+v", hits)
+	}
+}
+
+func TestProjectFromCommonDirSharesTheLabelAcrossWorktrees(t *testing.T) {
+	if got := ProjectFromCommonDir("/src/Example-Other-Project/.git", "/src/Example-Other-Project/.claude/worktrees/x"); got != "Example-Other-Project" {
+		t.Fatalf("worktree label %q", got)
+	}
+	if got := ProjectFromCommonDir("", "/tmp/scratch"); got != "scratch" {
+		t.Fatalf("non-git label %q", got)
 	}
 }

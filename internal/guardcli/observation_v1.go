@@ -41,21 +41,46 @@ func newRecordID(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(b), nil
 }
 
+// buildRevision is the revision of the tree this binary was built from, set at link
+// time by scripts/reload.sh (-X crossing-guard/internal/guardcli.buildRevision=...).
+// Go's own stamp cannot be trusted for that: it ignores a linked worktree's .git file,
+// so a worktree build is stamped with nothing, or with the enclosing checkout's commit.
+var buildRevision string
+
+// BuildVersion is this binary's version: the revision the build script passed when
+// there is one; otherwise what the build recorded — the module version, the VCS
+// revision when the version is unset or "(devel)", or both. The same string the hook
+// stamps on every observation; the device report carries it as daemon.version.
+func BuildVersion() string { return collectorVersion() }
+
 func collectorVersion() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return ""
+		return versionFrom(buildRevision, "", "")
 	}
-	version := info.Main.Version
+	stamped := ""
 	for _, setting := range info.Settings {
-		if setting.Key == "vcs.revision" && setting.Value != "" {
-			if version == "" || version == "(devel)" {
-				return setting.Value
-			}
-			return version + "+" + setting.Value
+		if setting.Key == "vcs.revision" {
+			stamped = setting.Value
 		}
 	}
-	return version
+	return versionFrom(buildRevision, info.Main.Version, stamped)
+}
+
+// versionFrom chooses the version string. A link-time revision is the whole answer and
+// is never joined with Go's stamp (the two can name different commits, and joined they
+// would pass the 100 characters the device report allows).
+func versionFrom(linked, module, stamped string) string {
+	if linked != "" {
+		return linked
+	}
+	if stamped == "" {
+		return module
+	}
+	if module == "" || module == "(devel)" {
+		return stamped
+	}
+	return module + "+" + stamped
 }
 
 func resolveDeclaredPath(in hookInput, raw string) (string, string) {
@@ -202,7 +227,8 @@ func buildObservationEnvelope(in hookInput, decision, reason string) (observatio
 		SessionID: in.SessionID, Runtime: in.Runtime, Tool: in.ToolName,
 		Command: command, Content: content, FilePath: in.ToolInput.FilePath,
 		FilePaths: files, Cwd: in.Cwd, URL: in.ToolInput.URL, Skill: in.ToolInput.Skill,
-		Decision: decision, Reason: reason, TS: now, ToolInput: raw, ToolInputBytes: rawBytes,
+		Decision: decision, Reason: reason, Rule: in.Rule, Layer: in.Layer,
+		LayerReasons: in.LayerReasons, TS: now, ToolInput: raw, ToolInputBytes: rawBytes,
 		ToolInputDigest: digest, ToolInputCompleteness: completeness, ResourceClaims: claims,
 		QueuedAt: now, DeliveryAttempts: 1, DeliveryMode: "direct", Carrier: in.Carrier}, nil
 }

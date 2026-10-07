@@ -33,11 +33,20 @@ type ReviewBinding struct {
 	ApprovalSubdeadlineMS int    `json:"approval_subdeadline_ms,omitempty"`
 	// AnswerChoicePrompts is whether this reviewer may answer a held call's
 	// questions. Off means prompt-bearing approvals are never offered to it.
-	AnswerChoicePrompts bool   `json:"answer_choice_prompts"`
-	MaxInputBytes       int    `json:"max_input_bytes"`
-	MaxOutputBytes      int    `json:"max_output_bytes"`
-	MaxTokens           int    `json:"max_tokens"`
-	MaxConcurrency      int    `json:"max_concurrency"`
+	AnswerChoicePrompts bool `json:"answer_choice_prompts"`
+	MaxInputBytes       int  `json:"max_input_bytes"`
+	MaxOutputBytes      int  `json:"max_output_bytes"`
+	MaxTokens           int  `json:"max_tokens"`
+	MaxConcurrency      int  `json:"max_concurrency"`
+	// RouteID and RouteRevisionDigest reference the named inference route the reviewer
+	// runs on (schema 46, team rest-of-release plan §5.3). Endpoint and Model above are
+	// the RESOLVED COPY of that revision, and RequestPathKind/RequestPathDigest are
+	// derived from that copy and this binding's own limits. RouteProblem and
+	// AdoptionKey mean what they mean on a managed binding.
+	RouteID             string `json:"route_id,omitempty"`
+	RouteRevisionDigest string `json:"route_revision_digest,omitempty"`
+	RouteProblem        string `json:"route_problem,omitempty"`
+	AdoptionKey         string `json:"adoption_key,omitempty"`
 	StateToken          string `json:"state_token"`
 	CreatedAt           int64  `json:"created_at"`
 	UpdatedAt           int64  `json:"updated_at"`
@@ -113,7 +122,8 @@ type ReviewActualOutcome struct {
 
 const reviewBindingColumns = `binding_id,state,effect,runtime_filter,profile_id,profile_source_digest,
 	profile_bundle_digest,instruction_digest,request_path_kind,request_path_digest,endpoint,model,
-	timeout_ms,approval_subdeadline_ms,answer_choice_prompts,max_input_bytes,max_output_bytes,max_tokens,max_concurrency,state_token,created_at,updated_at`
+	timeout_ms,approval_subdeadline_ms,answer_choice_prompts,max_input_bytes,max_output_bytes,max_tokens,max_concurrency,state_token,created_at,updated_at,
+	route_id,route_revision_digest,route_problem,adoption_key`
 
 func scanReviewBinding(row interface{ Scan(...any) error }) (ReviewBinding, error) {
 	var binding ReviewBinding
@@ -122,7 +132,8 @@ func scanReviewBinding(row interface{ Scan(...any) error }) (ReviewBinding, erro
 		&binding.RequestPathKind, &binding.RequestPathDigest, &binding.Endpoint, &binding.Model,
 		&binding.TimeoutMS, &binding.ApprovalSubdeadlineMS, &binding.AnswerChoicePrompts,
 		&binding.MaxInputBytes, &binding.MaxOutputBytes, &binding.MaxTokens,
-		&binding.MaxConcurrency, &binding.StateToken, &binding.CreatedAt, &binding.UpdatedAt)
+		&binding.MaxConcurrency, &binding.StateToken, &binding.CreatedAt, &binding.UpdatedAt,
+		&binding.RouteID, &binding.RouteRevisionDigest, &binding.RouteProblem, &binding.AdoptionKey)
 	return binding, err
 }
 
@@ -182,7 +193,7 @@ func (ix *Index) PutReviewBinding(binding ReviewBinding, expectedToken string, n
 	binding.UpdatedAt = now
 	binding.StateToken = ReviewBindingStateToken(binding)
 	_, err = tx.Exec(`INSERT INTO orchestration_review_binding(`+reviewBindingColumns+`) VALUES(`+
-		`?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(binding_id) DO UPDATE SET
+		`?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(binding_id) DO UPDATE SET
 		state=excluded.state,effect=excluded.effect,runtime_filter=excluded.runtime_filter,profile_id=excluded.profile_id,
 		profile_source_digest=excluded.profile_source_digest,profile_bundle_digest=excluded.profile_bundle_digest,
 		instruction_digest=excluded.instruction_digest,request_path_kind=excluded.request_path_kind,
@@ -190,13 +201,16 @@ func (ix *Index) PutReviewBinding(binding ReviewBinding, expectedToken string, n
 		timeout_ms=excluded.timeout_ms,approval_subdeadline_ms=excluded.approval_subdeadline_ms,
 		answer_choice_prompts=excluded.answer_choice_prompts,max_input_bytes=excluded.max_input_bytes,
 		max_output_bytes=excluded.max_output_bytes,max_tokens=excluded.max_tokens,
-		max_concurrency=excluded.max_concurrency,state_token=excluded.state_token,updated_at=excluded.updated_at`,
+		max_concurrency=excluded.max_concurrency,state_token=excluded.state_token,updated_at=excluded.updated_at,
+		route_id=excluded.route_id,route_revision_digest=excluded.route_revision_digest,
+		route_problem=excluded.route_problem,adoption_key=excluded.adoption_key`,
 		binding.BindingID, binding.State, binding.Effect, binding.RuntimeFilter, binding.ProfileID,
 		binding.ProfileSourceDigest, binding.ProfileBundleDigest, binding.InstructionDigest,
 		binding.RequestPathKind, binding.RequestPathDigest, binding.Endpoint, binding.Model,
 		binding.TimeoutMS, binding.ApprovalSubdeadlineMS, binding.AnswerChoicePrompts,
 		binding.MaxInputBytes, binding.MaxOutputBytes, binding.MaxTokens,
-		binding.MaxConcurrency, binding.StateToken, binding.CreatedAt, binding.UpdatedAt)
+		binding.MaxConcurrency, binding.StateToken, binding.CreatedAt, binding.UpdatedAt,
+		binding.RouteID, binding.RouteRevisionDigest, binding.RouteProblem, binding.AdoptionKey)
 	if err != nil {
 		return ReviewBinding{}, fmt.Errorf("put review binding: %w", err)
 	}

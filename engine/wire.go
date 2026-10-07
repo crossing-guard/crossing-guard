@@ -116,6 +116,8 @@ type WireEventInput struct {
 	Decision       string
 	Reason         string
 	Origin         string
+	Rule           string // the rule that produced or asked for the decision; "" = unknown
+	Layer          Layer  // the distribution tier that rule arrived by; "" = unknown
 	ChainSeq       int64
 	PrevHash       string
 	Hash           string
@@ -131,8 +133,35 @@ func WireSessionID(deviceID, session string) string {
 	return DeterministicTypedID("ses", deviceID+":"+session)
 }
 
-var sensitivityClasses = map[string]bool{"public": true, "internal": true, "source-code": true,
-	"customer-data": true, "personal-data": true, "credential-material": true, "regulated": true}
+// WireSessionParts is the one normalization of a stored session to its wire runtime and
+// native id: a prefixed "<vendor>/<id>" yields the id, the runtime column wins over the
+// prefix when set, and an empty part reads "unknown". WireSessionID keys on
+// runtime+"/"+native, so every producer of a session's wire id calls this.
+func WireSessionParts(runtimeColumn, session string) (runtime, native string) {
+	runtime, native = runtimeColumn, session
+	if i := strings.Index(session, "/"); i > 0 {
+		if runtime == "" {
+			runtime = session[:i]
+		}
+		native = session[i+1:]
+	}
+	if runtime == "" {
+		runtime = "unknown"
+	}
+	if native == "" {
+		native = "unknown"
+	}
+	return runtime, native
+}
+
+// sensitivityClasses is the wire sensitivity vocabulary: the water-mark ladder.
+var sensitivityClasses = func() map[string]bool {
+	out := make(map[string]bool, len(waterOrder))
+	for _, v := range waterOrder {
+		out[v] = true
+	}
+	return out
+}()
 
 var verbShape = regexp.MustCompile(`[^a-z0-9_]+`)
 
@@ -141,19 +170,7 @@ func EncodeWireEvent(in WireEventInput, dets []Detector) ([]byte, error) {
 	if !IsTypedID(in.GlobalID) {
 		return nil, fmt.Errorf("event global id %q is not a typed id", in.GlobalID)
 	}
-	runtime, native := in.Runtime, in.Session
-	if i := strings.Index(in.Session, "/"); i > 0 {
-		if runtime == "" {
-			runtime = in.Session[:i]
-		}
-		native = in.Session[i+1:]
-	}
-	if runtime == "" {
-		runtime = "unknown"
-	}
-	if native == "" {
-		native = "unknown"
-	}
+	runtime, native := WireSessionParts(in.Runtime, in.Session)
 	var frozen []WireTag
 	if strings.TrimSpace(in.FrozenTags) != "" {
 		if err := json.Unmarshal([]byte(in.FrozenTags), &frozen); err != nil {
@@ -164,12 +181,14 @@ func EncodeWireEvent(in WireEventInput, dets []Detector) ([]byte, error) {
 	seen := map[string]bool{}
 	tags := make([]WireTag, 0, len(frozen))
 	for _, t := range frozen {
-		if t.Key == "data-class" && sensitivityClasses[t.Value] && !seen[t.Value] {
-			seen[t.Value] = true
-			sensitivity = append(sensitivity, t.Value)
+		// The recorded tag value stays as stored; only the sensitivity class is canonical,
+		// and dedupe keys on it (the schema makes sensitivity uniqueItems).
+		if class := CanonicalDataClass(t.Value); t.Key == DataClassKey && sensitivityClasses[class] && !seen[class] {
+			seen[class] = true
+			sensitivity = append(sensitivity, class)
 		}
-		t.Value, _ = RedactText(t.Value, dets)
-		t.Evidence, _ = RedactText(t.Evidence, dets)
+		t.Value, _ = RedactText(PortableText(t.Value, in.CheckoutRoot), dets)
+		t.Evidence, _ = RedactText(PortableText(t.Evidence, in.CheckoutRoot), dets)
 		tags = append(tags, t)
 	}
 	if len(sensitivity) == 0 {
@@ -183,7 +202,10 @@ func EncodeWireEvent(in WireEventInput, dets []Detector) ([]byte, error) {
 	if origin == "" {
 		origin = "live"
 	}
-	kind := map[string]string{"live": "native-runtime-event", "transcript": "derived-record", "imported": "imported"}[origin]
+	// sandbox-hook is reserved (team plan §7.1 posture B): observations a sandboxed static
+	// tier spooled and the daemon later ingested travel under their own provenance.
+	kind := map[string]string{"live": "native-runtime-event", "transcript": "derived-record", "imported": "imported",
+		"sandbox-hook": "sandbox-hook"}[origin]
 	if kind == "" {
 		return nil, fmt.Errorf("event origin %q has no wire provenance kind", origin)
 	}
@@ -198,7 +220,17 @@ func EncodeWireEvent(in WireEventInput, dets []Detector) ([]byte, error) {
 	if received == 0 {
 		received = in.TS
 	}
-	reason, _ := RedactText(in.Reason, dets)
+	reason, _ := RedactText(PortableText(in.Reason, in.CheckoutRoot), dets)
+	var rule *string
+	if in.Rule != "" {
+		r := in.Rule
+		rule = &r
+	}
+	var layer *string
+	if in.Layer != "" {
+		l := string(in.Layer)
+		layer = &l
+	}
 	var repo *string
 	if in.RepositoryID != "" {
 		r := in.RepositoryID
@@ -220,7 +252,7 @@ func EncodeWireEvent(in WireEventInput, dets []Detector) ([]byte, error) {
 		Chain:       chain,
 		Payload: WirePayload{Verb: in.Verb, Tool: in.Tool,
 			Target: PortableTarget(in.TargetEntityID, in.CheckoutRoot, in.RepositoryID),
-			Tags:   tags, TagsDigest: digest, Decision: in.Decision, Reason: reason, Origin: origin},
+			Tags:   tags, TagsDigest: digest, Decision: in.Decision, Reason: reason, Origin: origin, Rule: rule, Layer: layer},
 	}
 	return json.Marshal(ev)
 }
@@ -251,6 +283,26 @@ func PortableTarget(entityID, checkoutRoot, repositoryID string) *WireTarget {
 		return &WireTarget{Kind: kind, Name: rest}
 	}
 	return &WireTarget{Kind: "other", Name: kind}
+}
+
+// homePath matches an absolute path under a user's home or a temporary/private tree — the
+// shapes that name a person or a machine — on POSIX and Windows.
+var homePath = regexp.MustCompile(`(?:/(?:Users|home|root|private|tmp|var/folders)/[^\s'"\x60,;)]*)|(?:[A-Za-z]:\\[^\s'"\x60,;)]*)`)
+
+// PortableText makes free text safe to leave the device with respect to paths (team plan
+// invariant 8; item 4 postwork C1): a path under the session's checkout becomes
+// repository-relative, and any other absolute path of a home/temporary shape becomes
+// "[absolute path]". Frozen tag evidence ("path=/Users/…/x.md") is the case that
+// proved it necessary; reasons and tag values pass through it too.
+func PortableText(s, checkoutRoot string) string {
+	if s == "" {
+		return s
+	}
+	if root := strings.TrimRight(checkoutRoot, "/"); root != "" && root != "/" {
+		s = strings.ReplaceAll(s, root+"/", "")
+		s = strings.ReplaceAll(s, root, ".")
+	}
+	return homePath.ReplaceAllString(s, "[absolute path]")
 }
 
 // RedactText replaces every match of a role-agnostic secret pattern with a marker naming

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"crossing-guard/harvest"
 	"crossing-guard/internal/approvalbridge"
 	"crossing-guard/internal/taskinput"
 )
@@ -21,9 +22,8 @@ type claudeChatDriver struct{}
 
 func (claudeChatDriver) ChatCapability() ChatCapability {
 	return ChatCapability{
-		MessageDelivery: SessionMessageCapability{Supported: true, Boundary: "next hook boundary (prompt submit, tool call, or tool result)",
-			Detail: "Delivered as hook-provided context by the installed Crossing Guard hook at the session's next boundary; works for terminal and console sessions alike. Requires the hook lane; an opted-out session lets the message expire."},
-		Runtime: "claude", DisplayName: "Claude", CanStart: true, CanResume: true,
+		MessageDelivery: claudeDeliveryCapability(),
+		Runtime:         "claude", DisplayName: "Claude", CanStart: true, CanResume: true,
 		CanSignIn: true, VendorAuthDefault: true, SupportsBaseURL: true,
 		SupportsAuthToken: true, AcceptsCustomModel: true, ModelHint: "Claude model ID",
 		Modes: []ChatMode{
@@ -59,7 +59,7 @@ func (claudeChatDriver) CanonicalizeChatRequest(req ChatRequest) (ChatRequest, e
 	if err := validateClaudeExtraArgs(req.ExtraArgs); err != nil {
 		return ChatRequest{}, err
 	}
-	return req, nil
+	return canonicalizeClaudeEffort(req)
 }
 
 func validateClaudeExtraArgs(raw string) error {
@@ -157,6 +157,14 @@ func (claudeChatDriver) BuildVendorLogin(ctx context.Context) (*exec.Cmd, error)
 // BuildCmd: claude -p "<prompt>" --output-format stream-json --verbose
 // (--verbose is required with stream-json in -p mode).
 func (claudeChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*exec.Cmd, error) {
+	var effortErr error
+	req, effortErr = normalizeEffort(req)
+	if effortErr == nil {
+		req, effortErr = (claudeChatDriver{}).ParseEffort(req)
+	}
+	if effortErr != nil {
+		return nil, effortErr
+	}
 	if err := validateClaudeExtraArgs(req.ExtraArgs); err != nil {
 		return nil, err
 	}
@@ -183,6 +191,9 @@ func (claudeChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*ex
 	if req.SessionID != "" {
 		args = append(args, "--resume", req.SessionID)
 	}
+	if effort := req.ThinkingEffort; effort != nil && effort.Kind == "level" {
+		args = append(args, "--effort", effort.Value)
+	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
@@ -205,7 +216,7 @@ func (claudeChatDriver) BuildCmd(req ChatRequest, launch ChatLaunchContext) (*ex
 	args = append(args, splitArgs(req.ExtraArgs)...)
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = req.Cwd
-	cmd.Env = os.Environ()
+	cmd.Env = chatLaunchEnv(req)
 	if req.BaseURL != "" {
 		cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL="+req.BaseURL)
 	}
@@ -295,11 +306,84 @@ func (claudeChatDriver) ProjectEvent(obj map[string]any) []ChatEvent {
 			}
 		}
 	case "result":
+		if isError, _ := obj["is_error"].(bool); !isError {
+			add(usageEvent(claudeResultUsage(obj)))
+		}
 		add(ChatEvent{
 			"type": "result", "id": anyString(obj["session_id"]),
-			"cost": obj["total_cost_usd"], "ms": obj["duration_ms"],
-			"is_error": obj["is_error"],
+			"ms": obj["duration_ms"], "is_error": obj["is_error"],
 		})
 	}
 	return out
+}
+
+// claudeResultUsage maps a successful headless result (measured on 2.1.212,
+// plan §4 step 0). The result's usage is the invocation's total, one per
+// invocation, so it is additive; stream assistant lines repeat and are never
+// counted. Thinking tokens are part of output_tokens, the neutral meaning.
+// Occupancy is the last API call's input plus cache (usage.iterations), never
+// the invocation sum. The window comes from modelUsage when one model ran. A
+// failed result states no cost, even when it carries a zero (the caller skips
+// it); total_cost_usd is at list price (modelUsage costBasis "list").
+func claudeResultUsage(obj map[string]any) ChatUsage {
+	usage, _ := obj["usage"].(map[string]any)
+	details, _ := usage["output_tokens_details"].(map[string]any)
+	out := ChatUsage{Accumulation: usageAdditive, TokenClasses: harvest.TokenClasses{
+		Input:     statedCount(usage["input_tokens"]),
+		CacheRead: statedCount(usage["cache_read_input_tokens"]), CacheWrite: statedCount(usage["cache_creation_input_tokens"]),
+		Output: statedCount(usage["output_tokens"]), Reasoning: statedCount(details["thinking_tokens"])}}
+	if iterations, _ := usage["iterations"].([]any); len(iterations) > 0 {
+		if last, ok := iterations[len(iterations)-1].(map[string]any); ok {
+			out.ContextUsed = sumStated(statedCount(last["input_tokens"]), statedCount(last["cache_read_input_tokens"]),
+				statedCount(last["cache_creation_input_tokens"]))
+		}
+	}
+	if models, _ := obj["modelUsage"].(map[string]any); len(models) == 1 {
+		for id, raw := range models {
+			if model, ok := raw.(map[string]any); ok {
+				out.ModelID, out.ContextWindow = id, statedCount(model["contextWindow"])
+			}
+		}
+	}
+	if amount, ok := statedAmount(obj["total_cost_usd"]); ok {
+		out.Cost = &harvest.Cost{Amount: amount, Unit: "USD", Basis: harvest.CostBasisRuntime}
+	}
+	return out
+}
+
+// Only the measured effort syntax is removed; other allowed arguments retain
+// their existing whitespace-token semantics through splitArgs.
+func canonicalizeClaudeEffort(req ChatRequest) (ChatRequest, error) {
+	tokens := splitArgs(req.ExtraArgs)
+	keep := []string{}
+	level := ""
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
+		value := ""
+		if token == "--effort" {
+			i++
+			if i >= len(tokens) {
+				return req, effortError("legacy_conflict", "Missing legacy effort value")
+			}
+			value = tokens[i]
+		} else if strings.HasPrefix(token, "--effort=") {
+			value = strings.TrimPrefix(token, "--effort=")
+		} else {
+			keep = append(keep, token)
+			continue
+		}
+		if level != "" || effortLabel(value) == "" {
+			return req, effortError("legacy_conflict", "Invalid or repeated legacy effort")
+		}
+		level = value
+	}
+	if level == "" {
+		return req, nil
+	}
+	req.ExtraArgs = strings.Join(keep, " ")
+	return mergeLegacyEffort(req, level)
+}
+
+func (claudeChatDriver) ParseEffort(req ChatRequest) (ChatRequest, error) {
+	return canonicalizeClaudeEffort(req)
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,11 +67,16 @@ func appendNaturalActivity(t *testing.T, fixture agentHostFixture, entryKind str
 
 func bindNaturalFollower(t *testing.T, fixture agentHostFixture, bindingID string, watch bool) store.ManagedBinding {
 	t.Helper()
+	return bindNaturalFollowerAt(t, fixture, bindingID, fixture.root, watch)
+}
+
+func bindNaturalFollowerAt(t *testing.T, fixture agentHostFixture, bindingID, root string, watch bool) store.ManagedBinding {
+	t.Helper()
 	preview := selectManagedProfile(t, fixture.owner, naturalFollowerProfileSource())
 	binding, err := fixture.host.putBinding(managedBindingCommand{BindingID: bindingID,
 		ProfileID: preview.ProfileID, ProfileSourceDigest: preview.SourceDigest,
-		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: fixture.root,
-		Runtime: "managed-fixture", GrantedAuthority: []string{}, WatchNatural: watch,
+		ProfileBundleDigest: preview.BundleDigest, ProjectRoot: root,
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{}, WatchNatural: watch,
 		ExpectedStateToken: store.ManagedBindingAbsentToken(bindingID)})
 	if err != nil {
 		t.Fatal(err)
@@ -415,4 +421,132 @@ func newBootstrapActivityStub() *sessionactivity.Service {
 			}}
 	}
 	return sessionactivity.NewService(sampler, time.Hour, time.Second)
+}
+
+// A natural session recorded under the folder's physical spelling fires a
+// place saved under a symlinked one (place-root-folder-identity plan); a place
+// on a sibling folder stays silent.
+func TestNaturalSessionFiresPlaceUnderAnotherSpelling(t *testing.T) {
+	driver := managedDynamicFixtureDriver{commandFor: func(ChatRequest) string {
+		return jsonTextCommand(`{"action":"no_action","message":"Natural session noted.","citations":[]}`)
+	}}
+	fixture := newAgentHostFixture(t, driver)
+	repo, link, sibling := symlinkedFolder(t, fixture.root)
+	if err := govTx(t, fixture.host.ix, func(tx *store.GovTx) error {
+		return tx.EnsureSessionRoot("codex", "ses-natural", "", repo)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bindNaturalFollowerAt(t, fixture, "agent-place", link, true)
+	bindNaturalFollowerAt(t, fixture, "agent-sibling", sibling, true)
+	appendNaturalActivity(t, fixture, "first-action", 100)
+	fixture.host.emitNaturalSignalsOnce()
+	runs, err := fixture.host.ix.ManagedRuns(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	place := 0
+	for _, run := range runs {
+		if run.BindingID == "agent-place" {
+			place++
+		}
+		if run.BindingID == "agent-sibling" {
+			t.Fatalf("a place on a sibling folder fired: %+v", run)
+		}
+	}
+	if place != 1 {
+		t.Fatalf("place run count=%d, want exactly 1", place)
+	}
+}
+
+// sessionReportingFixtureDriver reports a native session id before its text,
+// as a vendor does, so a helper's own run has a session the natural lane can
+// observe.
+type sessionReportingFixtureDriver struct{ managedDynamicFixtureDriver }
+
+func (sessionReportingFixtureDriver) ProjectEvent(object map[string]any) []ChatEvent {
+	if id := anyString(object["session"]); id != "" {
+		return []ChatEvent{{"type": "session", "id": id}}
+	}
+	return []ChatEvent{{"type": "text", "text": anyString(object["text"])}}
+}
+
+// Before the fix the spelling difference alone kept a helper's own session
+// from matching its place on the natural lane: the helper launches in the
+// place's root (/tmp/x) and the vendor records its session under the physical
+// path (/private/tmp/x). Now the spellings meet, so the task-owned guard must
+// still keep the helper from firing its own place (plan §9 test 9).
+func TestHelperOwnSessionNeverFiresItsPlaceNaturally(t *testing.T) {
+	driver := sessionReportingFixtureDriver{managedDynamicFixtureDriver{commandFor: func(request ChatRequest) string {
+		if strings.Contains(request.Prompt, "follower agent") {
+			return `printf '%s\n' '{"session":"helper-own-session"}'; ` +
+				jsonTextCommand(`{"action":"no_action","message":"Noted.","citations":[]}`)
+		}
+		return jsonTextCommand("Turn complete.")
+	}}}
+	fixture := newAgentHostFixture(t, driver)
+	repo, link, _ := symlinkedFolder(t, fixture.root)
+	source := strings.Replace(string(naturalFollowerProfileSource()), `stages:
+  session.started: Record that the session began.
+  session.ended: Review the ended session.
+  session.active: Record that the session is active.`, `stages:
+  session.turn-ended: Review the finished turn.
+  session.started: Record that the session began.`, 1)
+	preview := selectManagedProfile(t, fixture.owner, []byte(source))
+	if _, err := fixture.host.putBinding(managedBindingCommand{BindingID: "agent-self", ProfileID: preview.ProfileID,
+		ProfileSourceDigest: preview.SourceDigest, ProfileBundleDigest: preview.BundleDigest, ProjectRoot: link,
+		RouteID: testRouteID(fixture.host, "managed-fixture", "", nil), GrantedAuthority: []string{}, WatchNatural: true,
+		ExpectedStateToken: store.ManagedBindingAbsentToken("agent-self")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.tasks.Create(ChatRequest{Runtime: "managed-fixture", Prompt: "work", SessionID: "native-source", Cwd: repo}, "self-source"); err != nil {
+		t.Fatal(err)
+	}
+	runs := waitForRuns(t, fixture.host, func(runs []store.ManagedRun) bool {
+		for _, run := range runs {
+			if run.BindingID == "agent-self" && run.State == "completed" && run.ChildTaskID != "" {
+				return true
+			}
+		}
+		return false
+	})
+	childID := ""
+	for _, run := range runs {
+		if run.BindingID == "agent-self" && run.ChildTaskID != "" {
+			childID = run.ChildTaskID
+		}
+	}
+	child, found, err := fixture.tasks.Task(childID)
+	if err != nil || !found || child.NativeSessionID != "helper-own-session" || !sameFolderSpelledDifferently(child.WorkingDirectory, repo) {
+		t.Fatalf("helper child %q: found=%v err=%v native=%q cwd=%q", childID, found, err, child.NativeSessionID, child.WorkingDirectory)
+	}
+	if err := govTx(t, fixture.host.ix, func(tx *store.GovTx) error {
+		if err := tx.EnsureSessionRoot("managed-fixture", "helper-own-session", "", repo); err != nil {
+			return err
+		}
+		_, err := tx.AppendSessionActivity(store.SessionActivityObservation{
+			ObservationID: "obs_helper_own_session", Runtime: "managed-fixture", SessionID: "helper-own-session",
+			State: "open", ObservedAt: 400, ValidUntil: 460, EvidenceClass: "positive-open", EntryKind: "first-action",
+			EvidenceDigest: "sha256-v1:test", CollectorID: "daemon-observation-v1", ReceivedAt: 400,
+			DeliveryAttempts: 1, DeliveryMode: "direct"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.host.emitNaturalSignalsOnce()
+	after, err := fixture.host.ix.ManagedRuns(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range after {
+		if run.BindingID == "agent-self" && run.Detail["signal"] == "session.started" {
+			t.Fatalf("the helper's own session fired its place on the natural lane: %+v", run)
+		}
+	}
+}
+
+// sameFolderSpelledDifferently reports that two spellings name one folder,
+// the precondition the self-trigger test depends on.
+func sameFolderSpelledDifferently(a, b string) bool {
+	return a != b && projectRootKey(a) == projectRootKey(b)
 }

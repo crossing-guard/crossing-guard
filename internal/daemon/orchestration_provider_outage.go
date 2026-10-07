@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"crossing-guard/internal/orchestration"
+	"crossing-guard/internal/orchestration/profilefs"
 	"crossing-guard/store"
 )
 
@@ -66,15 +67,37 @@ type providerOutageLedger struct {
 	RouteIndex     int                  `json:"route_index"` // 0 = the binding's primary route
 	NextEligibleAt int64                `json:"next_eligible_at"`
 	Attempts       []providerOutageTurn `json:"attempts"`
+	// SkippedRoutes names the fallback chain entries the reroute passed over because
+	// their model route can no longer be read (team rest-of-release plan §5.3): a
+	// missing entry is skipped and named, never replaced by a default model.
+	SkippedRoutes []providerSkippedRoute `json:"skipped_routes,omitempty"`
+}
+
+// providerSkippedRoute is one chain entry the reroute skipped, and why.
+type providerSkippedRoute struct {
+	RouteIndex int    `json:"route_index"`
+	RouteID    string `json:"route_id"`
+	Reason     string `json:"reason"`
+}
+
+// noteSkipped records a skipped chain entry once.
+func (ledger *providerOutageLedger) noteSkipped(index int, routeID, reason string) {
+	for _, skipped := range ledger.SkippedRoutes {
+		if skipped.RouteIndex == index && skipped.RouteID == routeID {
+			return
+		}
+	}
+	ledger.SkippedRoutes = append(ledger.SkippedRoutes, providerSkippedRoute{RouteIndex: index, RouteID: routeID, Reason: reason})
 }
 
 type providerOutageTurn struct {
-	Attempt    int    `json:"attempt"`
-	RouteIndex int    `json:"route_index"`
-	Runtime    string `json:"runtime"`
-	Model      string `json:"model,omitempty"`
-	TaskID     string `json:"task_id"`
-	Class      string `json:"class,omitempty"`
+	ThinkingEffort *store.ThinkingEffort `json:"thinking_effort,omitempty"`
+	Attempt        int                   `json:"attempt"`
+	RouteIndex     int                   `json:"route_index"`
+	Runtime        string                `json:"runtime"`
+	Model          string                `json:"model,omitempty"`
+	TaskID         string                `json:"task_id"`
+	Class          string                `json:"class,omitempty"`
 }
 
 func providerOutageLedgerFrom(detail map[string]any) providerOutageLedger {
@@ -103,7 +126,7 @@ func (ledger providerOutageLedger) into(detail map[string]any) map[string]any {
 // bindingRoutes is the full ordered route list: the binding's primary route
 // followed by the user-authored fallback chain. Index 0 always exists.
 func bindingRoutes(binding store.ManagedBinding) []store.ManagedRoute {
-	routes := []store.ManagedRoute{{Runtime: binding.Runtime, Model: binding.Model, Mode: binding.Mode}}
+	routes := []store.ManagedRoute{{RouteID: binding.RouteID, Runtime: binding.Runtime, Model: binding.Model, ThinkingEffort: binding.ThinkingEffort, Mode: binding.Mode}}
 	return append(routes, binding.Routes...)
 }
 
@@ -154,8 +177,16 @@ func (host *orchestrationManagedHost) handleProviderFailure(run store.ManagedRun
 	if len(ledger.Attempts) == 0 {
 		// Seed the original launch as attempt 1 so the ledger is the one
 		// complete history of every task this run ever spawned.
-		ledger.Attempts = []providerOutageTurn{{Attempt: 1, RouteIndex: 0,
-			Runtime: binding.Runtime, Model: binding.Model, TaskID: run.ChildTaskID}}
+		original := providerOutageTurn{Attempt: 1, RouteIndex: 0,
+			Runtime: binding.Runtime, Model: binding.Model, TaskID: run.ChildTaskID}
+		if task, found, err := host.tasks.Task(run.ChildTaskID); err == nil && found {
+			original.Runtime = task.Runtime
+			if task.RequestedSettings != nil {
+				original.Model = task.RequestedSettings.Model
+				original.ThinkingEffort = &task.RequestedSettings.Effort
+			}
+		}
+		ledger.Attempts = []providerOutageTurn{original}
 	}
 	ledger.Attempts[len(ledger.Attempts)-1].Class = class
 	ledger.Class, ledger.ProviderDetail = class, truncate(providerDetail, 500)
@@ -292,7 +323,62 @@ func (host *orchestrationManagedHost) relaunchParkedRun(run store.ManagedRun, le
 	if ledger.RouteIndex >= len(routes) {
 		ledger.RouteIndex = len(routes) - 1 // chain shrank while parked: clamp, honestly re-probing the last route
 	}
+	// Destination (managed-turn-profile-limits plan §4.1 point 3), judged by the
+	// run's PINNED revision: a forbidden route is passed over for the next
+	// permitted one, and with none left the run ends — its own branch, never
+	// the R8 skip, which can leave a run parked forever (R2-12). A revision
+	// that cannot be read fails in composeRelaunchPrompt below, as before.
+	compiled := profilefs.CompiledProfile{}
+	revision, revisionErr := host.profiles.GetRevision(run.ProfileID, run.ProfileSourceDigest, run.ProfileBundleDigest)
+	revisionRead := revisionErr == nil && revision.Normalized != nil
+	if revisionRead {
+		compiled = *revision.Normalized
+	}
+	// Route (team rest-of-release plan §5.3): a primary route that cannot be read
+	// refuses the run; a fallback entry that cannot be read is skipped and named in
+	// the outage record. Nothing falls back to a runtime's default model.
+	permitted, destinationProblem := -1, ""
+	for index := ledger.RouteIndex; index < len(routes); index++ {
+		if host.chainRouteMissing(routes[index]) {
+			if index == 0 {
+				return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, ledger.into(run.Detail),
+					routeRefusalMissing, "route_missing: the model route of this place can no longer be read; choose another model route for it.", now)
+			}
+			ledger.noteSkipped(index, routes[index].RouteID, routeRefusalMissing)
+			continue
+		}
+		if revisionRead {
+			if problem := managedRouteDestinationProblem(compiled, routes[index]); problem != "" {
+				if destinationProblem == "" {
+					destinationProblem = problem
+				}
+				continue
+			}
+		}
+		permitted = index
+		break
+	}
+	if permitted < 0 {
+		if destinationProblem != "" {
+			return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, ledger.into(run.Detail),
+				"destination_locality", destinationProblem, now)
+		}
+		return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, ledger.into(run.Detail),
+			routeRefusalMissing, "route_missing: no remaining fallback of this place has a model route that can be read.", now)
+	}
+	ledger.RouteIndex = permitted
 	route := routes[ledger.RouteIndex]
+	// The same refusals as the first attempt (runStartRefusal): a place held by its
+	// adoption since the run parked, or a route the rulebook no longer admits, starts
+	// no further attempt. The place stays on; the run ends typed.
+	refusal, observed := host.attemptStartRefusal(binding, compiled, route.RouteID, route.Mode)
+	if refusal != nil {
+		return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, ledger.into(run.Detail),
+			refusal.Code, refusal.Message, now)
+	}
+	if len(observed) > 0 {
+		run.Detail["route_rules_observed"] = anySlice(observed)
+	}
 	prompt, labels, signal, coverage, err := host.composeRelaunchPrompt(run, binding, route.Runtime)
 	if coverage != nil {
 		run.Detail["context_coverage"] = coverage
@@ -307,13 +393,24 @@ func (host *orchestrationManagedHost) relaunchParkedRun(run store.ManagedRun, le
 	taskIdempotency := managedID("oridem_", run.IdempotencyKey, fmt.Sprint(attempt), route.Runtime, route.Model)
 	host.launchMu.Lock()
 	defer host.launchMu.Unlock()
-	child, _, err := host.tasks.Create(host.helperTurnRequest(run.GroupID, binding.Runtime, route.Runtime, route.Model, route.Mode, binding.ProjectRoot, prompt), taskIdempotency)
+	request := host.helperTurnRequest(run.GroupID, binding.Runtime, route.Runtime, route.Model, route.Mode, binding.ProjectRoot, prompt, route.ThinkingEffort)
+	if ledger.RouteIndex > 0 {
+		request.effortSource = "fallback"
+	}
+	child, err := host.createAgentTask(compiled, request, taskIdempotency)
 	if err != nil {
+		var effortFailure *EffortError
+		if errors.As(err, &effortFailure) {
+			ledger.Attempts = append(ledger.Attempts, providerOutageTurn{Attempt: attempt,
+				RouteIndex: ledger.RouteIndex, Runtime: route.Runtime, Model: route.Model,
+				ThinkingEffort: route.ThinkingEffort, Class: "configuration"})
+			return host.ix.CompleteManagedRun(run.RunID, "failed", "", "", nil, ledger.into(run.Detail), "configuration", "Review this route's thinking effort: "+effortFailure.Message, now)
+		}
 		// A non-provider launch failure on a chain entry skips it (R8) —
 		// recorded, then the next cadence pass tries the next route or the
 		// exhausted-chain slow probe.
 		ledger.Attempts = append(ledger.Attempts, providerOutageTurn{Attempt: attempt,
-			RouteIndex: ledger.RouteIndex, Runtime: route.Runtime, Model: route.Model,
+			RouteIndex: ledger.RouteIndex, Runtime: route.Runtime, Model: route.Model, ThinkingEffort: route.ThinkingEffort,
 			TaskID: "", Class: "launch_failed"})
 		if ledger.RouteIndex+1 < len(routes) {
 			ledger.RouteIndex++
@@ -323,8 +420,11 @@ func (host *orchestrationManagedHost) relaunchParkedRun(run store.ManagedRun, le
 			providerRecoveryText(ledger.Class, ledger.ProviderDetail), now)
 	}
 	ledger.Attempts = append(ledger.Attempts, providerOutageTurn{Attempt: attempt,
-		RouteIndex: ledger.RouteIndex, Runtime: route.Runtime, Model: route.Model, TaskID: child.ID})
+		RouteIndex: ledger.RouteIndex, Runtime: route.Runtime, Model: route.Model, ThinkingEffort: route.ThinkingEffort, TaskID: child.ID})
 	detail := ledger.into(run.Detail)
+	// A timeout marker names the previous attempt's child; the new attempt
+	// starts without one (plan §4.2, RT-1).
+	delete(detail, "timeout")
 	detail["signal"], detail["labels"] = signal, anySlice(labels)
 	detail["context_coverage"] = coverage
 	// Attribution (plan invariant 2): a run executing off its primary route
@@ -537,15 +637,28 @@ func (host *orchestrationManagedHost) planProviderReroute(runtimeName, model str
 		switch {
 		case run.Role == "helper" && policy.Freshness > 0 && age > policy.Freshness:
 			decision.Action = "stale_draft"
-		case index+1 < len(routes):
+		case host.nextReadableRoute(routes, index+1) >= 0:
+			// The target is a chain entry, referenced by route (plan §5.3); an entry
+			// whose route cannot be read is passed over, and the relaunch names it.
 			decision.Action = "reroute"
-			decision.Target = routes[index+1]
+			decision.Target = routes[host.nextReadableRoute(routes, index+1)]
 		default:
 			decision.Action = "no_route"
 		}
 		decisions = append(decisions, decision)
 	}
 	return decisions, nil
+}
+
+// nextReadableRoute is the first chain index at or after from whose model route can be
+// read, or -1.
+func (host *orchestrationManagedHost) nextReadableRoute(routes []store.ManagedRoute, from int) int {
+	for index := from; index < len(routes); index++ {
+		if !host.chainRouteMissing(routes[index]) {
+			return index
+		}
+	}
+	return -1
 }
 
 func rerouteDigest(decisions []rerouteDecision) string {

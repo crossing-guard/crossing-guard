@@ -55,6 +55,20 @@ func TestSessionTurnIngestStoresRowAndPublishes(t *testing.T) {
 	}
 }
 
+// The hook fits native_source to this same bound (guardcli
+// TestNotificationSubtypeNeverCostsTheTurn), so the two cannot drift apart.
+func TestSessionTurnNativeSourceBound(t *testing.T) {
+	envelope := testTurnEnvelope("input.requested")
+	envelope.NativeSource = strings.Repeat("n", observation.MaxNativeSourceBytes)
+	if err := validateSessionTurnEnvelope(envelope); err != nil {
+		t.Fatalf("native_source at the bound must be accepted: %v", err)
+	}
+	envelope.NativeSource += "n"
+	if err := validateSessionTurnEnvelope(envelope); err == nil {
+		t.Fatal("native_source past the bound must be rejected")
+	}
+}
+
 func TestSessionTurnRejectsForeignVocabulary(t *testing.T) {
 	// The kind on the wire is OUR word. A provider's event name is not a kind.
 	for _, bad := range []string{"Stop", "session.idle", "", "turn.finished"} {

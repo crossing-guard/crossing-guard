@@ -6,7 +6,9 @@ async function checkedFetch(operation, path, options = {}) {
   const response = await fetch(ROOT + path, options);
   if (response.ok) return response;
   const detail = (await response.text()).trim();
-  throw new Error(operation + ' failed: ' + (detail || ('HTTP ' + response.status)));
+  const error = new Error(operation + ' failed: ' + (detail || ('HTTP ' + response.status)));
+  error.status = response.status;
+  throw error;
 }
 
 export async function fetchSessionActivitySnapshot(signal) {
