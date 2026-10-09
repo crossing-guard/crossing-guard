@@ -1,9 +1,12 @@
-# Source refresh — October 5, 2026
+# Source refresh — October 7, 2026
 
 This repository now holds a filtered export of upstream revision
 `5607e50889b7408560b264a98070c6f3eea907a8`. It replaces the September 25 snapshot
 (`a65d4055`, published as `c26a2cc8`). It is an experimental public source snapshot,
 not a supported installed alpha or binary download.
+
+Corrected October 9: an earlier version of this page listed provider-outage handling
+and saved session views as new. Both were already in the September snapshot.
 
 ## What changed in how this tree is made
 
@@ -21,9 +24,9 @@ samples before the export.
   linked device sends records to the team server its user names. The server is a
   separate project and is not in this repository. An unlinked device sends nothing to
   a team server.
-- Usage history from local session files, session views and boards, model routes,
-  provider-outage handling for managed agents, an Antigravity transcript reader and
-  Antigravity CLI chat through the shared provider contract.
+- Per-call usage history from local session files, session boards, model routes, an
+  Antigravity transcript reader and Antigravity CLI chat through the shared provider
+  contract.
 - The safety-starter rulebook has six rules (adds `team-link-change`).
 - The agent executable resolver (`ResolveRuntimeBinary`) has one home, in
   `internal/guardcli`. Other lookups of unrelated tools are unchanged.
